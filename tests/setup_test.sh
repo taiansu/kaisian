@@ -3372,90 +3372,55 @@ single_fetch_and_trace_assertions_case() {
     chk_single=$(mktemp -d "$ROOT/chk-single.XXXXXX")
     initialize_repository "$chk_single" || exit 1
 
-    # Every trace boundary is an ENV record immediately followed by one decoded command.
     test -s "$trace_log" || exit 1
-    expected_env=$(printf 'ENV: HOME=%q PATH=%q LC_ALL=%q GIT_CONFIG_NOSYSTEM=%q GIT_CONFIG_GLOBAL=%q GIT_ATTR_NOSYSTEM=%q GIT_TERMINAL_PROMPT=%q GIT_ASKPASS=%q GIT_NO_REPLACE_OBJECTS=%q GIT_ALLOW_PROTOCOL=%q' \
-      "$SANDBOX/git-home" "/usr/bin:/bin:/usr/sbin:/sbin" "C" "1" "/dev/null" "1" "0" "/usr/bin/false" "1" "https")
-    expected_index=$(printf '%q' "$SANDBOX/verify-index-$$")
-    expected_ops=(ls-remote init config config fetch rev-parse ls-tree cat-file rev-parse rev-parse rev-parse config checkout cat-file rev-parse rev-parse rev-parse config diff-index read-tree update-index diff-index ls-tree hash-object hash-object hash-object hash-object status)
-    op_index=0
-    fetch_seen=0
-    ls_remote_seen=0
-    trace_env=""
+    base_env=$(printf 'ENV: HOME=%q PATH=%q LC_ALL=%q GIT_CONFIG_NOSYSTEM=%q GIT_CONFIG_GLOBAL=%q GIT_ATTR_NOSYSTEM=%q GIT_TERMINAL_PROMPT=%q GIT_ASKPASS=%q GIT_NO_REPLACE_OBJECTS=%q GIT_ALLOW_PROTOCOL=%q' "$SANDBOX/git-home" "/usr/bin:/bin:/usr/sbin:/sbin" "C" "1" "/dev/null" "1" "0" "/usr/bin/false" "1" "https")
+    index_env="$base_env GIT_INDEX_FILE=$(printf '%q' "$SANDBOX/verify-index-$$")"
+    expected_cmd[0]="git ls-remote $(printf '%q' "$CANONICAL_REPO")"
+    expected_cmd[1]="git init $(printf '%q' "$chk_single")"
+    expected_cmd[2]="git -C $(printf '%q' "$chk_single") config --local remote.origin.url $(printf '%q' "$CANONICAL_REPO")"
+    expected_cmd[3]="git -C $(printf '%q' "$chk_single") config --local remote.origin.fetch $(printf '%q' '+refs/heads/*:refs/remotes/origin/*')"
+    expected_cmd[4]="git -C $(printf '%q' "$chk_single") fetch --no-tags --depth=1 $(printf '%q' "$CANONICAL_REPO") $(printf '%q' "$RESOLVED_FETCH_REF")"
+    expected_cmd[5]="git -C $(printf '%q' "$chk_single") rev-parse --verify $(printf '%q' 'FETCH_HEAD^{commit}')"
+    expected_cmd[6]="git -C $(printf '%q' "$chk_single") ls-tree -r $(printf '%q' "$RESOLVED_COMMIT")"
+    expected_cmd[7]="git -C $(printf '%q' "$chk_single") cat-file -e $(printf '%q' "$RESOLVED_COMMIT:.gitmodules")"
+    expected_cmd[8]="git -C $(printf '%q' "$chk_single") rev-parse --is-bare-repository"
+    expected_cmd[9]="git -C $(printf '%q' "$chk_single") rev-parse --absolute-git-dir"
+    expected_cmd[10]="git -C $(printf '%q' "$chk_single") rev-parse --git-common-dir"
+    expected_cmd[11]="git -C $(printf '%q' "$chk_single") config --local --list"
+    expected_cmd[12]="git -C $(printf '%q' "$chk_single") checkout --detach $(printf '%q' "$RESOLVED_COMMIT") --"
+    expected_cmd[13]="git -C $(printf '%q' "$chk_single") cat-file -e $(printf '%q' 'HEAD:.gitmodules')"
+    expected_cmd[14]="${expected_cmd[8]}"
+    expected_cmd[15]="${expected_cmd[9]}"
+    expected_cmd[16]="${expected_cmd[10]}"
+    expected_cmd[17]="${expected_cmd[11]}"
+    expected_cmd[18]="git -C $(printf '%q' "$chk_single") diff-index --quiet HEAD --"
+    expected_cmd[19]="git -C $(printf '%q' "$chk_single") read-tree HEAD"
+    expected_cmd[20]="git -C $(printf '%q' "$chk_single") update-index -q --refresh"
+    expected_cmd[21]="${expected_cmd[18]}"
+    expected_cmd[22]="git -C $(printf '%q' "$chk_single") ls-tree -r HEAD"
+    expected_cmd[23]="git -C $(printf '%q' "$chk_single") hash-object $(printf '%q' "$chk_single/.kaisian.json")"
+    expected_cmd[24]="git -C $(printf '%q' "$chk_single") hash-object $(printf '%q' "$chk_single/git/dot-gitconfig")"
+    expected_cmd[25]="git -C $(printf '%q' "$chk_single") hash-object $(printf '%q' "$chk_single/mise/dot-config")"
+    expected_cmd[26]="git -C $(printf '%q' "$chk_single") hash-object $(printf '%q' "$chk_single/shell/dot-zshrc")"
+    expected_cmd[27]="git -C $(printf '%q' "$chk_single") status --porcelain=v1 --untracked-files=all --ignored=matching --ignore-submodules=none"
+    pair_index=0
+    actual_env=""
+    # Four tracked-file probes above are preceded by one ls-tree; this fixture has no extra payload.
     while IFS= read -r trace_line; do
-      if test -z "$trace_env"; then
-        case "$trace_line" in
-          "$expected_env") trace_env="$trace_line" ;;
-          "$expected_env GIT_INDEX_FILE=$expected_index") trace_env="$trace_line" ;;
-          *) exit 1 ;;
-        esac
-        continue
-      fi
+      test -n "$trace_line" || exit 1
       case "$trace_line" in
-        git\ *) ;;
+        ENV:*) actual_env="$trace_line" ;;
+        git\ *)
+          test "$actual_env" = "$base_env" || test "$actual_env" = "$index_env" || exit 1
+          test "$trace_line" = "${expected_cmd[$pair_index]}" || exit 1
+          case "$pair_index" in 19|20|21) test "$actual_env" = "$index_env" ;; *) test "$actual_env" = "$base_env" ;; esac
+          pair_index=$((pair_index + 1)); actual_env=""
+          ;;
         *) exit 1 ;;
       esac
-      trace_cmd=${trace_line#git }
-      trace_argv=()
-      eval "trace_argv=( $trace_cmd )"
-      if test "${trace_argv[0]-}" = "-C"; then
-        trace_op=${trace_argv[2]-}
-      else
-        trace_op=${trace_argv[0]-}
-      fi
-      test "${expected_ops[$op_index]-}" = "$trace_op" || exit 1
-      op_index=$((op_index + 1))
-      index_expected=0
-      case "$trace_env" in
-        "$expected_env") ;;
-        *) index_expected=1 ;;
-      esac
-      if test "$index_expected" -eq 1; then
-        case " ${trace_argv[*]} " in
-          *" read-tree "*|*" update-index "*|*" diff-index "*) ;;
-          *) exit 1 ;;
-        esac
-      fi
-      if test "${trace_argv[0]-}" = "-C"; then
-        test "${trace_argv[1]-}" = "$chk_single" || exit 1
-        test -n "${trace_argv[2]-}" || exit 1
-        case "${trace_argv[2]}" in
-          init|config|fetch|rev-parse|ls-tree|cat-file|checkout|read-tree|update-index|diff-index|hash-object|status) ;;
-          *) exit 1 ;;
-        esac
-        case "${trace_argv[2]}" in
-          fetch)
-            test "${#trace_argv[@]}" -eq 7 || exit 1
-            test "${trace_argv[3]}" = "--no-tags" || exit 1
-            test "${trace_argv[4]}" = "--depth=1" || exit 1
-            test "${trace_argv[5]}" = "$CANONICAL_REPO" || exit 1
-            test "${trace_argv[6]}" = "$RESOLVED_FETCH_REF" || exit 1
-            fetch_seen=$((fetch_seen + 1))
-            ;;
-        esac
-      else
-        case "${trace_argv[0]-}" in
-          ls-remote)
-            test "${trace_argv[1]-}" = "$CANONICAL_REPO" || exit 1
-            test "${#trace_argv[@]}" -eq 2 || exit 1
-            ls_remote_seen=$((ls_remote_seen + 1))
-            ;;
-          init)
-            test "${trace_argv[1]-}" = "$chk_single" || exit 1
-            test "${#trace_argv[@]}" -eq 2 || exit 1
-            ;;
-          config)
-            test "${#trace_argv[@]}" -ge 2 || exit 1
-            ;;
-          *) exit 1 ;;
-        esac
-      fi
-      trace_env=""
     done < "$trace_log"
-    test -z "$trace_env" || exit 1
-    test "$op_index" -eq "${#expected_ops[@]}" || exit 1
-    test "$fetch_seen" -eq 1 || exit 1
-    test "$ls_remote_seen" -eq 1 || exit 1
+    test "$pair_index" -eq 28 || exit 1
+    test -z "$actual_env" || exit 1
     # Assert no refs/heads or refs/remotes created
     test -z "$(git -C "$chk_single" for-each-ref refs/heads/ refs/remotes/ 2>/dev/null)" || exit 1
 
