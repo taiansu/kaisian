@@ -3765,7 +3765,7 @@ task5_mapping_fixture_case() {
   GIT_CONFIG_NOSYSTEM=1 git -C "$t/checkout" -c commit.gpgSign=false config user.name test || return 1
   GIT_CONFIG_NOSYSTEM=1 git -C "$t/checkout" add . || return 1
   GIT_CONFIG_NOSYSTEM=1 git -C "$t/checkout" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm fixture || return 1
-  printf '%s\n' shell > "$t/sandbox/selected.txt" || return 1
+  printf 'shell\tShell\tShell\n' > "$t/sandbox/groups.tsv" || return 1
   (
     export KAISIAN_TESTING=1
     . "$SCRIPT"

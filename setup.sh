@@ -34,6 +34,7 @@ STOW_IGNORE_FILE=''
 BACKUP_ROOT=''
 
 has_control_char() {
+  LC_ALL=C
   case "${1-}" in
     *[[:cntrl:]]*) return 0 ;;
     *) return 1 ;;
@@ -54,15 +55,15 @@ append_directory_rows() {
     test -n "$component" || continue
     if test -n "$prefix"; then prefix="$prefix/$component"; else prefix="$component"; fi
     target=$(normalized_relpath "$prefix") || return 1
-    key=$(ascii_fold "$target")
-    if ! /usr/bin/grep -F -x -q "$prefix" "$dir_seen" 2>/dev/null; then
+    if ! /usr/bin/grep -F -x -q -e "$prefix" "$dir_seen" 2>/dev/null; then
+      key=$(ascii_fold "$target")
       printf '%s\n' "$prefix" >> "$dir_seen" || return 1
       printf 'dir\t%s\t%s\t%s\t%s\n' "$CURRENT_PACKAGE" "$prefix" "$target" "$key" >> "$MAPPING_FILE" || return 1
     fi
   done
 }
-
 ascii_fold() {
+  LC_ALL=C
   printf '%s' "$1" | /usr/bin/tr '[:upper:]' '[:lower:]'
 }
 
@@ -100,31 +101,33 @@ build_package_map() {
   STOW_IGNORE_FILE="$SANDBOX/stow-ignore.txt"
   : > "$MAPPING_FILE" || return 1
   : > "$STOW_IGNORE_FILE" || return 1
-  test -f "$SANDBOX/selected.txt" || return 1
+  test -f "$SANDBOX/groups.tsv" || return 1
+  dir_seen="$SANDBOX/package-dirs-$$"
+  : > "$dir_seen" || return 1
 
-  while IFS= read -r package || test -n "$package"; do
+  while IFS='	' read -r package desc_en desc_zh || test -n "$package"; do
     test -n "$package" || continue
     is_pure_ascii "$package" || return 1
     case "$package" in */*|.|..) return 1 ;; esac
     pkg="$CHECKOUT_DIR/$package"
     test -d "$pkg" && test ! -L "$pkg" || return 1
-    dir_seen="$SANDBOX/package-dirs-$$"
-    : > "$dir_seen" || return 1
     CURRENT_PACKAGE=$package
 
-    # A package may not contain another repository, including a nested
-    # repository hidden below an otherwise empty directory.
-    nested_git="$SANDBOX/nested-git-$$"
-    : > "$nested_git" || return 1
-    /usr/bin/find -P "$pkg" -mindepth 1 -name .git -print0 > "$nested_git" || {
-      /bin/rm -f "$nested_git"
-      return 1
-    }
-    test ! -s "$nested_git" || {
-      /bin/rm -f "$nested_git"
-      return 1
-    }
-    /bin/rm -f "$nested_git"
+    # Inspect every filesystem node, not only Git-index entries.
+    tree_nodes="$SANDBOX/package-tree-$$"
+    /usr/bin/find -P "$pkg" -print0 > "$tree_nodes" || { /bin/rm -f "$tree_nodes"; return 1; }
+    while IFS= read -r -d '' node; do
+      test "$node" = "$pkg" && continue
+      relnode=${node#"$pkg"/}
+      is_pure_ascii "$relnode" || { /bin/rm -f "$tree_nodes"; return 1; }
+      test ! -L "$node" || { /bin/rm -f "$tree_nodes"; return 1; }
+      case "$relnode" in */.git|.git/*|.git) /bin/rm -f "$tree_nodes"; return 1 ;; esac
+      if test -d "$node"; then
+        child=$(/usr/bin/find -P "$node" -mindepth 1 -maxdepth 1 -print -quit)
+        test -n "$child" || { /bin/rm -f "$tree_nodes"; return 1; }
+      fi
+    done < "$tree_nodes"
+    /bin/rm -f "$tree_nodes"
 
     # Git's NUL-delimited status is the authoritative check for untracked,
     # ignored, modified, deleted, and renamed payload entries.
@@ -199,9 +202,9 @@ build_package_map() {
       }
       package_count=$((package_count + 1))
     done < "$entries"
-    /bin/rm -f "$entries" "$dir_seen"
     test "$package_count" -gt 0 || return 1
-  done < "$SANDBOX/selected.txt"
+  done < "$SANDBOX/groups.tsv"
+  /bin/rm -f "$dir_seen"
   return 0
 }
 
@@ -226,8 +229,9 @@ validate_typed_tree() {
     test "$folded" = "$expected_folded" || { /bin/rm -f "$rows"; return 1; }
     while IFS='	' read -r oldtyp oldtarget oldfolded || test -n "$oldtarget"; do
       test -n "$oldtarget" || continue
-      test "$folded" != "$oldfolded" || { /bin/rm -f "$rows"; return 1; }
-      if test "$typ" = file && test "$oldtyp" = file; then
+      if test "$folded" = "$oldfolded"; then
+        test "$typ" = dir && test "$oldtyp" = dir || { /bin/rm -f "$rows"; return 1; }
+      elif test "$typ" = file && test "$oldtyp" = file; then
         case "$folded/" in "$oldfolded/"*) /bin/rm -f "$rows"; return 1 ;; esac
         case "$oldfolded/" in "$folded/"*) /bin/rm -f "$rows"; return 1 ;; esac
       fi
@@ -283,12 +287,14 @@ preflight_targets() {
     test -n "$guard" || continue
     guard=$(canonicalize_path "$guard") || return 1
     while IFS='	' read -r typ pkg src target folded || test -n "$typ"; do
+      /usr/bin/grep -F -x -q -e "$pkg" "$SANDBOX/selected.txt" || continue
       dst="$PHYSICAL_HOME/$target"
       case "$dst/" in "$guard/"*) return 1 ;; esac
       case "$guard/" in "$dst/"*) return 1 ;; esac
     done < "$MAPPING_FILE"
   done
   while IFS='	' read -r typ pkg src target folded || test -n "$typ"; do
+    /usr/bin/grep -F -x -q -e "$pkg" "$SANDBOX/selected.txt" || continue
     test "$typ" = file || continue
     source="$CHECKOUT_DIR/$pkg/$src"
     dst="$PHYSICAL_HOME/$target"
@@ -1116,6 +1122,7 @@ require_prerequisites() {
 }
 
 is_pure_ascii() {
+  LC_ALL=C
   test -n "${1-}" || return 1
   case "$1" in
     *[!a-zA-Z0-9._:/-]*) return 1 ;;
