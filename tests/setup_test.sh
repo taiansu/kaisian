@@ -3046,6 +3046,7 @@ submodule_matrix_and_nested_levels_case() {
       printf 'Expected duplicate submodule path to fail\n' >&2
       exit 1
     fi
+    # 2f. File submodule URL
     repo_file=$(make_remote_repo)
     (
       cd "$repo_file" || exit 1
@@ -3113,7 +3114,7 @@ submodule_matrix_and_nested_levels_case() {
     test -f "$chk_sentinel/.vendor/helper/sentinel.txt" || exit 1
     test "$(/bin/cat "$chk_sentinel/.vendor/helper/sentinel.txt")" = "sentinel_data" || exit 1
 
-    # 2j. Wrong existing child submodule commit
+    # 2j. Wrong existing child submodule commit rejected without mutation
     chk_wrong_child=$(mktemp -d "$ROOT/chk-wrongchild.XXXXXX")
     initialize_repository "$chk_wrong_child" || exit 1
     (
@@ -3122,10 +3123,82 @@ submodule_matrix_and_nested_levels_case() {
       git add wrong.txt
       git -c user.email="t@e.com" -c user.name="T" commit -q -m "wrong commit"
     )
+    tampered_child_sha=$(git -C "$chk_wrong_child/.vendor/helper" rev-parse HEAD)
     if ( update_repository "$chk_wrong_child" ) >/dev/null 2>&1; then
       printf 'Expected wrong child commit to fail update\n' >&2
       exit 1
     fi
+    # Assert child HEAD and files are unchanged
+    test "$(git -C "$chk_wrong_child/.vendor/helper" rev-parse HEAD)" = "$tampered_child_sha" || exit 1
+    test -f "$chk_wrong_child/.vendor/helper/wrong.txt" || exit 1
+
+    # 2k. Gitlink in tree without .gitmodules
+    repo_nogm=$(make_remote_repo)
+    (
+      cd "$repo_nogm" || exit 1
+      git update-index --add --cacheinfo 160000,"$subm_lvl2_sha",.vendor/helper
+      git -c user.email="t@e.com" -c user.name="T" commit -q -m "gitlink without .gitmodules"
+    )
+    printf 'https://github.com/taiansu/nogm=%s\n' "$repo_nogm" >> "$map_file"
+    REPOSITORY="https://github.com/taiansu/nogm"
+    resolve_remote_ref
+    chk_nogm=$(mktemp -d "$ROOT/chk-nogm.XXXXXX")
+    if ( initialize_repository "$chk_nogm" ) >/dev/null 2>&1; then
+      printf 'Expected gitlink without .gitmodules to fail\n' >&2
+      exit 1
+    fi
+
+    # 2l. Orphan definition in .gitmodules without gitlink in tree
+    repo_orphan=$(make_remote_repo)
+    (
+      cd "$repo_orphan" || exit 1
+      git config -f .gitmodules submodule.orphan.path ".vendor/orphan"
+      git config -f .gitmodules submodule.orphan.url "https://github.com/taiansu/nested"
+      git add .gitmodules
+      git -c user.email="t@e.com" -c user.name="T" commit -q -m "orphan .gitmodules definition"
+    )
+    printf 'https://github.com/taiansu/orphan=%s\n' "$repo_orphan" >> "$map_file"
+    REPOSITORY="https://github.com/taiansu/orphan"
+    resolve_remote_ref
+    chk_orphan=$(mktemp -d "$ROOT/chk-orphan.XXXXXX")
+    if ( initialize_repository "$chk_orphan" ) >/dev/null 2>&1; then
+      printf 'Expected orphan .gitmodules definition without gitlink to fail\n' >&2
+      exit 1
+    fi
+
+    # 2m. Bad submodule path grammar cases
+    bad_paths=(
+      ".vendor/my sub"
+      $'.vendor/my\tsub'
+      $'.vendor/my\nsub'
+      '.vendor\helper'
+      '.vendor/helper*'
+      '.vendor/helper?'
+      '.vendor/[a]'
+      '.vendor/./helper'
+      '.vendor/helper/'
+      '/.vendor/helper'
+      '.vendor//helper'
+      '.vendor/hel:per'
+    )
+    for bp in "${bad_paths[@]}"; do
+      repo_bp=$(make_remote_repo)
+      (
+        cd "$repo_bp" || exit 1
+        git config -f .gitmodules submodule.badp.path "$bp"
+        git config -f .gitmodules submodule.badp.url "https://github.com/taiansu/nested"
+        git add .gitmodules
+        git -c user.email="t@e.com" -c user.name="T" commit -q -m "bad path"
+      )
+      printf 'https://github.com/taiansu/badp=%s\n' "$repo_bp" >> "$map_file"
+      REPOSITORY="https://github.com/taiansu/badp"
+      resolve_remote_ref
+      chk_badp=$(mktemp -d "$ROOT/chk-badp.XXXXXX")
+      if ( initialize_repository "$chk_badp" ) >/dev/null 2>&1; then
+        printf 'Expected bad submodule path grammar to fail: %q\n' "$bp" >&2
+        exit 1
+      fi
+    done
 
     cleanup
     exit 0
@@ -3373,19 +3446,56 @@ config_lock_failure_suppresses_stderr_case() {
 }
 
 path_poison_ambient_utility_case() {
-  test_home=$(make_home)
-  poison_bin=$(mktemp -d "$ROOT/poison.XXXXXX")
-  for tool in stat uname id find readlink awk cp rm dirname basename which; do
-    cat << 'EOF' > "$poison_bin/$tool"
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+
+    test_home=$(make_home)
+    fake_tools=$(make_fake_bin)
+    make_behavioral_mock_stow "$fake_tools"
+    cat << 'EOF' > "$fake_tools/fzf"
+#!/bin/bash
+exit 0
+EOF
+    chmod +x "$fake_tools/fzf"
+
+    remote_repo=$(make_remote_repo)
+    chk_dir="$test_home/.dotfiles"
+    map_file="$ROOT/fake-map.txt"
+    printf 'https://github.com/taiansu/dotfiles=%s\n' "$remote_repo" > "$map_file"
+
+    poison_bin=$(mktemp -d "$ROOT/poison.XXXXXX")
+    for tool in stat uname id find readlink awk tr cp rm dirname basename which plutil git stow fzf; do
+      cat << EOF > "$poison_bin/$tool"
 #!/bin/sh
+touch "$ROOT/poison_triggered_$tool"
 exit 99
 EOF
-    chmod +x "$poison_bin/$tool"
-  done
+      chmod +x "$poison_bin/$tool"
+    done
 
-  # Must succeed using literal /usr/bin and /bin paths without invoking poisoned tools
-  out=$(env -i HOME="$test_home" PATH="$poison_bin" /bin/bash "$SCRIPT" --help 2>&1) || return 1
-  assert_contains "$out" 'setup.sh [OPTIONS]' || return 1
+    export KAISIAN_GIT_EXEC="$FAKE_GIT"
+    export KAISIAN_FAKE_GIT_MAP="$map_file"
+    export KAISIAN_GIT_TRACE_LOG="$TRACE_LOG"
+    export KAISIAN_STOW_EXEC="$fake_tools/stow"
+    export KAISIAN_FZF_EXEC="$fake_tools/fzf"
+    export KAISIAN_PLUTIL_EXEC="/usr/bin/plutil"
+
+    # Must succeed using literal /usr/bin and /bin paths without invoking poisoned tools
+    (
+      HOME="$test_home"
+      PATH="$poison_bin"
+      main --repo taiansu/dotfiles --ref main
+    ) || exit 1
+
+    # Assert no poison sentinels were created
+    for tool in stat uname id find readlink awk tr cp rm dirname basename which plutil git stow fzf; do
+      test ! -e "$ROOT/poison_triggered_$tool" || exit 1
+    done
+
+    test -d "$chk_dir/.git" || exit 1
+    exit 0
+  ) || return 1
   return 0
 }
 
@@ -3407,25 +3517,70 @@ core_config_pairs_matrix_case() {
     acquire_lock
     resolve_remote_ref
 
-    # Valid core pairs pass
     chk=$(mktemp -d "$ROOT/chk-core.XXXXXX")
     initialize_repository "$chk" || exit 1
+
+    # 1. Allowed boolean pairs pass
+    for val in true false; do
+      git -C "$chk" config --local core.filemode "$val"
+      git -C "$chk" config --local core.ignorecase "$val"
+      git -C "$chk" config --local core.precomposeunicode "$val"
+      validate_git_config "$chk" || exit 1
+    done
+
+    # 2. Allowed absent/true pairs pass
     git -C "$chk" config --local core.symlinks true
     git -C "$chk" config --local core.protectHFS true
     git -C "$chk" config --local core.protectNTFS true
     validate_git_config "$chk" || exit 1
 
-    # Invalid core.symlinks false fails
-    git -C "$chk" config --local core.symlinks false
+    # 3. Invalid core.symlinks
+    for bad in false 0 1 foo; do
+      git -C "$chk" config --local core.symlinks "$bad"
+      if ( validate_git_config "$chk" ) >/dev/null 2>&1; then
+        printf 'Expected core.symlinks=%s to fail\n' "$bad" >&2
+        exit 1
+      fi
+    done
+    git -C "$chk" config --local --unset core.symlinks
+
+    # 4. Invalid core.protectHFS / protectNTFS
+    for bad in false 0 1 foo; do
+      git -C "$chk" config --local core.protectHFS "$bad"
+      if ( validate_git_config "$chk" ) >/dev/null 2>&1; then
+        printf 'Expected core.protectHFS=%s to fail\n' "$bad" >&2
+        exit 1
+      fi
+    done
+    git -C "$chk" config --local --unset core.protectHFS
+
+    for bad in false 0 1 foo; do
+      git -C "$chk" config --local core.protectNTFS "$bad"
+      if ( validate_git_config "$chk" ) >/dev/null 2>&1; then
+        printf 'Expected core.protectNTFS=%s to fail\n' "$bad" >&2
+        exit 1
+      fi
+    done
+    git -C "$chk" config --local --unset core.protectNTFS
+
+    # 5. Invalid core.repositoryformatversion / bare / logallrefupdates
+    git -C "$chk" config --local core.repositoryformatversion 1
     if ( validate_git_config "$chk" ) >/dev/null 2>&1; then
-      printf 'Expected core.symlinks=false to fail\n' >&2
+      printf 'Expected core.repositoryformatversion=1 to fail\n' >&2
       exit 1
     fi
+    git -C "$chk" config --local core.repositoryformatversion 0
 
-    # Invalid core.symlinks 1 fails
-    git -C "$chk" config --local core.symlinks 1
+    git -C "$chk" config --local core.bare true
     if ( validate_git_config "$chk" ) >/dev/null 2>&1; then
-      printf 'Expected core.symlinks=1 to fail\n' >&2
+      printf 'Expected core.bare=true to fail\n' >&2
+      exit 1
+    fi
+    git -C "$chk" config --local core.bare false
+
+    git -C "$chk" config --local core.logallrefupdates false
+    if ( validate_git_config "$chk" ) >/dev/null 2>&1; then
+      printf 'Expected core.logallrefupdates=false to fail\n' >&2
       exit 1
     fi
 
@@ -3434,6 +3589,7 @@ core_config_pairs_matrix_case() {
   ) || return 1
   return 0
 }
+
 
 production_main_integration_case() {
   (

@@ -1292,11 +1292,36 @@ validate_submodules_spec() {
   local spath surl supdate canon_surl tree_entry entry_mode entry_type entry_sha
   local manifest_file manifest_groups g_count g_idx g_name first_comp seen_paths seen_p plutil_bin
   local path_count url_count update_count
+  local tree_gitlinks tree_gitlink_count has_gitmodules validated_subm_count meta gpath gmode gtype
 
   test -n "$chk_dir" || return 0
   test -n "$commit_sha" || return 0
 
-  run_git -C "$chk_dir" cat-file -e "${commit_sha}:.gitmodules" 2>/dev/null || return 0
+  tree_gitlinks=''
+  tree_gitlink_count=0
+  while IFS="$(printf '\t')" read -r meta gpath || test -n "$meta"; do
+    test -n "$meta" || continue
+    gmode=$(printf '%s' "$meta" | /usr/bin/awk '{print $1}')
+    gtype=$(printf '%s' "$meta" | /usr/bin/awk '{print $2}')
+    if test "$gmode" = '160000' && test "$gtype" = 'commit'; then
+      tree_gitlinks="$tree_gitlinks $gpath "
+      tree_gitlink_count=$((tree_gitlink_count + 1))
+    fi
+  done << EOF
+$(run_git -C "$chk_dir" ls-tree -r "$commit_sha" 2>/dev/null)
+EOF
+
+  has_gitmodules=0
+  if run_git -C "$chk_dir" cat-file -e "${commit_sha}:.gitmodules" 2>/dev/null; then
+    has_gitmodules=1
+  fi
+
+  if test "$has_gitmodules" -eq 0; then
+    if test "$tree_gitlink_count" -gt 0; then
+      die invalid_submodule "gitlink present in commit tree without .gitmodules"
+    fi
+    return 0
+  fi
 
   test -n "$SANDBOX" || die lock_failed 'sandbox not initialized'
   subm_file="$SANDBOX/gitmodules-spec-$$"
@@ -1364,6 +1389,7 @@ $subm_list
 EOF
 
   seen_paths=''
+  validated_subm_count=0
   for sname in $subm_names; do
     test -n "$sname" || continue
 
@@ -1401,6 +1427,7 @@ EOF
       ''|checkout) ;;
       *) die invalid_submodule "unallowed update mode '$supdate' for submodule $sname" ;;
     esac
+
     case "$spath" in
       *[!a-zA-Z0-9_.-/]*|*[[:space:]]*|*[[:cntrl:]]*|*\\*|*\*|*\?*|*\[*|*\]*|*~*)
         die invalid_submodule "unallowed characters in submodule path '$spath'"
@@ -1421,6 +1448,7 @@ EOF
         *[!a-zA-Z0-9_.-]*) die invalid_submodule "invalid character in submodule component '$comp'" ;;
       esac
     done
+
     first_comp=${spath%%/*}
     if test -n "$manifest_groups"; then
       case "$manifest_groups" in
@@ -1452,6 +1480,7 @@ EOF
         die invalid_git_admin "existing path is not an initialized submodule repository: $chk_dir/$spath"
       fi
     fi
+
     tree_entry=$(run_git -C "$chk_dir" ls-tree "$commit_sha" "$spath" 2>/dev/null || true)
     test -n "$tree_entry" || die invalid_submodule "submodule path not found in commit tree: $spath"
 
@@ -1462,7 +1491,12 @@ EOF
     test "$entry_mode" = '160000' || die invalid_submodule "not a gitlink: $spath ($entry_mode)"
     test "$entry_type" = 'commit' || die invalid_submodule "not a commit object: $spath ($entry_type)"
     test -n "$entry_sha" || die invalid_submodule "missing commit SHA for gitlink: $spath"
+
+    validated_subm_count=$((validated_subm_count + 1))
   done
+
+  test "$validated_subm_count" -eq "$tree_gitlink_count" || die invalid_submodule "gitlink count in commit tree does not match .gitmodules ($tree_gitlink_count != $validated_subm_count)"
+
   return 0
 }
 
