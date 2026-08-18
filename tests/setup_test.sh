@@ -638,9 +638,14 @@ if test "$simulate" -eq 1; then
   exit 0
 fi
 
+# Built-in ignores are active when $HOME/.stow-global-ignore is absent
+ignore_file="${HOME-}/.stow-global-ignore"
 builtin_ignore=0
-if test -z "${HOME-}" || test ! -f "${HOME-}/.stow-global-ignore"; then
+has_custom_ignores=0
+if test -z "${HOME-}" || test ! -f "$ignore_file"; then
   builtin_ignore=1
+elif test -s "$ignore_file"; then
+  has_custom_ignores=1
 fi
 
 # Link creation
@@ -657,6 +662,21 @@ for pkg in $restow_pkgs; do
         case "$iname" in
           README*|LICENSE*|COPYING*|'*~'|'#*#') continue ;;
         esac
+      fi
+      if test "$has_custom_ignores" -eq 1; then
+        matched=0
+        while read -r pattern; do
+          test -n "$pattern" || continue
+          case "$pattern" in
+            \#*) continue ;;
+          esac
+          case "$iname" in
+            $pattern) matched=1; break ;;
+          esac
+        done < "$ignore_file"
+        if test "$matched" -eq 1; then
+          continue
+        fi
       fi
       tname="$iname"
       if test "$dotfiles" -eq 1; then
@@ -677,6 +697,21 @@ for pkg in $restow_pkgs; do
           case "$fname" in
             README*|LICENSE*|COPYING*|'*~'|'#*#') continue ;;
           esac
+        fi
+        if test "$has_custom_ignores" -eq 1; then
+          matched=0
+          while read -r pattern; do
+            test -n "$pattern" || continue
+            case "$pattern" in
+              \#*) continue ;;
+            esac
+            case "$fname" in
+              $pattern) matched=1; break ;;
+            esac
+          done < "$ignore_file"
+          if test "$matched" -eq 1; then
+            continue
+          fi
         fi
         if test -n "$ignore_regex"; then
           if printf '%s\n' "$rel" | grep -Eq "$ignore_regex"; then
@@ -829,11 +864,13 @@ EOF
     cat << 'EOF' > "$safe_bin/safe_git"
 #!/bin/bash
 printf 'SAFE_GIT_EXECUTED: %s\n' "$*"
+printf 'SAFE_GIT_PATH: %s\n' "$PATH"
 exit 0
 EOF
     cat << 'EOF' > "$safe_bin/safe_stow"
 #!/bin/bash
 printf 'SAFE_STOW_EXECUTED: %s\n' "$*"
+printf 'SAFE_STOW_PATH: %s\n' "$PATH"
 exit 0
 EOF
     chmod +x "$safe_bin/safe_git" "$safe_bin/safe_stow"
@@ -843,6 +880,7 @@ EOF
     # Invoke run_git with KAISIAN_TESTING=0 inline
     out_git=$(KAISIAN_TESTING=0 KAISIAN_GIT_EXEC="$mock_bin/evil_git" KAISIAN_RUNNER_PATH="$mock_bin" PATH="$mock_bin:$PATH" run_git status --short)
     assert_contains "$out_git" "SAFE_GIT_EXECUTED: status --short" || exit 1
+    assert_contains "$out_git" "SAFE_GIT_PATH: /usr/bin:/bin:/usr/sbin:/sbin" || exit 1
     case "$out_git" in
       *"EVIL_GIT_RAN"*)
         printf 'Production run_git executed KAISIAN_GIT_EXEC override!\n' >&2
@@ -857,6 +895,7 @@ EOF
     # Invoke run_stow with KAISIAN_TESTING=0 inline
     out_stow=$(KAISIAN_TESTING=0 KAISIAN_STOW_EXEC="$mock_bin/evil_stow" KAISIAN_RUNNER_PATH="$mock_bin" PATH="$mock_bin:$PATH" run_stow --version)
     assert_contains "$out_stow" "SAFE_STOW_EXECUTED: --version" || exit 1
+    assert_contains "$out_stow" "SAFE_STOW_PATH: /usr/bin:/bin:/usr/sbin:/sbin" || exit 1
     case "$out_stow" in
       *"EVIL_STOW_RAN"*)
         printf 'Production run_stow executed KAISIAN_STOW_EXEC override!\n' >&2
@@ -1042,35 +1081,39 @@ lock_cleanup_on_subshell_failure_case() {
 
 # 20. discover_executable does not execute external which, dirname, or basename from PATH
 discover_executable_purity_case() {
+  test_dir=$(mktemp -d "$ROOT/purity-test.XXXXXX")
+  test_dir=$(cd -P "$test_dir" && pwd -P)
+  mkdir -p "$test_dir/rel_evil" "$test_dir/markers"
+
+  for tool in which dirname basename; do
+    cat << EOF > "$test_dir/rel_evil/$tool"
+#!/bin/bash
+touch "$test_dir/markers/${tool}_ran"
+exit 1
+EOF
+    chmod +x "$test_dir/rel_evil/$tool"
+  done
+
   (
+    cd "$test_dir"
     export KAISIAN_TESTING=1
     . "$SCRIPT"
 
-    mock_evil="$ROOT/mock-evil-path-tools"
-    mkdir -p "$mock_evil"
-    for tool in which dirname basename; do
-      cat << EOF > "$mock_evil/$tool"
-#!/bin/bash
-printf "HOSTILE_${tool}_EXECUTED\n" >&2
-exit 1
-EOF
-      chmod +x "$mock_evil/$tool"
-    done
-
-    # Run discover_executable with hostile PATH
-    out=$(PATH="$mock_evil:$PATH" discover_executable git 2>&1) || exit 1
+    out=$(PATH="rel_evil:$PATH" discover_executable git 2>&1) || exit 1
     test -n "$out" || exit 1
+    case "$out" in
+      /*) ;;
+      *) exit 1 ;;
+    esac
     test -f "$out" || exit 1
     test -x "$out" || exit 1
-
-    case "$out" in
-      *"HOSTILE_"*)
-        printf 'discover_executable executed hostile PATH tool!\n' >&2
-        exit 1
-        ;;
-    esac
     exit 0
   ) || return 1
+
+  # Assert that no hostile marker was created
+  assert_not_exists "$test_dir/markers/which_ran" || return 1
+  assert_not_exists "$test_dir/markers/dirname_ran" || return 1
+  assert_not_exists "$test_dir/markers/basename_ran" || return 1
   return 0
 }
 
