@@ -1066,7 +1066,7 @@ EOF
   for tool in which dirname basename; do
     cat << EOF > "$test_dir/rel_evil/$tool"
 #!/bin/bash
-touch "$test_dir/markers/${tool}_ran"
+: > "$test_dir/markers/${tool}_ran"
 exit 1
 EOF
     chmod +x "$test_dir/rel_evil/$tool"
@@ -1114,9 +1114,98 @@ stow_nonempty_ignore_probe_failure_case() {
     test_ino="$RECORDED_LOCK_DEV_INO"
     trap 'curr=$(/usr/bin/stat -f "%d %i" "'"$lock_dir"'" 2>/dev/null || true); if test "$curr" = "'"$test_ino"'"; then rm -rf "'"$lock_dir"'"; fi' EXIT
 
-    mock_bin="$ROOT/mock-probe-bin"
+    mock_bin="$ROOT/mock-nonempty-ignore-bin"
+    mkdir -p "$mock_bin"
 
-    # Make .stow-global-ignore non-empty
+    # Self-contained fake stow enforcing empty global ignore
+    cat << 'EOF' > "$mock_bin/stow"
+#!/bin/bash
+set -u
+dir=""
+target=""
+simulate=0
+compat=0
+dotfiles=0
+no_folding=0
+ignore_regex=""
+restow_pkgs=""
+delete_pkgs=""
+
+while test $# -gt 0; do
+  case "$1" in
+    -d) dir=$2; shift 2 ;;
+    -t) target=$2; shift 2 ;;
+    --dotfiles) dotfiles=1; shift ;;
+    --no-folding) no_folding=1; shift ;;
+    --simulate) simulate=1; shift ;;
+    --compat) compat=1; shift ;;
+    --ignore=*) ignore_regex=${1#--ignore=}; shift ;;
+    -R) restow_pkgs="$restow_pkgs $2"; shift 2 ;;
+    -D) delete_pkgs="$delete_pkgs $2"; shift 2 ;;
+    *) restow_pkgs="$restow_pkgs $1"; shift ;;
+  esac
+done
+
+if test "$simulate" -eq 1; then
+  exit 0
+fi
+
+ignore_file="${HOME-}/.stow-global-ignore"
+if test -z "${HOME-}" || test ! -f "$ignore_file"; then
+  builtin_ignore=1
+elif test -s "$ignore_file"; then
+  printf 'Non-empty global ignore is unsupported in fake stow\n' >&2
+  exit 1
+fi
+
+for pkg in $restow_pkgs; do
+  pkg_dir="$dir/$pkg"
+  test -d "$pkg_dir" || continue
+  (
+    cd "$pkg_dir"
+    find . -type f | while read -r file; do
+      rel="${file#./}"
+      old_ifs=$IFS
+      IFS='/'
+      set -f
+      set -- $rel
+      set +f
+      IFS=$old_ifs
+      transformed=""
+      for comp in "$@"; do
+        c="$comp"
+        if test "$dotfiles" -eq 1; then
+          case "$comp" in
+            dot-*) c=".${comp#dot-}" ;;
+          esac
+        fi
+        transformed="$transformed/$c"
+      done
+      tgt_file="$target$transformed"
+      mkdir -p "$(dirname "$tgt_file")"
+      ln -sf "$pkg_dir/$rel" "$tgt_file"
+    done
+  )
+done
+exit 0
+EOF
+    chmod +x "$mock_bin/stow"
+
+    cat << 'EOF' > "$mock_bin/git"
+#!/bin/bash
+exit 0
+EOF
+    cat << 'EOF' > "$mock_bin/fzf"
+#!/bin/bash
+exit 0
+EOF
+    cat << 'EOF' > "$mock_bin/plutil"
+#!/bin/bash
+exit 0
+EOF
+    chmod +x "$mock_bin/git" "$mock_bin/fzf" "$mock_bin/plutil"
+
+    # Make .stow-global-ignore non-empty to prove probe fails
     echo "custom_pattern" > "$SANDBOX/stow-home/.stow-global-ignore"
 
     out=$(KAISIAN_GIT_EXEC="$mock_bin/git" KAISIAN_STOW_EXEC="$mock_bin/stow" PATH="$mock_bin:/usr/bin:/bin" require_prerequisites 2>&1)
