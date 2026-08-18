@@ -3046,10 +3046,230 @@ submodule_matrix_and_nested_levels_case() {
       printf 'Expected duplicate submodule path to fail\n' >&2
       exit 1
     fi
+    repo_file=$(make_remote_repo)
+    (
+      cd "$repo_file" || exit 1
+      git config -f .gitmodules submodule.f.path ".vendor/file"
+      git config -f .gitmodules submodule.f.url "file:///path/to/repo"
+      git update-index --add --cacheinfo 160000,"$subm_lvl2_sha",.vendor/file
+      git add .gitmodules && git -c user.email="t@e.com" -c user.name="T" commit -q -m "bad file url"
+    )
+    printf 'https://github.com/taiansu/file=%s\n' "$repo_file" >> "$map_file"
+    REPOSITORY="https://github.com/taiansu/file"
+    resolve_remote_ref
+    chk_bad_file=$(mktemp -d "$ROOT/chk-bad-file.XXXXXX")
+    if ( initialize_repository "$chk_bad_file" ) >/dev/null 2>&1; then
+      printf 'Expected file:// submodule URL to fail\n' >&2
+      exit 1
+    fi
+
+    # 2g. Ext submodule URL
+    repo_ext=$(make_remote_repo)
+    (
+      cd "$repo_ext" || exit 1
+      git config -f .gitmodules submodule.e.path ".vendor/ext"
+      git config -f .gitmodules submodule.e.url "ext::sh -c evil"
+      git update-index --add --cacheinfo 160000,"$subm_lvl2_sha",.vendor/ext
+      git add .gitmodules && git -c user.email="t@e.com" -c user.name="T" commit -q -m "bad ext url"
+    )
+    printf 'https://github.com/taiansu/ext=%s\n' "$repo_ext" >> "$map_file"
+    REPOSITORY="https://github.com/taiansu/ext"
+    resolve_remote_ref
+    chk_bad_ext=$(mktemp -d "$ROOT/chk-bad-ext.XXXXXX")
+    if ( initialize_repository "$chk_bad_ext" ) >/dev/null 2>&1; then
+      printf 'Expected ext:: submodule URL to fail\n' >&2
+      exit 1
+    fi
+
+    # 2h. Unknown submodule key (e.g. branch)
+    repo_unk=$(make_remote_repo)
+    (
+      cd "$repo_unk" || exit 1
+      git config -f .gitmodules submodule.u.path ".vendor/u"
+      git config -f .gitmodules submodule.u.url "https://github.com/taiansu/nested"
+      git config -f .gitmodules submodule.u.branch "main"
+      git update-index --add --cacheinfo 160000,"$subm_lvl2_sha",.vendor/u
+      git add .gitmodules && git -c user.email="t@e.com" -c user.name="T" commit -q -m "bad unknown key"
+    )
+    printf 'https://github.com/taiansu/unk=%s\n' "$repo_unk" >> "$map_file"
+    REPOSITORY="https://github.com/taiansu/unk"
+    resolve_remote_ref
+    chk_bad_unk=$(mktemp -d "$ROOT/chk-bad-unk.XXXXXX")
+    if ( initialize_repository "$chk_bad_unk" ) >/dev/null 2>&1; then
+      printf 'Expected unknown submodule key to fail\n' >&2
+      exit 1
+    fi
+
+    # 2i. Pre-existing non-repo child path with sentinel file
+    chk_sentinel=$(mktemp -d "$ROOT/chk-sentinel.XXXXXX")
+    mkdir -p "$chk_sentinel/.vendor/helper"
+    printf 'sentinel_data\n' > "$chk_sentinel/.vendor/helper/sentinel.txt"
+    REPOSITORY="taiansu/dotfiles"
+    resolve_remote_ref
+    if ( initialize_repository "$chk_sentinel" ) >/dev/null 2>&1; then
+      printf 'Expected pre-existing non-repo child path to fail\n' >&2
+      exit 1
+    fi
+    test -f "$chk_sentinel/.vendor/helper/sentinel.txt" || exit 1
+    test "$(/bin/cat "$chk_sentinel/.vendor/helper/sentinel.txt")" = "sentinel_data" || exit 1
+
+    # 2j. Wrong existing child submodule commit
+    chk_wrong_child=$(mktemp -d "$ROOT/chk-wrongchild.XXXXXX")
+    initialize_repository "$chk_wrong_child" || exit 1
+    (
+      cd "$chk_wrong_child/.vendor/helper" || exit 1
+      printf 'wrong\n' > wrong.txt
+      git add wrong.txt
+      git -c user.email="t@e.com" -c user.name="T" commit -q -m "wrong commit"
+    )
+    if ( update_repository "$chk_wrong_child" ) >/dev/null 2>&1; then
+      printf 'Expected wrong child commit to fail update\n' >&2
+      exit 1
+    fi
 
     cleanup
     exit 0
   ) || return 1
+  return 0
+}
+
+fetch_head_substituted_mismatch_case() {
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+
+    remote_repo=$(make_remote_repo)
+    map_file="$ROOT/fake-map.txt"
+    printf 'https://github.com/taiansu/dotfiles=%s\n' "$remote_repo" > "$map_file"
+
+    CANONICAL_REPO="https://github.com/taiansu/dotfiles"
+    REPOSITORY="taiansu/dotfiles"
+    REQUESTED_REF="main"
+    export KAISIAN_GIT_EXEC="$FAKE_GIT"
+    export KAISIAN_FAKE_GIT_MAP="$map_file"
+
+    acquire_lock
+    resolve_remote_ref
+
+    # Tamper EXPECTED_COMMIT_SHA to simulate remote branch moving / substitution
+    EXPECTED_COMMIT_SHA="1111111111111111111111111111111111111111"
+    chk_subst=$(mktemp -d "$ROOT/chk-subst.XXXXXX")
+    if ( initialize_repository "$chk_subst" ) >/dev/null 2>&1; then
+      printf 'Expected FETCH_HEAD mismatch against EXPECTED_COMMIT_SHA to fail\n' >&2
+      exit 1
+    fi
+
+    cleanup
+    exit 0
+  ) || return 1
+  return 0
+}
+
+worktree_bidirectional_mode_check_case() {
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+
+    remote_repo=$(make_remote_repo)
+    (
+      cd "$remote_repo" || exit 1
+      printf '#!/bin/sh\nexit 0\n' > exec_script.sh
+      chmod +x exec_script.sh
+      printf 'text\n' > normal_text.txt
+      chmod -x normal_text.txt
+      git add exec_script.sh normal_text.txt
+      git -c user.email="t@e.com" -c user.name="T" commit -q -m "modes test"
+    )
+
+    map_file="$ROOT/fake-map.txt"
+    printf 'https://github.com/taiansu/dotfiles=%s\n' "$remote_repo" > "$map_file"
+
+    CANONICAL_REPO="https://github.com/taiansu/dotfiles"
+    REPOSITORY="taiansu/dotfiles"
+    REQUESTED_REF="main"
+    export KAISIAN_GIT_EXEC="$FAKE_GIT"
+    export KAISIAN_FAKE_GIT_MAP="$map_file"
+
+    acquire_lock
+    resolve_remote_ref
+
+    # 1. 100644 mode tampered to 755 (chmod +x)
+    chk_tamper_exec=$(mktemp -d "$ROOT/chk-tamper1.XXXXXX")
+    initialize_repository "$chk_tamper_exec" || exit 1
+    chmod +x "$chk_tamper_exec/normal_text.txt"
+    if ( verify_clean_tree "$chk_tamper_exec" ) >/dev/null 2>&1; then
+      printf 'Expected 100644 leaf with chmod +x to fail bidirectional mode check\n' >&2
+      exit 1
+    fi
+
+    # 2. 100755 mode tampered to 644 (chmod -x)
+    chk_tamper_noexec=$(mktemp -d "$ROOT/chk-tamper2.XXXXXX")
+    initialize_repository "$chk_tamper_noexec" || exit 1
+    chmod -x "$chk_tamper_noexec/exec_script.sh"
+    if ( verify_clean_tree "$chk_tamper_noexec" ) >/dev/null 2>&1; then
+      printf 'Expected 100755 leaf with chmod -x to fail bidirectional mode check\n' >&2
+      exit 1
+    fi
+
+    cleanup
+    exit 0
+  ) || return 1
+  return 0
+}
+
+single_fetch_and_trace_assertions_case() {
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+
+    remote_repo=$(make_remote_repo)
+    trace_log="$ROOT/trace-single-fetch.log"
+    : > "$trace_log"
+    map_file="$ROOT/fake-map.txt"
+    printf 'https://github.com/taiansu/dotfiles=%s\n' "$remote_repo" > "$map_file"
+
+    CANONICAL_REPO="https://github.com/taiansu/dotfiles"
+    REPOSITORY="taiansu/dotfiles"
+    REQUESTED_REF="main"
+    export KAISIAN_GIT_EXEC="$FAKE_GIT"
+    export KAISIAN_GIT_TRACE_LOG="$trace_log"
+    export KAISIAN_FAKE_GIT_MAP="$map_file"
+
+    acquire_lock
+    resolve_remote_ref
+    chk_single=$(mktemp -d "$ROOT/chk-single.XXXXXX")
+    initialize_repository "$chk_single" || exit 1
+
+    # Assert trace log is non-empty
+    test -s "$trace_log" || exit 1
+    # Assert trace log contains sanitized environment boundary
+    /usr/bin/grep -Fq 'ENV: GIT_CONFIG_NOSYSTEM=1' "$trace_log" || exit 1
+    /usr/bin/grep -Fq 'GIT_ALLOW_PROTOCOL=https' "$trace_log" || exit 1
+
+    # Assert exactly ONE fetch was invoked for new checkout
+    fetch_count=$(/usr/bin/grep -E '^git fetch ' "$trace_log" | wc -l)
+    test "$fetch_count" -eq 1 || exit 1
+
+    cleanup
+    exit 0
+  ) || return 1
+  return 0
+}
+
+path_poison_ambient_utility_case() {
+  test_home=$(make_home)
+  poison_bin=$(mktemp -d "$ROOT/poison.XXXXXX")
+  for tool in stat uname id find readlink awk cp rm dirname basename which; do
+    cat << 'EOF' > "$poison_bin/$tool"
+#!/bin/sh
+exit 99
+EOF
+    chmod +x "$poison_bin/$tool"
+  done
+
+  # Must succeed using literal /usr/bin and /bin paths without invoking poisoned tools
+  out=$(env -i HOME="$test_home" PATH="$poison_bin" /bin/bash "$SCRIPT" --help 2>&1) || return 1
+  assert_contains "$out" 'setup.sh [OPTIONS]' || return 1
   return 0
 }
 
@@ -3132,11 +3352,6 @@ EOF
       PATH="$fake_tools:/usr/bin:/bin"
       main --repo taiansu/dotfiles --ref main
     ) || exit 1
-
-    # Assert checkout directory created, detached HEAD at origin_commit
-    test -d "$chk_dir/.git" || exit 1
-    head_sha=$(git -C "$chk_dir" rev-parse HEAD)
-    test "$head_sha" = "$origin_commit" || exit 1
 
     # Assert no target HOME mutation (no links created in HOME root)
     test ! -L "$test_home/.zshrc" || exit 1

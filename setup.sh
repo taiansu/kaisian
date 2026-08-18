@@ -541,10 +541,9 @@ acquire_lock() {
   LOCK_DIR="/private/tmp/kaisian-$curr_uid.lock"
 
   test -d '/private/tmp' || die lock_failed "$LOCK_DIR"
-  tmp_owner=$(/usr/bin/stat -f '%u' '/private/tmp' 2>/dev/null || stat -f '%u' '/private/tmp' 2>/dev/null)
+  tmp_owner=$(/usr/bin/stat -f '%u' '/private/tmp' 2>/dev/null) || die lock_failed "$LOCK_DIR"
   test "$tmp_owner" = '0' || die lock_failed "$LOCK_DIR"
   test -k '/private/tmp' || die lock_failed "$LOCK_DIR"
-
   check_path_overlap_with_lock "$CHECKOUT_DIR"
   check_path_overlap_with_lock "$STATE_ROOT"
 
@@ -552,7 +551,7 @@ acquire_lock() {
     die lock_failed "$LOCK_DIR"
   fi
 
-  RECORDED_LOCK_DEV_INO=$(/usr/bin/stat -f '%d %i' "$LOCK_DIR" 2>/dev/null || stat -f '%d %i' "$LOCK_DIR" 2>/dev/null)
+  RECORDED_LOCK_DEV_INO=$(/usr/bin/stat -f '%d %i' "$LOCK_DIR" 2>/dev/null)
   if test -z "$RECORDED_LOCK_DEV_INO"; then
     /bin/rmdir "$LOCK_DIR" 2>/dev/null || true
     die lock_failed "$LOCK_DIR"
@@ -567,7 +566,7 @@ acquire_lock() {
 
   SANDBOX="$LOCK_DIR/sandbox"
   /bin/mkdir -m 0700 "$SANDBOX" 2>/dev/null || die lock_failed "$LOCK_DIR"
-  RECORDED_SANDBOX_DEV_INO=$(/usr/bin/stat -f '%d %i' "$SANDBOX" 2>/dev/null || stat -f '%d %i' "$SANDBOX" 2>/dev/null)
+  RECORDED_SANDBOX_DEV_INO=$(/usr/bin/stat -f '%d %i' "$SANDBOX" 2>/dev/null)
   if test -z "$RECORDED_SANDBOX_DEV_INO"; then
     /bin/rmdir "$SANDBOX" 2>/dev/null || true
     die lock_failed "$LOCK_DIR"
@@ -585,13 +584,13 @@ cleanup() {
   test -n "$LOCK_DIR" || return 0
   test -n "$RECORDED_LOCK_DEV_INO" || return 0
 
-  curr_lock_dev_ino=$(/usr/bin/stat -f '%d %i' "$LOCK_DIR" 2>/dev/null || stat -f '%d %i' "$LOCK_DIR" 2>/dev/null || true)
+  curr_lock_dev_ino=$(/usr/bin/stat -f '%d %i' "$LOCK_DIR" 2>/dev/null || true)
   if test "$curr_lock_dev_ino" != "$RECORDED_LOCK_DEV_INO"; then
     return 0
   fi
 
   if test -n "$SANDBOX" && test -n "$RECORDED_SANDBOX_DEV_INO"; then
-    curr_sb_dev_ino=$(/usr/bin/stat -f '%d %i' "$SANDBOX" 2>/dev/null || stat -f '%d %i' "$SANDBOX" 2>/dev/null || true)
+    curr_sb_dev_ino=$(/usr/bin/stat -f '%d %i' "$SANDBOX" 2>/dev/null || true)
     if test "$curr_sb_dev_ino" = "$RECORDED_SANDBOX_DEV_INO"; then
       case "$SANDBOX" in
         "$LOCK_DIR"/*)
@@ -730,7 +729,7 @@ run_stow() {
 }
 
 require_prerequisites() {
-  os_name=$(/usr/bin/uname -s 2>/dev/null || uname -s)
+  os_name=$(/usr/bin/uname -s 2>/dev/null) || die unsupported_os
   test "$os_name" = 'Darwin' || die unsupported_os
 
   missing=''
@@ -1262,6 +1261,8 @@ verify_clean_tree() {
           test -f "$chk_dir/$filepath" && test ! -L "$chk_dir/$filepath" || die dirty_checkout
           if test "$mode" = '100755'; then
             test -x "$chk_dir/$filepath" || die dirty_checkout
+          elif test "$mode" = '100644'; then
+            test ! -x "$chk_dir/$filepath" || die dirty_checkout
           fi
           actual_sha=$(run_git -C "$chk_dir" hash-object "$chk_dir/$filepath" 2>/dev/null || true)
           test "$actual_sha" = "$obj_sha" || die dirty_checkout
@@ -1287,9 +1288,10 @@ EOF
 validate_submodules_spec() {
   local chk_dir=$1
   local commit_sha=$2
-  local subm_file subm_list subm_names sname key val
+  local subm_file subm_list subm_names sname key val prop
   local spath surl supdate canon_surl tree_entry entry_mode entry_type entry_sha
   local manifest_file manifest_groups g_count g_idx g_name first_comp seen_paths seen_p plutil_bin
+  local path_count url_count update_count
 
   test -n "$chk_dir" || return 0
   test -n "$commit_sha" || return 0
@@ -1336,11 +1338,25 @@ validate_submodules_spec() {
 
   subm_names=''
   while IFS='=' read -r key val || test -n "$key"; do
+    test -n "$key" || continue
     case "$key" in
-      submodule.*.path)
+      submodule.*.path|submodule.*.url|submodule.*.update)
         sname=${key#submodule.}
-        sname=${sname%.path}
-        subm_names="$subm_names $sname"
+        prop=${sname##*.}
+        sname=${sname%.*}
+        case "$sname" in
+          *[!a-zA-Z0-9_.-]*|-*|''|.*) die invalid_submodule "invalid submodule name: $sname" ;;
+        esac
+        case " $subm_names " in
+          *" $sname "*) ;;
+          *) subm_names="$subm_names $sname" ;;
+        esac
+        ;;
+      submodule.*)
+        die invalid_submodule "unallowed submodule key '$key'"
+        ;;
+      *)
+        die invalid_submodule "unallowed non-submodule key '$key'"
         ;;
     esac
   done << EOF
@@ -1351,25 +1367,35 @@ EOF
   for sname in $subm_names; do
     test -n "$sname" || continue
 
-    case "$sname" in
-      *[!a-zA-Z0-9_.-]*|-*|''|.*) die invalid_submodule "invalid submodule name: $sname" ;;
-    esac
-
     spath=''
     surl=''
     supdate=''
+    path_count=0
+    url_count=0
+    update_count=0
+
     while IFS='=' read -r key val || test -n "$key"; do
       case "$key" in
-        submodule."$sname".path) spath="$val" ;;
-        submodule."$sname".url) surl="$val" ;;
-        submodule."$sname".update) supdate="$val" ;;
+        submodule."$sname".path)
+          spath="$val"
+          path_count=$((path_count + 1))
+          ;;
+        submodule."$sname".url)
+          surl="$val"
+          url_count=$((url_count + 1))
+          ;;
+        submodule."$sname".update)
+          supdate="$val"
+          update_count=$((update_count + 1))
+          ;;
       esac
     done << EOF
 $subm_list
 EOF
 
-    test -n "$spath" || die invalid_submodule "missing path for submodule $sname"
-    test -n "$surl" || die invalid_submodule "missing url for submodule $sname"
+    test "$path_count" -eq 1 || die invalid_submodule "submodule '$sname' path count must be 1 (found $path_count)"
+    test "$url_count" -eq 1 || die invalid_submodule "submodule '$sname' url count must be 1 (found $url_count)"
+    test "$update_count" -le 1 || die invalid_submodule "duplicate update key in submodule '$sname'"
 
     case "$supdate" in
       ''|checkout) ;;
@@ -1406,6 +1432,13 @@ EOF
 
     canon_surl=$(canonicalize_repository "$surl") || die invalid_submodule "invalid submodule url: $surl"
 
+    if test -e "$chk_dir/$spath" || test -L "$chk_dir/$spath"; then
+      if test -d "$chk_dir/$spath" && test ! -L "$chk_dir/$spath" && test -d "$chk_dir/$spath/.git" && test ! -L "$chk_dir/$spath/.git"; then
+        :
+      else
+        die invalid_git_admin "existing path is not an initialized submodule repository: $chk_dir/$spath"
+      fi
+    fi
     tree_entry=$(run_git -C "$chk_dir" ls-tree "$commit_sha" "$spath" 2>/dev/null || true)
     test -n "$tree_entry" || die invalid_submodule "submodule path not found in commit tree: $spath"
 
@@ -1447,7 +1480,10 @@ initialize_submodules() {
       submodule.*.path)
         sname=${key#submodule.}
         sname=${sname%.path}
-        subm_names="$subm_names $sname"
+        case " $subm_names " in
+          *" $sname "*) ;;
+          *) subm_names="$subm_names $sname" ;;
+        esac
         ;;
     esac
   done << EOF
@@ -1479,22 +1515,19 @@ EOF
       validate_git_config "$child_dir" "$canon_surl" || die submodule_failed "$sname"
 
       child_head=$(run_git -C "$child_dir" rev-parse HEAD 2>/dev/null || true)
-      if test "$child_head" != "$entry_sha"; then
-        run_git -C "$child_dir" fetch --no-tags --depth=1 "$canon_surl" "$entry_sha" 2>/dev/null || die submodule_failed "$sname"
-        run_git -C "$child_dir" checkout --detach "$entry_sha" -- 2>/dev/null || die submodule_failed "$sname"
-        validate_git_admin "$child_dir" || die submodule_failed "$sname"
-        validate_git_config "$child_dir" "$canon_surl" || die submodule_failed "$sname"
-      fi
+      test "$child_head" = "$entry_sha" || die submodule_failed "$sname" "existing child commit mismatch: $child_head != $entry_sha"
     else
       /bin/mkdir -p "$child_dir" 2>/dev/null || true
       run_git init "$child_dir" >/dev/null 2>&1 || die submodule_failed "$sname"
       validate_git_admin "$child_dir" || die submodule_failed "$sname"
-      run_git -C "$child_dir" config --local remote.origin.url "$canon_surl" || die submodule_failed "$sname"
-      run_git -C "$child_dir" config --local remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*" || die submodule_failed "$sname"
+      run_git -C "$child_dir" config --local remote.origin.url "$canon_surl" >/dev/null 2>&1 || die submodule_failed "$sname"
+      run_git -C "$child_dir" config --local remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*" >/dev/null 2>&1 || die submodule_failed "$sname"
 
       run_git -C "$child_dir" fetch --no-tags --depth=1 "$canon_surl" "$entry_sha" >/dev/null 2>&1 || die submodule_failed "$sname"
       child_fetched_sha=$(run_git -C "$child_dir" rev-parse --verify "FETCH_HEAD^{commit}" 2>/dev/null) || die submodule_failed "$sname"
       test "$child_fetched_sha" = "$entry_sha" || die submodule_failed "$sname"
+
+      validate_submodules_spec "$child_dir" "$entry_sha"
 
       run_git -C "$child_dir" checkout --detach "$entry_sha" -- >/dev/null 2>&1 || die submodule_failed "$sname"
       validate_git_config "$child_dir" "$canon_surl" || die submodule_failed "$sname"
@@ -1532,6 +1565,7 @@ initialize_repository() {
   run_git -C "$chk_dir" fetch --no-tags --depth=1 "$CANONICAL_REPO" "$RESOLVED_FETCH_REF" >/dev/null 2>&1 || die git_operation_failed 'git fetch failed'
 
   RESOLVED_COMMIT=$(run_git -C "$chk_dir" rev-parse --verify "FETCH_HEAD^{commit}" 2>/dev/null) || die git_operation_failed 'failed to peel FETCH_HEAD'
+  test "$RESOLVED_COMMIT" = "$EXPECTED_COMMIT_SHA" || die git_operation_failed "fetched commit mismatch: $RESOLVED_COMMIT != $EXPECTED_COMMIT_SHA"
 
   if test "$REPOSITORY" = "$DEFAULT_REPOSITORY" && test -n "$DEFAULT_DOTFILES_COMMIT"; then
     if test "$REQUESTED_REF" = "$DEFAULT_DOTFILES_COMMIT"; then
@@ -1576,6 +1610,7 @@ update_repository() {
   run_git -C "$chk_dir" fetch --no-tags --depth=1 "$CANONICAL_REPO" "$RESOLVED_FETCH_REF" >/dev/null 2>&1 || die git_operation_failed 'git fetch failed'
 
   RESOLVED_COMMIT=$(run_git -C "$chk_dir" rev-parse --verify "FETCH_HEAD^{commit}" 2>/dev/null) || die git_operation_failed 'failed to peel FETCH_HEAD'
+  test "$RESOLVED_COMMIT" = "$EXPECTED_COMMIT_SHA" || die git_operation_failed "fetched commit mismatch: $RESOLVED_COMMIT != $EXPECTED_COMMIT_SHA"
 
   if test "$REPOSITORY" = "$DEFAULT_REPOSITORY" && test -n "$DEFAULT_DOTFILES_COMMIT"; then
     if test "$REQUESTED_REF" = "$DEFAULT_DOTFILES_COMMIT"; then

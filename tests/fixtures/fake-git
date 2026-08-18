@@ -13,9 +13,11 @@ fi
 
 if test -n "$trace_log"; then
   /bin/mkdir -p "$(/usr/bin/dirname "$trace_log")" 2>/dev/null || true
+  printf 'ENV: GIT_CONFIG_NOSYSTEM=%s GIT_NO_REPLACE_OBJECTS=%s GIT_ATTR_NOSYSTEM=%s GIT_TERMINAL_PROMPT=%s GIT_ASKPASS=%s GIT_ALLOW_PROTOCOL=%s\n' \
+    "${GIT_CONFIG_NOSYSTEM-}" "${GIT_NO_REPLACE_OBJECTS-}" "${GIT_ATTR_NOSYSTEM-}" "${GIT_TERMINAL_PROMPT-}" "${GIT_ASKPASS-}" "${GIT_ALLOW_PROTOCOL-}" >> "$trace_log"
   printf 'git' >> "$trace_log"
   for arg in "$@"; do
-    printf ' %s' "$arg" >> "$trace_log"
+    printf ' %q' "$arg" >> "$trace_log"
   done
   printf '\n' >> "$trace_log"
 fi
