@@ -1411,6 +1411,20 @@ manifest_invalid_syntax_and_types_case() {
     assert_contains "$out_zh" "無效的 manifest：「groups」必須是陣列。" || exit 1
     ! assert_contains "$out_zh" "array" || exit 1
     ! assert_contains "$out_zh" "Invalid" || exit 1
+
+    # 39. Path required error in en and zh-TW
+    out_path_en=$(LANGUAGE='en' parse_manifest "" "$checkout" 2>&1)
+    assert_contains "$out_path_en" "manifest path is required" || exit 1
+    out_path_zh=$(LANGUAGE='zh-TW' parse_manifest "" "$checkout" 2>&1)
+    assert_contains "$out_path_zh" "必須提供 manifest 路徑" || exit 1
+    ! assert_contains "$out_path_zh" "required" || exit 1
+
+    # 40. Checkout directory not found error in en and zh-TW
+    echo '{"schema": 1, "groups": []}' > "$checkout/.kaisian.json"
+    out_dir_zh=$(LANGUAGE='zh-TW' parse_manifest "$checkout/.kaisian.json" "/nonexistent_dir_999" 2>&1)
+    assert_contains "$out_dir_zh" "找不到檢出目錄「/nonexistent_dir_999」。" || exit 1
+    ! assert_contains "$out_dir_zh" "checkout directory" || exit 1
+    rm -f "$checkout/.kaisian.json"
     cleanup
     trap - EXIT
     exit 0
@@ -1822,8 +1836,53 @@ EOF
     status=$?
     test "$status" -ne 0 || exit 1
     assert_contains "$out" "fzf interactive selection failed" || exit 1
+    # 8. Space-separated record 'shell git' in fzf output => nonzero
+    cat << 'EOF' > "$fzf_mock_dir/fzf_space_separated"
+#!/bin/bash
+printf 'shell git\n'
+exit 0
+EOF
+    chmod +x "$fzf_mock_dir/fzf_space_separated"
 
-    # 8. Non-TTY interactive => localized nonzero
+    out=$(SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_space_separated" resolve_selection 2>&1)
+    status=$?
+    test "$status" -ne 0 || exit 1
+    assert_contains "$out" "fzf interactive selection failed" || exit 1
+
+    # 9. Padded leading/trailing whitespace record in fzf output => nonzero
+    cat << 'EOF' > "$fzf_mock_dir/fzf_padded"
+#!/bin/bash
+printf '  shell\n'
+exit 0
+EOF
+    chmod +x "$fzf_mock_dir/fzf_padded"
+
+    out=$(SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_padded" resolve_selection 2>&1)
+    status=$?
+    test "$status" -ne 0 || exit 1
+    assert_contains "$out" "fzf interactive selection failed" || exit 1
+
+    # 10. Tab-malformed record in fzf output => nonzero
+    cat << 'EOF' > "$fzf_mock_dir/fzf_tab_malformed"
+#!/bin/bash
+printf '\tmalformed_tab\n'
+exit 0
+EOF
+    chmod +x "$fzf_mock_dir/fzf_tab_malformed"
+
+    out=$(SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_tab_malformed" resolve_selection 2>&1)
+    status=$?
+    test "$status" -ne 0 || exit 1
+    assert_contains "$out" "fzf interactive selection failed" || exit 1
+
+    # 11. Localized zh-TW fzf unknown record diagnostic without English words
+    out_fzf_zh=$(LANGUAGE='zh-TW' SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_bogus" resolve_selection 2>&1)
+    test $? -ne 0 || exit 1
+    assert_contains "$out_fzf_zh" "fzf 互動選取失敗：輸出包含未知的紀錄「nonexistent_package」。" || exit 1
+    ! assert_contains "$out_fzf_zh" "failed" || exit 1
+    ! assert_contains "$out_fzf_zh" "unknown record" || exit 1
+
+    # 12. Non-TTY interactive => localized nonzero
     out=$(LANGUAGE='en' SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=0 resolve_selection 2>&1)
     test $? -ne 0 || exit 1
     assert_contains "$out" "A controlling terminal is required" || exit 1
@@ -1831,7 +1890,6 @@ EOF
     out_zh=$(LANGUAGE='zh-TW' SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=0 resolve_selection 2>&1)
     test $? -ne 0 || exit 1
     assert_contains "$out_zh" "此操作需要可控制的終端機" || exit 1
-
     cleanup
     trap - EXIT
     exit 0

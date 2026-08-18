@@ -88,6 +88,10 @@ message_en() {
     invalid_manifest)
       reason_key=${1-}
       case "$reason_key" in
+        path_required) printf 'Invalid manifest: manifest path is required.' ;;
+        file_not_found) printf "Invalid manifest: manifest file '%s' not found or unreadable." "${2-}" ;;
+        checkout_dir_not_found) printf "Invalid manifest: checkout directory '%s' not found." "${2-}" ;;
+        groups_not_found) printf 'Invalid manifest: groups table not found.' ;;
         malformed_syntax) printf 'Invalid manifest: malformed JSON syntax.' ;;
         root_not_object) printf 'Invalid manifest: root must be a JSON object.' ;;
         unknown_top_key) printf "Invalid manifest: unknown top-level key '%s'." "${2-}" ;;
@@ -126,7 +130,15 @@ message_en() {
     unknown_group) printf "Unknown group '%s'." "${1-}" ;;
     empty_group_selection) printf 'Group selection cannot be empty.' ;;
     empty_selection) printf 'No packages selected.' ;;
-    fzf_failed) printf 'fzf interactive selection failed (%s).' "${1-}" ;;
+    fzf_failed)
+      reason_key=${1-}
+      case "$reason_key" in
+        empty_record) printf 'fzf interactive selection failed: output contains an empty or whitespace record.' ;;
+        unknown_record) printf "fzf interactive selection failed: output contains unknown record '%s'." "${2-}" ;;
+        invalid_format) printf "fzf interactive selection failed: malformed record format '%s'." "${2-}" ;;
+        *) printf 'fzf interactive selection failed (%s).' "${1-}" ;;
+      esac
+      ;;
     *) return 64 ;;
   esac
 }
@@ -150,6 +162,10 @@ message_zh_tw() {
     invalid_manifest)
       reason_key=${1-}
       case "$reason_key" in
+        path_required) printf '無效的 manifest：必須提供 manifest 路徑。' ;;
+        file_not_found) printf '無效的 manifest：找不到 manifest 檔案或無法讀取「%s」。' "${2-}" ;;
+        checkout_dir_not_found) printf '無效的 manifest：找不到檢出目錄「%s」。' "${2-}" ;;
+        groups_not_found) printf '無效的 manifest：找不到群組資料表。' ;;
         malformed_syntax) printf '無效的 manifest：JSON 語法錯誤。' ;;
         root_not_object) printf '無效的 manifest：根節點必須是 JSON 物件。' ;;
         unknown_top_key) printf '無效的 manifest：未知的頂層鍵值「%s」。' "${2-}" ;;
@@ -188,7 +204,15 @@ message_zh_tw() {
     unknown_group) printf '未知的群組「%s」。' "${1-}" ;;
     empty_group_selection) printf '群組選取不能為空。' ;;
     empty_selection) printf '未選取任何套件。' ;;
-    fzf_failed) printf 'fzf 互動選取失敗（%s）。' "${1-}" ;;
+    fzf_failed)
+      reason_key=${1-}
+      case "$reason_key" in
+        empty_record) printf 'fzf 互動選取失敗：輸出包含空紀錄或空白字元。' ;;
+        unknown_record) printf 'fzf 互動選取失敗：輸出包含未知的紀錄「%s」。' "${2-}" ;;
+        invalid_format) printf 'fzf 互動選取失敗：無效的紀錄格式「%s」。' "${2-}" ;;
+        *) printf 'fzf 互動選取失敗（%s）。' "${1-}" ;;
+      esac
+      ;;
     *) return 64 ;;
   esac
 }
@@ -739,8 +763,8 @@ trim_whitespace() {
 
 parse_manifest() {
   manifest=${1-}
-  test -n "$manifest" || die invalid_manifest 'manifest path is required'
-  test -f "$manifest" && test -r "$manifest" || die invalid_manifest "$manifest"
+  test -n "$manifest" || die invalid_manifest path_required
+  test -f "$manifest" && test -r "$manifest" || die invalid_manifest file_not_found "$manifest"
 
   case "$manifest" in
     */*) manifest_dir="${manifest%/*}" ;;
@@ -748,9 +772,9 @@ parse_manifest() {
   esac
   checkout_dir="${2:-${CHECKOUT_DIR:-$manifest_dir}}"
   test -n "$checkout_dir" || checkout_dir='.'
-  test -d "$checkout_dir" || die invalid_manifest "checkout directory '$checkout_dir' not found"
+  test -d "$checkout_dir" || die invalid_manifest checkout_dir_not_found "$checkout_dir"
 
-  test -n "$SANDBOX" && test -d "$SANDBOX" || die lock_failed 'sandbox not initialized'
+  test -n "$SANDBOX" && test -d "$SANDBOX" || die lock_failed "$SANDBOX"
 
   if test "${KAISIAN_TESTING-0}" = '1'; then
     plutil_bin="${KAISIAN_PLUTIL_EXEC:-${PLUTIL_EXEC:-/usr/bin/plutil}}"
@@ -976,8 +1000,8 @@ select_interactively() {
     ( : < /dev/tty && : > /dev/tty ) 2>/dev/null || die no_tty
   fi
 
-  test -n "$SANDBOX" || die lock_failed 'sandbox not initialized'
-  test -f "$SANDBOX/groups.tsv" || die invalid_manifest missing_groups
+  test -n "$SANDBOX" || die lock_failed "$SANDBOX"
+  test -f "$SANDBOX/groups.tsv" || die invalid_manifest groups_not_found
 
   fzf_candidates="$SANDBOX/fzf_candidates.txt"
   : > "$fzf_candidates"
@@ -1021,25 +1045,31 @@ select_interactively() {
 
   selected_set=''
   while IFS= read -r line || test -n "$line"; do
+    test -n "$line" || die fzf_failed empty_record
     case "$line" in
-      *'	'*) item="${line%%	*}" ;;
-      *) item="$line" ;;
+      *'	'*) record_name="${line%%	*}" ;;
+      *) record_name="$line" ;;
     esac
-    item=$(trim_whitespace "$item")
-    test -n "$item" || die fzf_failed 'empty record'
+    is_valid_name "$record_name" || die fzf_failed invalid_format "$line"
 
-    case " $all_groups " in
-      *" $item "*) ;;
-      *) die fzf_failed "unknown record '$item'" ;;
-    esac
+    is_declared=0
+    while IFS='	' read -r gname desc_en desc_zh || test -n "$gname"; do
+      test -n "$gname" || continue
+      if test "$record_name" = "$gname"; then
+        is_declared=1
+        break
+      fi
+    done < "$SANDBOX/groups.tsv"
+
+    test "$is_declared" -eq 1 || die fzf_failed unknown_record "$record_name"
 
     case " $selected_set " in
-      *" $item "*) ;;
+      *" $record_name "*) ;;
       *)
         if test -z "$selected_set"; then
-          selected_set="$item"
+          selected_set="$record_name"
         else
-          selected_set="$selected_set $item"
+          selected_set="$selected_set $record_name"
         fi
         ;;
     esac
@@ -1059,8 +1089,8 @@ select_interactively() {
 }
 
 resolve_selection() {
-  test -n "$SANDBOX" || die lock_failed 'sandbox not initialized'
-  test -f "$SANDBOX/groups.tsv" || die invalid_manifest 'groups table not found'
+  test -n "$SANDBOX" || die lock_failed "$SANDBOX"
+  test -f "$SANDBOX/groups.tsv" || die invalid_manifest groups_not_found
 
   case "$SELECTION_MODE" in
     none|all)
