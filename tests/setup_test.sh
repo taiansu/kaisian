@@ -638,14 +638,15 @@ if test "$simulate" -eq 1; then
   exit 0
 fi
 
-# Built-in ignores are active when $HOME/.stow-global-ignore is absent
+# Built-in ignores are active when $HOME/.stow-global-ignore is absent;
+# empty file disables built-in ignores; nonempty file fails in fake stow.
 ignore_file="${HOME-}/.stow-global-ignore"
 builtin_ignore=0
-has_custom_ignores=0
 if test -z "${HOME-}" || test ! -f "$ignore_file"; then
   builtin_ignore=1
 elif test -s "$ignore_file"; then
-  has_custom_ignores=1
+  printf 'Non-empty .stow-global-ignore is unsupported in fake stow\n' >&2
+  exit 1
 fi
 
 # Link creation
@@ -662,21 +663,6 @@ for pkg in $restow_pkgs; do
         case "$iname" in
           README*|LICENSE*|COPYING*|'*~'|'#*#') continue ;;
         esac
-      fi
-      if test "$has_custom_ignores" -eq 1; then
-        matched=0
-        while read -r pattern; do
-          test -n "$pattern" || continue
-          case "$pattern" in
-            \#*) continue ;;
-          esac
-          case "$iname" in
-            $pattern) matched=1; break ;;
-          esac
-        done < "$ignore_file"
-        if test "$matched" -eq 1; then
-          continue
-        fi
       fi
       tname="$iname"
       if test "$dotfiles" -eq 1; then
@@ -697,21 +683,6 @@ for pkg in $restow_pkgs; do
           case "$fname" in
             README*|LICENSE*|COPYING*|'*~'|'#*#') continue ;;
           esac
-        fi
-        if test "$has_custom_ignores" -eq 1; then
-          matched=0
-          while read -r pattern; do
-            test -n "$pattern" || continue
-            case "$pattern" in
-              \#*) continue ;;
-            esac
-            case "$fname" in
-              $pattern) matched=1; break ;;
-            esac
-          done < "$ignore_file"
-          if test "$matched" -eq 1; then
-            continue
-          fi
         fi
         if test -n "$ignore_regex"; then
           if printf '%s\n' "$rel" | grep -Eq "$ignore_regex"; then
@@ -1079,11 +1050,18 @@ lock_cleanup_on_subshell_failure_case() {
   return 0
 }
 
-# 20. discover_executable does not execute external which, dirname, or basename from PATH
+# 20. discover_executable resolves real relative path without calling external which, dirname, or basename
 discover_executable_purity_case() {
   test_dir=$(mktemp -d "$ROOT/purity-test.XXXXXX")
   test_dir=$(cd -P "$test_dir" && pwd -P)
-  mkdir -p "$test_dir/rel_evil" "$test_dir/markers"
+  mkdir -p "$test_dir/rel_bin" "$test_dir/rel_evil" "$test_dir/markers"
+
+  # Create real executable probe
+  cat << 'EOF' > "$test_dir/rel_bin/probe"
+#!/bin/bash
+exit 0
+EOF
+  chmod +x "$test_dir/rel_bin/probe"
 
   for tool in which dirname basename; do
     cat << EOF > "$test_dir/rel_evil/$tool"
@@ -1099,12 +1077,14 @@ EOF
     export KAISIAN_TESTING=1
     . "$SCRIPT"
 
-    out=$(PATH="rel_evil:$PATH" discover_executable git 2>&1) || exit 1
+    # Invoke discover_executable with only relative PATH entries
+    out=$(PATH="rel_evil:rel_bin" discover_executable probe 2>&1) || exit 1
     test -n "$out" || exit 1
     case "$out" in
       /*) ;;
       *) exit 1 ;;
     esac
+    test "$out" = "$test_dir/rel_bin/probe" || exit 1
     test -f "$out" || exit 1
     test -x "$out" || exit 1
     exit 0
@@ -1114,6 +1094,39 @@ EOF
   assert_not_exists "$test_dir/markers/which_ran" || return 1
   assert_not_exists "$test_dir/markers/dirname_ran" || return 1
   assert_not_exists "$test_dir/markers/basename_ran" || return 1
+  return 0
+}
+
+# 21. nonempty .stow-global-ignore makes probe fail while empty succeeds
+stow_nonempty_ignore_probe_failure_case() {
+  uid=$(/usr/bin/id -u)
+  lock_dir="/private/tmp/kaisian-$uid.lock"
+  if test -e "$lock_dir"; then
+    printf 'FAIL: Pre-existing external lock at %s\n' "$lock_dir" >&2
+    return 1
+  fi
+
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+
+    acquire_lock
+    test_ino="$RECORDED_LOCK_DEV_INO"
+    trap 'curr=$(/usr/bin/stat -f "%d %i" "'"$lock_dir"'" 2>/dev/null || true); if test "$curr" = "'"$test_ino"'"; then rm -rf "'"$lock_dir"'"; fi' EXIT
+
+    mock_bin="$ROOT/mock-probe-bin"
+
+    # Make .stow-global-ignore non-empty
+    echo "custom_pattern" > "$SANDBOX/stow-home/.stow-global-ignore"
+
+    out=$(KAISIAN_GIT_EXEC="$mock_bin/git" KAISIAN_STOW_EXEC="$mock_bin/stow" PATH="$mock_bin:/usr/bin:/bin" require_prerequisites 2>&1)
+    status=$?
+    cleanup
+
+    test "$status" -ne 0 || exit 1
+    assert_contains "$out" "GNU Stow does not support required behavior" || exit 1
+    exit 0
+  ) || return 1
   return 0
 }
 
@@ -1137,6 +1150,7 @@ run_case 'production runner hook immunity' production_hook_immunity_case
 run_case 'compat probe failure on ignored compat behavior' compat_probe_failure_on_ignored_compat_case
 run_case 'subshell lock cleanup safety on assertion failure' lock_cleanup_on_subshell_failure_case
 run_case 'discover_executable does not execute external which, dirname, or basename from PATH' discover_executable_purity_case
+run_case 'nonempty .stow-global-ignore makes probe fail while empty succeeds' stow_nonempty_ignore_probe_failure_case
 
 printf '%s passed; %s failed\n' "$PASS" "$FAIL"
 test "$FAIL" -eq 0
