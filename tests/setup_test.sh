@@ -3409,7 +3409,7 @@ single_fetch_and_trace_assertions_case() {
     while IFS= read -r trace_line; do
       test -n "$trace_line" || exit 1
       case "$trace_line" in
-        ENV:*) actual_env="$trace_line" ;;
+        ENV:*) test -z "$actual_env" || exit 1; actual_env="$trace_line" ;;
         git\ *)
           test "$actual_env" = "$base_env" || test "$actual_env" = "$index_env" || exit 1
           test "$trace_line" = "${expected_cmd[$pair_index]}" || exit 1
