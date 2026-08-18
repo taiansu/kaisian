@@ -1,0 +1,191 @@
+#!/bin/bash
+set -u
+
+# Ensure trace log directory exists and log command
+trace_log="${KAISIAN_GIT_TRACE_LOG:-}"
+if test -z "$trace_log"; then
+  if test -d "tests/tmp"; then
+    trace_log="tests/tmp/last-command-trace.log"
+  elif test -d "../tests/tmp"; then
+    trace_log="../tests/tmp/last-command-trace.log"
+  fi
+fi
+
+if test -n "$trace_log"; then
+  /bin/mkdir -p "$(dirname "$trace_log")" 2>/dev/null || true
+  printf 'git' >> "$trace_log"
+  for arg in "$@"; do
+    printf ' %s' "$arg" >> "$trace_log"
+  done
+  printf '\n' >> "$trace_log"
+fi
+
+# Environment verification
+if test "${GIT_CONFIG_NOSYSTEM-}" != "1" || \
+   test "${GIT_NO_REPLACE_OBJECTS-}" != "1" || \
+   test "${GIT_ATTR_NOSYSTEM-}" != "1" || \
+   test "${GIT_TERMINAL_PROMPT-}" != "0" || \
+   test "${GIT_ASKPASS-}" != "/usr/bin/false"; then
+  if test "${KAISIAN_TESTING_STRICT_ENV-0}" = "1"; then
+    printf 'fake-git: missing sanitized environment variables\n' >&2
+    exit 1
+  fi
+fi
+
+REAL_GIT="/usr/bin/git"
+
+# Parse global options like -C <dir>
+dir_opt=""
+while test $# -gt 0; do
+  case "$1" in
+    -C)
+      dir_opt="$2"
+      shift 2
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+if test $# -eq 0; then
+  if test -n "$dir_opt"; then
+    exec "$REAL_GIT" -C "$dir_opt"
+  else
+    exec "$REAL_GIT"
+  fi
+fi
+
+subcmd="$1"
+
+lookup_remote() {
+  url="$1"
+  map_file="${KAISIAN_FAKE_GIT_MAP:-}"
+  if test -n "$map_file" && test -f "$map_file"; then
+    while IFS='=' read -r map_url map_path || test -n "$map_url"; do
+      if test "$map_url" = "$url"; then
+        printf '%s\n' "$map_path"
+        return 0
+      fi
+    done < "$map_file"
+  fi
+  return 1
+}
+
+case "$subcmd" in
+  ls-remote)
+    shift
+    target_url=""
+    ls_opts=()
+    while test $# -gt 0; do
+      case "$1" in
+        -*)
+          ls_opts=("${ls_opts[@]+"${ls_opts[@]}"}" "$1")
+          shift
+          ;;
+        *)
+          target_url="$1"
+          shift
+          ;;
+      esac
+    done
+    if test -z "$target_url"; then
+      printf 'fake-git: ls-remote requires URL\n' >&2
+      exit 1
+    fi
+    case "$target_url" in
+      https://*)
+        if local_target=$(lookup_remote "$target_url"); then
+          if test -n "$dir_opt"; then
+            if test "${#ls_opts[@]}" -gt 0; then
+              exec env GIT_ALLOW_PROTOCOL=file "$REAL_GIT" -C "$dir_opt" ls-remote "${ls_opts[@]}" "$local_target"
+            else
+              exec env GIT_ALLOW_PROTOCOL=file "$REAL_GIT" -C "$dir_opt" ls-remote "$local_target"
+            fi
+          else
+            if test "${#ls_opts[@]}" -gt 0; then
+              exec env GIT_ALLOW_PROTOCOL=file "$REAL_GIT" ls-remote "${ls_opts[@]}" "$local_target"
+            else
+              exec env GIT_ALLOW_PROTOCOL=file "$REAL_GIT" ls-remote "$local_target"
+            fi
+          fi
+        else
+          printf 'fatal: unable to access '\''%s\'\'': Could not resolve host: %s\n' "$target_url" "${target_url#https://}" >&2
+          exit 128
+        fi
+        ;;
+      *)
+        printf 'fatal: protocol '\''%s'\'' is not supported\n' "$target_url" >&2
+        exit 128
+        ;;
+    esac
+    ;;
+  fetch)
+    shift
+    fetch_opts=()
+    target_url=""
+    target_ref=""
+    while test $# -gt 0; do
+      case "$1" in
+        --no-tags|--depth=*|--depth)
+          if test "$1" = "--depth"; then
+            fetch_opts=("${fetch_opts[@]+"${fetch_opts[@]}"}" "$1" "$2")
+            shift 2
+          else
+            fetch_opts=("${fetch_opts[@]+"${fetch_opts[@]}"}" "$1")
+            shift
+          fi
+          ;;
+        -*)
+          fetch_opts=("${fetch_opts[@]+"${fetch_opts[@]}"}" "$1")
+          shift
+          ;;
+        *)
+          if test -z "$target_url"; then
+            target_url="$1"
+          else
+            target_ref="$1"
+          fi
+          shift
+          ;;
+      esac
+    done
+    if test -z "$target_url"; then
+      printf 'fake-git: fetch requires URL\n' >&2
+      exit 1
+    fi
+    case "$target_url" in
+      https://*)
+        if local_target=$(lookup_remote "$target_url"); then
+          if test -n "$dir_opt"; then
+            if test "${#fetch_opts[@]}" -gt 0; then
+              exec env GIT_ALLOW_PROTOCOL=file "$REAL_GIT" -C "$dir_opt" fetch "${fetch_opts[@]}" "$local_target" ${target_ref:+"$target_ref"}
+            else
+              exec env GIT_ALLOW_PROTOCOL=file "$REAL_GIT" -C "$dir_opt" fetch "$local_target" ${target_ref:+"$target_ref"}
+            fi
+          else
+            if test "${#fetch_opts[@]}" -gt 0; then
+              exec env GIT_ALLOW_PROTOCOL=file "$REAL_GIT" fetch "${fetch_opts[@]}" "$local_target" ${target_ref:+"$target_ref"}
+            else
+              exec env GIT_ALLOW_PROTOCOL=file "$REAL_GIT" fetch "$local_target" ${target_ref:+"$target_ref"}
+            fi
+          fi
+        else
+          printf 'fatal: unable to access '\''%s\'\'': Could not resolve host: %s\n' "$target_url" "${target_url#https://}" >&2
+          exit 128
+        fi
+        ;;
+      *)
+        printf 'fatal: protocol '\''%s'\'' is not supported\n' "$target_url" >&2
+        exit 128
+        ;;
+    esac
+    ;;
+  *)
+    if test -n "$dir_opt"; then
+      exec "$REAL_GIT" -C "$dir_opt" "$@"
+    else
+      exec "$REAL_GIT" "$@"
+    fi
+    ;;
+esac

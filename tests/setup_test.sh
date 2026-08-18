@@ -5,6 +5,10 @@ ROOT=$(mktemp -d "${TMPDIR:-/tmp}/kaisian-test.XXXXXX") || exit 1
 ROOT=$(cd -P "$ROOT" && pwd -P)
 trap 'rm -rf -- "$ROOT"' EXIT HUP INT TERM
 SCRIPT=$(cd "$(dirname "$0")/.." && pwd -P)/setup.sh
+TRACE_LOG="$(cd "$(dirname "$0")" && pwd -P)/tmp/last-command-trace.log"
+/bin/mkdir -p "$(dirname "$TRACE_LOG")" 2>/dev/null || true
+: > "$TRACE_LOG"
+export KAISIAN_GIT_TRACE_LOG="$TRACE_LOG"
 PASS=0
 FAIL=0
 
@@ -454,6 +458,17 @@ message_key_parity_case() {
       "empty_group_selection"
       "empty_selection"
       "fzf_failed"
+      "invalid_repository"
+      "custom_repo_requires_ref"
+      "invalid_ref"
+      "ambiguous_ref"
+      "ref_not_found"
+      "invalid_git_config"
+      "invalid_git_admin"
+      "dirty_checkout"
+      "invalid_submodule"
+      "submodule_failed"
+      "git_operation_failed"
     )
     for key in "${keys[@]}"; do
       en_msg=$(LANGUAGE=en message "$key" "test_arg" "test_arg2") || {
@@ -1933,6 +1948,631 @@ EOF
   ) || return 1
   return 0
 }
+
+# -----------------------------------------------------------------------------
+# Task 4 Test Cases: Source & Ref Acquisition, Config/Admin & Submodules
+# -----------------------------------------------------------------------------
+
+FIXTURES_DIR="$(cd "$(dirname "$SCRIPT")/tests/fixtures" && pwd -P)"
+FAKE_GIT="$FIXTURES_DIR/fake-git"
+
+make_remote_repo() {
+  repo_dir=$(mktemp -d "$ROOT/remote.XXXXXX")
+  (
+    cd -P "$repo_dir" || exit 1
+    git init -q
+    git config user.email "test@example.com"
+    git config user.name "Test User"
+    mkdir -p shell git mise .vendor/helper
+    printf 'zshrc\n' > shell/dot-zshrc
+    printf 'gitconfig\n' > git/dot-gitconfig
+    printf 'miseconfig\n' > mise/dot-config
+    cat << 'JSON' > .kaisian.json
+{
+  "schema": 1,
+  "groups": [
+    { "name": "shell", "description": { "en": "Shell", "zh-TW": "Shell" } },
+    { "name": "git", "description": { "en": "Git", "zh-TW": "Git" } },
+    { "name": "mise", "description": { "en": "Mise", "zh-TW": "Mise" } }
+  ],
+  "profiles": { "minimal": ["shell", "git", "mise"] }
+}
+JSON
+    git add .
+    git commit -q -m "initial commit"
+    git branch -M main
+  )
+  (cd -P "$repo_dir" && pwd -P)
+}
+
+source_canonicalization_matrix_case() {
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+
+    # Valid normalizations
+    test "$(canonicalize_repository 'taiansu/dotfiles')" = "https://github.com/taiansu/dotfiles" || exit 1
+    test "$(canonicalize_repository 'https://github.com/taiansu/dotfiles')" = "https://github.com/taiansu/dotfiles" || exit 1
+    test "$(canonicalize_repository 'https://github.com/taiansu/dotfiles.git')" = "https://github.com/taiansu/dotfiles" || exit 1
+    test "$(canonicalize_repository 'https://github.com/taiansu/dotfiles/')" = "https://github.com/taiansu/dotfiles" || exit 1
+    test "$(canonicalize_repository 'https://github.com/taiansu/dotfiles.git/')" = "https://github.com/taiansu/dotfiles" || exit 1
+    test "$(canonicalize_repository 'https://GITHUB.COM/taiansu/dotfiles')" = "https://github.com/taiansu/dotfiles" || exit 1
+    test "$(canonicalize_repository 'https://gitlab.com/group/subgroup/repo.git')" = "https://gitlab.com/group/subgroup/repo" || exit 1
+
+    # Invalid sources that must be rejected
+    invalid_sources=(
+      "https://user:pass@github.com/repo"
+      "https://user@github.com/repo"
+      "git@github.com:user/repo"
+      "ssh://git@github.com/user/repo"
+      "file:///path/to/repo"
+      "ext::sh -c evil"
+      "/path/to/repo"
+      "https://github.com/user/測試"
+      "https://github.com:443/user/repo"
+      "https://github.com/user/%20"
+      "https://github.com/user/repo?foo=bar"
+      "https://github.com/user/repo#main"
+      "https://github.com//user/repo"
+      "https://github.com/user/../repo"
+      "https://github.com/user/./repo"
+      "https://github.com/-option"
+      "-oOption"
+      "https://github.com/user/repo:refs/heads/main"
+      "https://github.com/"
+      "owner"
+      "owner/"
+      "/repo"
+      ""
+    )
+    for src in "${invalid_sources[@]}"; do
+      if ( canonicalize_repository "$src" ) >/dev/null 2>&1; then
+        printf 'Failed to reject invalid repository source: %s\n' "$src" >&2
+        exit 1
+      fi
+    done
+    exit 0
+  ) || return 1
+  return 0
+}
+
+custom_repo_requires_ref_case() {
+  test_home=$(make_home)
+  fake_bin=$(make_fake_bin)
+
+  # 1. Custom repo without --ref fails
+  out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --repo someone/dotfiles 2>&1)
+  test $? -ne 0 || return 1
+  assert_contains "$out" "specifying a custom --repo requires an explicit --ref" || return 1
+
+  # 2. Localized zh-TW failure
+  out_zh=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --lang zh-TW --repo someone/dotfiles 2>&1)
+  test $? -ne 0 || return 1
+  assert_contains "$out_zh" "指定自訂 --repo 時必須一併指定明確的 --ref" || return 1
+
+  return 0
+}
+
+origin_ref_resolution_and_ambiguity_case() {
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+
+    remote_repo=$(make_remote_repo)
+    (
+      cd "$remote_repo" || exit 1
+      git checkout -q -b feature
+      printf 'feature\n' > feature.txt
+      git add feature.txt
+      git commit -q -m "feature commit"
+      git tag -a -m "annotated tag v2.0" v2.0
+      git tag v1.0
+      # Create ambiguity: release is both a branch and a tag
+      git branch release
+      git tag release
+      git checkout -q main
+    )
+
+    trace_log="$TRACE_LOG"
+    map_file="$ROOT/fake-map.txt"
+    printf 'https://github.com/taiansu/dotfiles=%s\n' "$remote_repo" > "$map_file"
+
+    CANONICAL_REPO="https://github.com/taiansu/dotfiles"
+    REPOSITORY="taiansu/dotfiles"
+    export KAISIAN_GIT_EXEC="$FAKE_GIT"
+    export KAISIAN_GIT_TRACE_LOG="$trace_log"
+    export KAISIAN_FAKE_GIT_MAP="$map_file"
+
+    acquire_lock
+
+    # 1. Remote HEAD resolves
+    REQUESTED_REF="HEAD"
+    resolve_remote_ref
+    test "$RESOLVED_FETCH_REF" = "HEAD" || exit 1
+    test -n "$EXPECTED_COMMIT_SHA" || exit 1
+
+    # 2. Full branch ref
+    REQUESTED_REF="refs/heads/feature"
+    resolve_remote_ref
+    test "$RESOLVED_FETCH_REF" = "refs/heads/feature" || exit 1
+
+    # 3. Full tag ref (annotated tag peels to commit)
+    REQUESTED_REF="refs/tags/v2.0"
+    resolve_remote_ref
+    test "$RESOLVED_FETCH_REF" = "refs/tags/v2.0" || exit 1
+    peeled_sha=$(git -C "$remote_repo" rev-parse "refs/tags/v2.0^{commit}")
+    test "$EXPECTED_COMMIT_SHA" = "$peeled_sha" || exit 1
+
+    # 4. Unambiguous shorthand branch
+    REQUESTED_REF="feature"
+    resolve_remote_ref
+    test "$RESOLVED_FETCH_REF" = "refs/heads/feature" || exit 1
+
+    # 5. Unambiguous shorthand tag
+    REQUESTED_REF="v1.0"
+    resolve_remote_ref
+    test "$RESOLVED_FETCH_REF" = "refs/tags/v1.0" || exit 1
+
+    # 6. Ambiguous shorthand (exists as branch AND tag) MUST reject
+    REQUESTED_REF="release"
+    if ( resolve_remote_ref ) >/dev/null 2>&1; then
+      printf 'Expected resolve_remote_ref to fail on ambiguous shorthand\n' >&2
+      exit 1
+    fi
+
+    # 7. Nonexistent ref MUST reject
+    REQUESTED_REF="nonexistent_branch_xyz"
+    if ( resolve_remote_ref ) >/dev/null 2>&1; then
+      printf 'Expected resolve_remote_ref to fail on nonexistent ref\n' >&2
+      exit 1
+    fi
+
+    cleanup
+    exit 0
+  ) || return 1
+  return 0
+}
+
+fetched_object_pinning_beats_malicious_local_refs_case() {
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+
+    remote_repo=$(make_remote_repo)
+    origin_commit=$(git -C "$remote_repo" rev-parse HEAD)
+
+    checkout_dir=$(mktemp -d "$ROOT/checkout.XXXXXX")
+    (
+      cd "$checkout_dir" || exit 1
+      git init -q
+      git config remote.origin.url "https://github.com/taiansu/dotfiles"
+      git config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
+      printf 'evil\n' > evil.txt
+      git add evil.txt
+      git -c user.email="attacker@example.com" -c user.name="Attacker" commit -q -m "malicious local commit"
+      # Malicious local branch and tag named main
+      git branch -M main
+      git tag -f main
+    )
+
+    map_file="$ROOT/fake-map.txt"
+    printf 'https://github.com/taiansu/dotfiles=%s\n' "$remote_repo" > "$map_file"
+    trace_log="$TRACE_LOG"
+
+    CANONICAL_REPO="https://github.com/taiansu/dotfiles"
+    REPOSITORY="taiansu/dotfiles"
+    REQUESTED_REF="main"
+    CHECKOUT_DIR="$checkout_dir"
+    export KAISIAN_GIT_EXEC="$FAKE_GIT"
+    export KAISIAN_GIT_TRACE_LOG="$trace_log"
+    export KAISIAN_FAKE_GIT_MAP="$map_file"
+
+    acquire_lock
+    resolve_remote_ref
+    (cd "$checkout_dir" && rm -f evil.txt && git -c user.email="attacker@example.com" -c user.name="Attacker" commit -q -a -m "clean")
+    update_repository "$checkout_dir"
+
+    # Assert checkout is at origin_commit, not malicious local commit
+    actual_head=$(git -C "$checkout_dir" rev-parse HEAD)
+    test "$actual_head" = "$origin_commit" || exit 1
+
+    cleanup
+    exit 0
+  ) || return 1
+  return 0
+}
+
+new_checkout_uses_init_and_single_fetch_case() {
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+
+    remote_repo=$(make_remote_repo)
+    origin_commit=$(git -C "$remote_repo" rev-parse HEAD)
+
+    checkout_dir="$ROOT/new-checkout-$(date +%s)-$RANDOM"
+    map_file="$ROOT/fake-map.txt"
+    printf 'https://github.com/taiansu/dotfiles=%s\n' "$remote_repo" > "$map_file"
+    trace_log="$TRACE_LOG"
+
+    CANONICAL_REPO="https://github.com/taiansu/dotfiles"
+    REPOSITORY="taiansu/dotfiles"
+    REQUESTED_REF="main"
+    CHECKOUT_DIR="$checkout_dir"
+    export KAISIAN_GIT_EXEC="$FAKE_GIT"
+    export KAISIAN_GIT_TRACE_LOG="$trace_log"
+    export KAISIAN_FAKE_GIT_MAP="$map_file"
+
+    acquire_lock
+    resolve_remote_ref
+    initialize_repository "$checkout_dir"
+
+    test -d "$checkout_dir/.git" || exit 1
+    actual_head=$(git -C "$checkout_dir" rev-parse HEAD)
+    test "$actual_head" = "$origin_commit" || exit 1
+
+    # No local branch created (HEAD is detached)
+    local_branches=$(git -C "$checkout_dir" for-each-ref --format='%(refname)' refs/heads/)
+    test -z "$local_branches" || exit 1
+
+    cleanup
+    exit 0
+  ) || return 1
+  return 0
+}
+
+existing_checkout_cleanliness_and_origin_mismatch_case() {
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+
+    remote_repo=$(make_remote_repo)
+    map_file="$ROOT/fake-map.txt"
+    printf 'https://github.com/taiansu/dotfiles=%s\n' "$remote_repo" > "$map_file"
+
+    CANONICAL_REPO="https://github.com/taiansu/dotfiles"
+    REPOSITORY="taiansu/dotfiles"
+    REQUESTED_REF="main"
+    export KAISIAN_GIT_EXEC="$FAKE_GIT"
+    export KAISIAN_FAKE_GIT_MAP="$map_file"
+
+    acquire_lock
+    resolve_remote_ref
+
+    # 1. Origin URL mismatch
+    checkout_mismatch=$(mktemp -d "$ROOT/chk-mismatch.XXXXXX")
+    initialize_repository "$checkout_mismatch" || exit 1
+    git -C "$checkout_mismatch" config remote.origin.url "https://github.com/other/repo"
+    if ( validate_git_config "$checkout_mismatch" ) >/dev/null 2>&1; then
+      printf 'Expected origin mismatch to fail\n' >&2
+      exit 1
+    fi
+
+    # 2. Dirty tracked file
+    checkout_dirty=$(mktemp -d "$ROOT/chk-dirty.XXXXXX")
+    initialize_repository "$checkout_dirty" || exit 1
+    printf 'modified\n' >> "$checkout_dirty/shell/dot-zshrc"
+    if ( verify_clean_tree "$checkout_dirty" ) >/dev/null 2>&1; then
+      printf 'Expected dirty tracked file to fail clean tree check\n' >&2
+      exit 1
+    fi
+
+    # 3. Untracked file
+    checkout_untracked=$(mktemp -d "$ROOT/chk-untracked.XXXXXX")
+    initialize_repository "$checkout_untracked" || exit 1
+    printf 'untracked\n' > "$checkout_untracked/untracked.txt"
+    if ( verify_clean_tree "$checkout_untracked" ) >/dev/null 2>&1; then
+      printf 'Expected untracked file to fail clean tree check\n' >&2
+      exit 1
+    fi
+
+    # 4. Ignored file
+    checkout_ignored=$(mktemp -d "$ROOT/chk-ignored.XXXXXX")
+    initialize_repository "$checkout_ignored" || exit 1
+    printf '.ignored\n' > "$checkout_ignored/.gitignore"
+    (cd "$checkout_ignored" && git add .gitignore && git commit -q -m "add gitignore")
+    printf 'ignored\n' > "$checkout_ignored/.ignored"
+    if ( verify_clean_tree "$checkout_ignored" ) >/dev/null 2>&1; then
+      printf 'Expected ignored file to fail clean tree check\n' >&2
+      exit 1
+    fi
+
+    # 5. In-progress operation markers
+    checkout_op=$(mktemp -d "$ROOT/chk-op.XXXXXX")
+    initialize_repository "$checkout_op" || exit 1
+    touch "$checkout_op/.git/MERGE_HEAD"
+    if ( validate_git_admin "$checkout_op" ) >/dev/null 2>&1; then
+      printf 'Expected MERGE_HEAD to fail admin validation\n' >&2
+      exit 1
+    fi
+
+    cleanup
+    exit 0
+  ) || return 1
+  return 0
+}
+
+git_config_allowlist_and_hostile_configs_case() {
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+
+    remote_repo=$(make_remote_repo)
+    map_file="$ROOT/fake-map.txt"
+    printf 'https://github.com/taiansu/dotfiles=%s\n' "$remote_repo" > "$map_file"
+
+    CANONICAL_REPO="https://github.com/taiansu/dotfiles"
+    REPOSITORY="taiansu/dotfiles"
+    REQUESTED_REF="main"
+    export KAISIAN_GIT_EXEC="$FAKE_GIT"
+    export KAISIAN_FAKE_GIT_MAP="$map_file"
+
+    acquire_lock
+    resolve_remote_ref
+
+    checkout_base=$(mktemp -d "$ROOT/chk-cfg.XXXXXX")
+    initialize_repository "$checkout_base" || exit 1
+
+    # Allowed config passes
+    validate_git_config "$checkout_base" || exit 1
+
+    # Test hostile config keys:
+    hostile_configs=(
+      "core.worktree=/tmp"
+      "core.symlinks=false"
+      "core.hookspath=/tmp/hooks"
+      "core.fsmonitor=true"
+      "core.unknownkey=value"
+      "include.path=/tmp/evil.inc"
+      "url.git@github.com:.insteadOf=https://github.com/"
+      "filter.evil.clean=cat"
+      "diff.evil.command=sh"
+      "remote.upstream.url=https://github.com/other/repo"
+      "remote.origin.fetch=+refs/heads/*:refs/remotes/evil/*"
+      "branch.main.rebase=true"
+    )
+
+    for cfg in "${hostile_configs[@]}"; do
+      key="${cfg%%=*}"
+      val="${cfg#*=}"
+      chk=$(mktemp -d "$ROOT/chk-cfg-sub.XXXXXX")
+      initialize_repository "$chk" || exit 1
+      git -C "$chk" config --local "$key" "$val" 2>/dev/null || printf '\n[%s]\n\t%s = %s\n' "${key%%.*}" "${key#*.}" "$val" >> "$chk/.git/config"
+      if ( validate_git_config "$chk" ) >/dev/null 2>&1; then
+        printf 'Failed to reject hostile git config: %s\n' "$cfg" >&2
+        exit 1
+      fi
+    done
+
+    cleanup
+    exit 0
+  ) || return 1
+  return 0
+}
+
+git_admin_boundaries_and_replacements_case() {
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+
+    remote_repo=$(make_remote_repo)
+    map_file="$ROOT/fake-map.txt"
+    printf 'https://github.com/taiansu/dotfiles=%s\n' "$remote_repo" > "$map_file"
+
+    CANONICAL_REPO="https://github.com/taiansu/dotfiles"
+    REPOSITORY="taiansu/dotfiles"
+    REQUESTED_REF="main"
+    export KAISIAN_GIT_EXEC="$FAKE_GIT"
+    export KAISIAN_FAKE_GIT_MAP="$map_file"
+
+    acquire_lock
+    resolve_remote_ref
+
+    # 1. Replacement refs
+    chk_replace=$(mktemp -d "$ROOT/chk-rep.XXXXXX")
+    initialize_repository "$chk_replace" || exit 1
+    mkdir -p "$chk_replace/.git/refs/replace"
+    touch "$chk_replace/.git/refs/replace/1234567890123456789012345678901234567890"
+    if ( validate_git_admin "$chk_replace" ) >/dev/null 2>&1; then
+      printf 'Expected replace refs to fail admin validation\n' >&2
+      exit 1
+    fi
+
+    # 2. Grafts
+    chk_graft=$(mktemp -d "$ROOT/chk-graft.XXXXXX")
+    initialize_repository "$chk_graft" || exit 1
+    mkdir -p "$chk_graft/.git/info"
+    touch "$chk_graft/.git/info/grafts"
+    if ( validate_git_admin "$chk_graft" ) >/dev/null 2>&1; then
+      printf 'Expected info/grafts to fail admin validation\n' >&2
+      exit 1
+    fi
+
+    # 3. Info attributes
+    chk_attr=$(mktemp -d "$ROOT/chk-attr.XXXXXX")
+    initialize_repository "$chk_attr" || exit 1
+    mkdir -p "$chk_attr/.git/info"
+    touch "$chk_attr/.git/info/attributes"
+    if ( validate_git_admin "$chk_attr" ) >/dev/null 2>&1; then
+      printf 'Expected info/attributes to fail admin validation\n' >&2
+      exit 1
+    fi
+
+    # 4. Alternates
+    chk_alt=$(mktemp -d "$ROOT/chk-alt.XXXXXX")
+    initialize_repository "$chk_alt" || exit 1
+    mkdir -p "$chk_alt/.git/objects/info"
+    touch "$chk_alt/.git/objects/info/alternates"
+    if ( validate_git_admin "$chk_alt" ) >/dev/null 2>&1; then
+      printf 'Expected alternates to fail admin validation\n' >&2
+      exit 1
+    fi
+
+    # 5. Linked worktree (.git is a file)
+    chk_wt=$(mktemp -d "$ROOT/chk-wt.XXXXXX")
+    mkdir -p "$chk_wt"
+    printf 'gitdir: /tmp/other.git\n' > "$chk_wt/.git"
+    if ( validate_git_admin "$chk_wt" ) >/dev/null 2>&1; then
+      printf 'Expected linked worktree (.git file) to fail admin validation\n' >&2
+      exit 1
+    fi
+
+    cleanup
+    exit 0
+  ) || return 1
+  return 0
+}
+
+fresh_index_defeats_hidden_worktree_modifications_case() {
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+
+    remote_repo=$(make_remote_repo)
+    map_file="$ROOT/fake-map.txt"
+    printf 'https://github.com/taiansu/dotfiles=%s\n' "$remote_repo" > "$map_file"
+
+    CANONICAL_REPO="https://github.com/taiansu/dotfiles"
+    REPOSITORY="taiansu/dotfiles"
+    REQUESTED_REF="main"
+    export KAISIAN_GIT_EXEC="$FAKE_GIT"
+    export KAISIAN_FAKE_GIT_MAP="$map_file"
+
+    acquire_lock
+    resolve_remote_ref
+
+    # 1. assume-unchanged modified file
+    chk_assume=$(mktemp -d "$ROOT/chk-assume.XXXXXX")
+    initialize_repository "$chk_assume" || exit 1
+    printf 'tampered\n' >> "$chk_assume/shell/dot-zshrc"
+    git -C "$chk_assume" update-index --assume-unchanged shell/dot-zshrc
+    if ( verify_clean_tree "$chk_assume" ) >/dev/null 2>&1; then
+      printf 'Expected assume-unchanged modification to be caught by fresh index verification\n' >&2
+      exit 1
+    fi
+
+    # 2. skip-worktree modified file
+    chk_skip=$(mktemp -d "$ROOT/chk-skip.XXXXXX")
+    initialize_repository "$chk_skip" || exit 1
+    printf 'tampered\n' >> "$chk_skip/shell/dot-zshrc"
+    git -C "$chk_skip" update-index --skip-worktree shell/dot-zshrc
+    if ( verify_clean_tree "$chk_skip" ) >/dev/null 2>&1; then
+      printf 'Expected skip-worktree modification to be caught by fresh index verification\n' >&2
+      exit 1
+    fi
+
+    cleanup
+    exit 0
+  ) || return 1
+  return 0
+}
+
+staged_submodules_validation_and_containment_case() {
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+
+    subm_repo=$(make_remote_repo)
+    subm_commit=$(git -C "$subm_repo" rev-parse HEAD)
+
+    remote_repo=$(make_remote_repo)
+    (
+      cd "$remote_repo" || exit 1
+      git config -f .gitmodules submodule.helper.path ".vendor/helper"
+      git config -f .gitmodules submodule.helper.url "https://github.com/taiansu/helper"
+      git update-index --add --cacheinfo 160000,"$subm_commit",.vendor/helper
+      git add .gitmodules
+      git commit -q -m "add submodule helper"
+    )
+
+    map_file="$ROOT/fake-map.txt"
+    printf 'https://github.com/taiansu/dotfiles=%s\n' "$remote_repo" > "$map_file"
+    printf 'https://github.com/taiansu/helper=%s\n' "$subm_repo" >> "$map_file"
+
+    CANONICAL_REPO="https://github.com/taiansu/dotfiles"
+    REPOSITORY="taiansu/dotfiles"
+    REQUESTED_REF="main"
+    export KAISIAN_GIT_EXEC="$FAKE_GIT"
+    export KAISIAN_FAKE_GIT_MAP="$map_file"
+
+    acquire_lock
+    resolve_remote_ref
+
+    # 1. Valid submodule initializes into embedded child .git
+    chk_valid=$(mktemp -d "$ROOT/chk-subm-valid.XXXXXX")
+    initialize_repository "$chk_valid" || exit 1
+
+    test -d "$chk_valid/.vendor/helper/.git" || exit 1
+    test ! -L "$chk_valid/.vendor/helper/.git" || exit 1
+    test ! -f "$chk_valid/.vendor/helper/.git" || exit 1
+    sub_head=$(git -C "$chk_valid/.vendor/helper" rev-parse HEAD)
+    test "$sub_head" = "$subm_commit" || exit 1
+
+    # 2. Hostile submodule definitions
+    # 2a. Relative URL
+    repo_rel=$(make_remote_repo)
+    (
+      cd "$repo_rel" || exit 1
+      git config -f .gitmodules submodule.evil.path ".vendor/evil"
+      git config -f .gitmodules submodule.evil.url "../evil.git"
+      git update-index --add --cacheinfo 160000,"$subm_commit",.vendor/evil
+      git add .gitmodules && git commit -q -m "bad sub"
+    )
+    printf 'https://github.com/taiansu/rel=%s\n' "$repo_rel" >> "$map_file"
+    REPOSITORY="https://github.com/taiansu/rel"
+    resolve_remote_ref
+    chk_bad=$(mktemp -d "$ROOT/chk-bad-rel.XXXXXX")
+    if ( initialize_repository "$chk_bad" ) >/dev/null 2>&1; then
+      printf 'Expected relative submodule URL to fail\n' >&2
+      exit 1
+    fi
+
+    # 2b. Submodule inside selectable package (e.g. shell/sub)
+    repo_pkg=$(make_remote_repo)
+    (
+      cd "$repo_pkg" || exit 1
+      git config -f .gitmodules submodule.evil.path "shell/sub"
+      git config -f .gitmodules submodule.evil.url "https://github.com/taiansu/helper"
+      git update-index --add --cacheinfo 160000,"$subm_commit",shell/sub
+      git add .gitmodules && git commit -q -m "bad sub inside package"
+    )
+    printf 'https://github.com/taiansu/pkg=%s\n' "$repo_pkg" >> "$map_file"
+    REPOSITORY="https://github.com/taiansu/pkg"
+    resolve_remote_ref
+    chk_bad_pkg=$(mktemp -d "$ROOT/chk-bad-pkg.XXXXXX")
+    if ( initialize_repository "$chk_bad_pkg" ) >/dev/null 2>&1; then
+      printf 'Expected submodule inside package directory to fail\n' >&2
+      exit 1
+    fi
+
+    cleanup
+    exit 0
+  ) || return 1
+  return 0
+}
+
+command_trace_forbidden_operations_case() {
+  trace_log="tests/tmp/last-command-trace.log"
+  if test -f "$trace_log"; then
+    if /usr/bin/grep -Eq -- 'reset --hard|clean -f|stash|submodule update --recursive' "$trace_log"; then
+      printf 'Forbidden destructive command found in trace log!\n' >&2
+      return 1
+    fi
+  fi
+  return 0
+}
+
+run_case 'source repository URL and slug canonicalization matrix' source_canonicalization_matrix_case
+run_case 'custom --repo requires explicit --ref' custom_repo_requires_ref_case
+run_case 'origin ref resolution and branch/tag ambiguity' origin_ref_resolution_and_ambiguity_case
+run_case 'fetched object pinning beats same-named malicious local refs' fetched_object_pinning_beats_malicious_local_refs_case
+run_case 'new checkout uses git init and single fetch without local/tracking branches' new_checkout_uses_init_and_single_fetch_case
+run_case 'existing checkout cleanliness, untracked/ignored files, and origin mismatch' existing_checkout_cleanliness_and_origin_mismatch_case
+run_case 'git config strict allowlist and hostile config rejection' git_config_allowlist_and_hostile_configs_case
+run_case 'git admin boundaries, replacements, grafts, and linked worktrees' git_admin_boundaries_and_replacements_case
+run_case 'fresh index verification defeats assume-unchanged and skip-worktree' fresh_index_defeats_hidden_worktree_modifications_case
+run_case 'staged submodules validation, containment, and non-package isolation' staged_submodules_validation_and_containment_case
+run_case 'executed command trace contains no forbidden destructive operations' command_trace_forbidden_operations_case
 
 run_case 'valid manifest parsing produces exact groups.tsv and profiles.tsv' manifest_valid_and_tsv_output_case
 run_case 'invalid manifest syntax, types, schema, and unknown keys fail' manifest_invalid_syntax_and_types_case
