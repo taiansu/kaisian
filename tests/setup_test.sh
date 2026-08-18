@@ -18,11 +18,40 @@ run_case() {
     printf 'not ok - %s\n' "$name" >&2
   fi
 }
+assert_status() {
+  expected=$1
+  shift
+  "$@"
+  actual=$?
+  test "$actual" -eq "$expected"
+}
+
+assert_contains() {
+  haystack=$1
+  needle=$2
+  case "$haystack" in
+    *"$needle"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+assert_not_exists() {
+  target=$1
+  if test -e "$target" || test -L "$target"; then
+    return 1
+  fi
+  return 0
+}
+
+make_home() {
+  mktemp -d "$ROOT/home.XXXXXX"
+}
+
 
 help_case() {
   output=$(/bin/bash "$SCRIPT" --help 2>&1) || return 1
-  printf '%s\n' "$output" | /usr/bin/grep -F 'setup.sh [OPTIONS]' >/dev/null || return 1
-  printf '%s\n' "$output" | /usr/bin/grep -F -- '--interactive' >/dev/null
+  assert_contains "$output" 'setup.sh [OPTIONS]' || return 1
+  assert_contains "$output" '--interactive'
 }
 
 run_case 'help works' help_case
