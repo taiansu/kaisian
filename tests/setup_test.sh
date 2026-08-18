@@ -3242,13 +3242,129 @@ single_fetch_and_trace_assertions_case() {
 
     # Assert trace log is non-empty
     test -s "$trace_log" || exit 1
-    # Assert trace log contains sanitized environment boundary
-    /usr/bin/grep -Fq 'ENV: GIT_CONFIG_NOSYSTEM=1' "$trace_log" || exit 1
+
+    # Assert trace log contains complete escaped environment boundary
+    /usr/bin/grep -Fq 'ENV: HOME=' "$trace_log" || exit 1
+    /usr/bin/grep -Fq 'GIT_CONFIG_NOSYSTEM=1' "$trace_log" || exit 1
+    /usr/bin/grep -Fq 'GIT_CONFIG_GLOBAL=' "$trace_log" || exit 1
+    /usr/bin/grep -Fq 'GIT_ATTR_NOSYSTEM=1' "$trace_log" || exit 1
+    /usr/bin/grep -Fq 'GIT_TERMINAL_PROMPT=0' "$trace_log" || exit 1
+    /usr/bin/grep -Fq 'GIT_ASKPASS=' "$trace_log" || exit 1
+    /usr/bin/grep -Fq 'GIT_NO_REPLACE_OBJECTS=1' "$trace_log" || exit 1
     /usr/bin/grep -Fq 'GIT_ALLOW_PROTOCOL=https' "$trace_log" || exit 1
 
-    # Assert exactly ONE fetch was invoked for new checkout
-    fetch_count=$(/usr/bin/grep -E '^git fetch ' "$trace_log" | wc -l)
+    # Assert exactly ONE fetch command was executed
+    fetch_lines=$(/usr/bin/grep -E '^git (-C [^ ]+ )?fetch ' "$trace_log" || true)
+    fetch_count=$(printf '%s\n' "$fetch_lines" | /usr/bin/grep -c '^git ' || true)
     test "$fetch_count" -eq 1 || exit 1
+
+    # Assert fetch line has exact canonical URL and resolved ref
+    assert_contains "$fetch_lines" "$CANONICAL_REPO" || exit 1
+    assert_contains "$fetch_lines" "$RESOLVED_FETCH_REF" || exit 1
+
+    # Assert no refs/heads or refs/remotes created
+    test -z "$(git -C "$chk_single" for-each-ref refs/heads/ refs/remotes/ 2>/dev/null)" || exit 1
+
+    cleanup
+    exit 0
+  ) || return 1
+  return 0
+}
+
+legitimate_submodule_advancement_c1_to_c2_case() {
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+
+    subm_repo=$(make_remote_repo)
+    c1_sha=$(git -C "$subm_repo" rev-parse HEAD)
+
+    remote_repo=$(make_remote_repo)
+    (
+      cd "$remote_repo" || exit 1
+      git config -f .gitmodules submodule.helper.path ".vendor/helper"
+      git config -f .gitmodules submodule.helper.url "https://github.com/taiansu/helper"
+      git update-index --add --cacheinfo 160000,"$c1_sha",.vendor/helper
+      git add .gitmodules
+      git -c user.email="t@e.com" -c user.name="T" commit -q -m "parent with C1"
+    )
+
+    map_file="$ROOT/fake-map.txt"
+    printf 'https://github.com/taiansu/dotfiles=%s\n' "$remote_repo" > "$map_file"
+    printf 'https://github.com/taiansu/helper=%s\n' "$subm_repo" >> "$map_file"
+
+    CANONICAL_REPO="https://github.com/taiansu/dotfiles"
+    REPOSITORY="taiansu/dotfiles"
+    REQUESTED_REF="main"
+    export KAISIAN_GIT_EXEC="$FAKE_GIT"
+    export KAISIAN_FAKE_GIT_MAP="$map_file"
+
+    acquire_lock
+    resolve_remote_ref
+
+    chk_advance=$(mktemp -d "$ROOT/chk-advance.XXXXXX")
+    initialize_repository "$chk_advance" || exit 1
+
+    # Verify initial checkout has C1
+    c1_actual=$(git -C "$chk_advance/.vendor/helper" rev-parse HEAD)
+    test "$c1_actual" = "$c1_sha" || exit 1
+
+    # Now advance submodule in remote to C2
+    (
+      cd "$subm_repo" || exit 1
+      printf 'feature2\n' > feature2.txt
+      git add feature2.txt
+      git -c user.email="t@e.com" -c user.name="T" commit -q -m "commit C2"
+    )
+    c2_sha=$(git -C "$subm_repo" rev-parse HEAD)
+
+    # In parent remote, advance gitlink to C2 and commit
+    (
+      cd "$remote_repo" || exit 1
+      git update-index --add --cacheinfo 160000,"$c2_sha",.vendor/helper
+      git -c user.email="t@e.com" -c user.name="T" commit -q -a -m "parent with C2"
+    )
+
+    # Update checkout: must legitimately advance child submodule to C2
+    resolve_remote_ref
+    update_repository "$chk_advance" || exit 1
+
+    c2_actual=$(git -C "$chk_advance/.vendor/helper" rev-parse HEAD)
+    test "$c2_actual" = "$c2_sha" || exit 1
+
+    cleanup
+    exit 0
+  ) || return 1
+  return 0
+}
+
+config_lock_failure_suppresses_stderr_case() {
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+
+    remote_repo=$(make_remote_repo)
+    map_file="$ROOT/fake-map.txt"
+    printf 'https://github.com/taiansu/dotfiles=%s\n' "$remote_repo" > "$map_file"
+
+    CANONICAL_REPO="https://github.com/taiansu/dotfiles"
+    REPOSITORY="taiansu/dotfiles"
+    REQUESTED_REF="main"
+    export KAISIAN_GIT_EXEC="$FAKE_GIT"
+    export KAISIAN_FAKE_GIT_MAP="$map_file"
+
+    acquire_lock
+    resolve_remote_ref
+
+    chk_lock=$(mktemp -d "$ROOT/chk-cfglock.XXXXXX")
+    mkdir -p "$chk_lock/.git"
+    touch "$chk_lock/.git/config.lock"
+    out=$( ( initialize_repository "$chk_lock" ) 2>&1 )
+    status=$?
+    test "$status" -ne 0 || exit 1
+    assert_contains "$out" "Git operation failed" || exit 1
+    # Raw stderr from git should be suppressed
+    ! assert_contains "$out" "fatal:" || exit 1
 
     cleanup
     exit 0
@@ -3376,8 +3492,10 @@ run_case 'source repository URL and slug canonicalization matrix' source_canonic
 run_case 'custom --repo requires explicit --ref' custom_repo_requires_ref_case
 run_case 'origin ref resolution and branch/tag ambiguity' origin_ref_resolution_and_ambiguity_case
 run_case 'unadvertised 40-hex SHA is rejected before fetch' unadvertised_40_hex_sha_rejection_case
+run_case 'FETCH_HEAD mismatch against EXPECTED_COMMIT_SHA rejection' fetch_head_substituted_mismatch_case
 run_case 'fetched object pinning beats same-named malicious local refs' fetched_object_pinning_beats_malicious_local_refs_case
 run_case 'new checkout uses git init and single fetch without local/tracking branches' new_checkout_uses_init_and_single_fetch_case
+run_case 'single fetch count and trace log sanitized environment assertions' single_fetch_and_trace_assertions_case
 run_case 'existing checkout cleanliness, untracked/ignored files, and origin mismatch' existing_checkout_cleanliness_and_origin_mismatch_case
 run_case 'existing non-repo directory and exact origin/fetch counts' existing_non_repo_and_origin_fetch_counts_case
 run_case 'git config strict allowlist and hostile config rejection' git_config_allowlist_and_hostile_configs_case
@@ -3386,11 +3504,14 @@ run_case 'git admin boundaries, replacements, grafts, and linked worktrees' git_
 run_case 'git admin nested symlinks and active hook rejection' admin_nested_symlinks_and_active_hooks_case
 run_case 'fresh index verification defeats assume-unchanged and skip-worktree' fresh_index_defeats_hidden_worktree_modifications_case
 run_case 'direct worktree leaf hash comparison catches attribute CRLF hiding' worktree_leaf_hash_and_crlf_attribute_hiding_case
+run_case 'worktree leaf bidirectional mode check and CRLF attribute hiding' worktree_bidirectional_mode_check_case
 run_case 'staged submodules validation, containment, and non-package isolation' staged_submodules_validation_and_containment_case
 run_case 'submodule matrix, nested levels, and hostile definition rejection' submodule_matrix_and_nested_levels_case
+run_case 'legitimate submodule advancement C1 to C2 during parent update' legitimate_submodule_advancement_c1_to_c2_case
+run_case 'config lock failure suppresses raw stderr and emits localized error' config_lock_failure_suppresses_stderr_case
+run_case 'poisoned PATH ambient utility immunity' path_poison_ambient_utility_case
 run_case 'production main wiring through acquisition and manifest selection' production_main_integration_case
 run_case 'executed command trace contains no forbidden destructive operations' command_trace_forbidden_operations_case
-
 run_case 'valid manifest parsing produces exact groups.tsv and profiles.tsv' manifest_valid_and_tsv_output_case
 run_case 'invalid manifest syntax, types, schema, and unknown keys fail' manifest_invalid_syntax_and_types_case
 run_case 'package directory alignment matches declared groups exactly' manifest_package_directory_alignment_case

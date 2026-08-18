@@ -1401,13 +1401,26 @@ EOF
       ''|checkout) ;;
       *) die invalid_submodule "unallowed update mode '$supdate' for submodule $sname" ;;
     esac
-
     case "$spath" in
-      /*|..|../|../*|*/..|*/../*|*//*)
+      *[!a-zA-Z0-9_.-/]*|*[[:space:]]*|*[[:cntrl:]]*|*\\*|*\*|*\?*|*\[*|*\]*|*~*)
+        die invalid_submodule "unallowed characters in submodule path '$spath'"
+        ;;
+      /*|*/|..|../|../*|*/..|*/../*|*//*)
         die invalid_submodule "uncontained submodule path '$spath'"
         ;;
     esac
 
+    old_ifs=$IFS
+    IFS='/'
+    set -- $spath
+    IFS=$old_ifs
+    for comp in "$@"; do
+      test -n "$comp" || die invalid_submodule "empty component in submodule path '$spath'"
+      case "$comp" in
+        .|..) die invalid_submodule "relative segment in submodule path '$spath'" ;;
+        *[!a-zA-Z0-9_.-]*) die invalid_submodule "invalid character in submodule component '$comp'" ;;
+      esac
+    done
     first_comp=${spath%%/*}
     if test -n "$manifest_groups"; then
       case "$manifest_groups" in
@@ -1513,9 +1526,20 @@ EOF
     if test -d "$child_dir/.git"; then
       validate_git_admin "$child_dir" || die submodule_failed "$sname"
       validate_git_config "$child_dir" "$canon_surl" || die submodule_failed "$sname"
+      verify_clean_tree "$child_dir" || die submodule_failed "$sname"
 
       child_head=$(run_git -C "$child_dir" rev-parse HEAD 2>/dev/null || true)
-      test "$child_head" = "$entry_sha" || die submodule_failed "$sname" "existing child commit mismatch: $child_head != $entry_sha"
+      if test "$child_head" != "$entry_sha"; then
+        run_git -C "$child_dir" fetch --no-tags --depth=1 "$canon_surl" "$entry_sha" >/dev/null 2>&1 || die submodule_failed "$sname"
+        child_fetched_sha=$(run_git -C "$child_dir" rev-parse --verify "FETCH_HEAD^{commit}" 2>/dev/null) || die submodule_failed "$sname"
+        test "$child_fetched_sha" = "$entry_sha" || die submodule_failed "$sname"
+        validate_submodules_spec "$child_dir" "$entry_sha"
+        run_git -C "$child_dir" checkout --detach "$entry_sha" -- >/dev/null 2>&1 || die submodule_failed "$sname"
+        validate_git_config "$child_dir" "$canon_surl" || die submodule_failed "$sname"
+        validate_git_admin "$child_dir" || die submodule_failed "$sname"
+      else
+        validate_submodules_spec "$child_dir" "$entry_sha"
+      fi
     else
       /bin/mkdir -p "$child_dir" 2>/dev/null || true
       run_git init "$child_dir" >/dev/null 2>&1 || die submodule_failed "$sname"
@@ -1559,8 +1583,8 @@ initialize_repository() {
   test -d "$chk_parent" || /bin/mkdir -p "$chk_parent" 2>/dev/null || die git_operation_failed "failed to create $chk_parent"
 
   run_git init "$chk_dir" >/dev/null 2>&1 || die git_operation_failed 'git init failed'
-  run_git -C "$chk_dir" config --local remote.origin.url "$CANONICAL_REPO" || die git_operation_failed 'failed to set origin url'
-  run_git -C "$chk_dir" config --local remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*" || die git_operation_failed 'failed to set origin fetch'
+  run_git -C "$chk_dir" config --local remote.origin.url "$CANONICAL_REPO" >/dev/null 2>&1 || die git_operation_failed 'failed to set origin url'
+  run_git -C "$chk_dir" config --local remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*" >/dev/null 2>&1 || die git_operation_failed 'failed to set origin fetch'
 
   run_git -C "$chk_dir" fetch --no-tags --depth=1 "$CANONICAL_REPO" "$RESOLVED_FETCH_REF" >/dev/null 2>&1 || die git_operation_failed 'git fetch failed'
 
