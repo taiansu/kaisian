@@ -3990,6 +3990,7 @@ task5_preflight_targets_classification_case() {
   printf 'absent\n' > "$chk/dot-config/absent_file"
   printf 'exact_abs\n' > "$chk/dot-zshrc"
   printf 'exact_rel\n' > "$chk/dot-gitconfig"
+  printf 'exact_chain\n' > "$chk/dot-config/chain_target"
   printf 'regular\n' > "$chk/dot-config/regular_file"
   printf 'dir_as_file\n' > "$chk/dot-config/dir_target"
   printf 'broken_sym\n' > "$chk/dot-config/broken_sym"
@@ -4003,11 +4004,21 @@ task5_preflight_targets_classification_case() {
 
   ln -s "$chk/dot-zshrc" "$hm/.zshrc"
   ln -s "../checkout/pkg/dot-gitconfig" "$hm/.gitconfig"
+  ln -s "$chk/dot-config/chain_target" "$hm/.config/chain_alias"
+  ln -s "$hm/.config/chain_alias" "$hm/.config/chain_target"
   printf 'existing_regular\n' > "$hm/.config/regular_file"
   mkdir -p "$hm/.config/dir_target"
   ln -s "$t/nonexistent_dest" "$hm/.config/broken_sym"
   printf 'other\n' > "$hm/other_file"
   ln -s "$hm/other_file" "$hm/.config/wrong_sym"
+
+  zshrc_target=$(/usr/bin/readlink "$hm/.zshrc")
+  gitconfig_target=$(/usr/bin/readlink "$hm/.gitconfig")
+  chain_target=$(/usr/bin/readlink "$hm/.config/chain_target")
+  regular_ino=$(/usr/bin/stat -f '%i' "$hm/.config/regular_file")
+  dir_ino=$(/usr/bin/stat -f '%i' "$hm/.config/dir_target")
+  broken_target=$(/usr/bin/readlink "$hm/.config/broken_sym")
+  wrong_target=$(/usr/bin/readlink "$hm/.config/wrong_sym")
 
   printf 'pkg\tpkg\tpkg\n' > "$sb/groups.tsv"
   printf 'pkg\n' > "$sb/selected.txt"
@@ -4029,13 +4040,31 @@ task5_preflight_targets_classification_case() {
     ! assert_contains "$conflicts_content" "$hm/.config/absent_file" || exit 1
     ! assert_contains "$conflicts_content" "$hm/.zshrc" || exit 1
     ! assert_contains "$conflicts_content" "$hm/.gitconfig" || exit 1
+    ! assert_contains "$conflicts_content" "$hm/.config/chain_target" || exit 1
 
-    assert_contains "$conflicts_content" "$(printf '%s\t%s' "$hm/.config/regular_file" "$STATE_ROOT/backups/files/.config/regular_file")" || exit 1
-    assert_contains "$conflicts_content" "$(printf '%s\t%s' "$hm/.config/dir_target" "$STATE_ROOT/backups/files/.config/dir_target")" || exit 1
-    assert_contains "$conflicts_content" "$(printf '%s\t%s' "$hm/.config/broken_sym" "$STATE_ROOT/backups/files/.config/broken_sym")" || exit 1
-    assert_contains "$conflicts_content" "$(printf '%s\t%s' "$hm/.config/wrong_sym" "$STATE_ROOT/backups/files/.config/wrong_sym")" || exit 1
+    assert_contains "$conflicts_content" "$BACKUP_ROOT/files/.config/regular_file" || exit 1
+    assert_contains "$conflicts_content" "$BACKUP_ROOT/files/.config/dir_target" || exit 1
+    assert_contains "$conflicts_content" "$BACKUP_ROOT/files/.config/broken_sym" || exit 1
+    assert_contains "$conflicts_content" "$BACKUP_ROOT/files/.config/wrong_sym" || exit 1
+
+    assert_contains "$conflicts_content" "$(printf '%s\t%s' "$hm/.config/regular_file" "$BACKUP_ROOT/files/.config/regular_file")" || exit 1
+    assert_contains "$conflicts_content" "$(printf '%s\t%s' "$hm/.config/dir_target" "$BACKUP_ROOT/files/.config/dir_target")" || exit 1
+    assert_contains "$conflicts_content" "$(printf '%s\t%s' "$hm/.config/broken_sym" "$BACKUP_ROOT/files/.config/broken_sym")" || exit 1
+    assert_contains "$conflicts_content" "$(printf '%s\t%s' "$hm/.config/wrong_sym" "$BACKUP_ROOT/files/.config/wrong_sym")" || exit 1
 
     test "$(wc -l < "$sb/conflicts.tsv" | tr -d ' ')" = 4 || exit 1
+
+    test ! -e "$hm/.config/absent_file" || exit 1
+    test "$(/usr/bin/readlink "$hm/.zshrc")" = "$zshrc_target" || exit 1
+    test "$(/usr/bin/readlink "$hm/.gitconfig")" = "$gitconfig_target" || exit 1
+    test "$(/usr/bin/readlink "$hm/.config/chain_target")" = "$chain_target" || exit 1
+    test "$(/usr/bin/stat -f '%i' "$hm/.config/regular_file")" = "$regular_ino" || exit 1
+    test "$(cat "$hm/.config/regular_file")" = "existing_regular" || exit 1
+    test "$(/usr/bin/stat -f '%i' "$hm/.config/dir_target")" = "$dir_ino" || exit 1
+    test "$(/usr/bin/readlink "$hm/.config/broken_sym")" = "$broken_target" || exit 1
+    test "$(/usr/bin/readlink "$hm/.config/wrong_sym")" = "$wrong_target" || exit 1
+
+    test ! -e "$BACKUP_ROOT" || exit 1
   )
   status=$?
   /bin/rm -rf "$t"
@@ -4043,14 +4072,15 @@ task5_preflight_targets_classification_case() {
 }
 
 task5_preflight_targets_rejection_case() {
-  for kind in symlink_parent file_parent fifo_node socket_node escape_home; do
+  for kind in symlink_parent file_parent fifo_node socket_node char_device control_byte_home control_byte_state escape_home; do
     t=$(mktemp -d "$ROOT/task5-preflight-rej.XXXXXX") || return 1
     chk="$t/checkout/pkg"
     hm="$t/home"
     sb="$t/sandbox"
-    /bin/mkdir -p "$chk/dot-config/app" "$hm/.config" "$sb"
+    /bin/mkdir -p "$chk/dot-config/app" "$chk/dev" "$hm/.config" "$sb"
 
     printf 'leaf\n' > "$chk/dot-config/app/leaf"
+    printf 'null\n' > "$chk/dev/null"
     GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t/checkout" init -q || { /bin/rm -rf "$t"; return 1; }
     GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t/checkout" -c commit.gpgSign=false config user.email test@example.invalid || { /bin/rm -rf "$t"; return 1; }
     GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t/checkout" -c commit.gpgSign=false config user.name test || { /bin/rm -rf "$t"; return 1; }
@@ -4071,10 +4101,18 @@ task5_preflight_targets_rejection_case() {
       fifo_node)
         mkdir -p "$hm/.config/app"
         mkfifo "$hm/.config/app/leaf"
+        test -p "$hm/.config/app/leaf" || { /bin/rm -rf "$t"; return 1; }
         ;;
       socket_node)
         mkdir -p "$hm/.config/app"
-        python3 -c "import socket as s; sock = s.socket(s.AF_UNIX); sock.bind('$hm/.config/app/leaf')" 2>/dev/null || mkfifo "$hm/.config/app/leaf"
+        ( cd "$hm/.config/app" && python3 -c "import socket as s; sock = s.socket(s.AF_UNIX); sock.bind('leaf')" ) || { /bin/rm -rf "$t"; return 1; }
+        test -S "$hm/.config/app/leaf" || { /bin/rm -rf "$t"; return 1; }
+        ;;
+      char_device)
+        ;;
+      control_byte_home)
+        ;;
+      control_byte_state)
         ;;
       escape_home)
         ;;
@@ -4091,7 +4129,16 @@ task5_preflight_targets_rejection_case() {
       build_package_map || exit 1
       validate_typed_tree || exit 1
 
-      if test "$kind" = "escape_home"; then
+      if test "$kind" = "char_device"; then
+        PHYSICAL_HOME="/"
+        test -c "/dev/null" || exit 1
+      elif test "$kind" = "control_byte_home"; then
+        tab_char=$'\t'
+        PHYSICAL_HOME="$hm/bad${tab_char}home"
+      elif test "$kind" = "control_byte_state"; then
+        nl_char=$'\n'
+        XDG_STATE_HOME="$hm/bad${nl_char}state"
+      elif test "$kind" = "escape_home"; then
         PHYSICAL_HOME="/nonexistent/escaped/home"
       fi
 
@@ -4174,9 +4221,11 @@ task5_preflight_state_root_validation_case() {
     build_package_map || exit 1
     validate_typed_tree || exit 1
 
-    # 1. Absolute XDG_STATE_HOME succeeds and computes exact custom backup path
+    # 1. Absolute XDG_STATE_HOME succeeds and computes exact custom backup path under candidate BACKUP_ROOT
     XDG_STATE_HOME="$t/custom_state" preflight_targets || exit 1
-    assert_contains "$(cat "$sb/conflicts.tsv")" "$t/custom_state/kaisian/backups/files/.zshrc" || exit 1
+    conflicts=$(cat "$sb/conflicts.tsv")
+    assert_contains "$conflicts" "$BACKUP_ROOT/files/.zshrc" || exit 1
+    assert_contains "$conflicts" "$t/custom_state/kaisian/backups/" || exit 1
 
     # 2. Relative XDG_STATE_HOME fails
     ! XDG_STATE_HOME="relative/state" preflight_targets || exit 1
@@ -4189,6 +4238,17 @@ task5_preflight_state_root_validation_case() {
     # 4. Non-directory ancestor in STATE_ROOT fails
     touch "$t/file_state"
     ! XDG_STATE_HOME="$t/file_state/sub" preflight_targets || exit 1
+
+    # 5. Symlink in backup base tree fails
+    mkdir -p "$t/sym_backup_target"
+    mkdir -p "$t/state_with_sym_backup/kaisian"
+    ln -s "$t/sym_backup_target" "$t/state_with_sym_backup/kaisian/backups"
+    ! XDG_STATE_HOME="$t/state_with_sym_backup" preflight_targets || exit 1
+
+    # 6. Non-directory in backup base tree fails
+    mkdir -p "$t/state_with_file_backup/kaisian"
+    touch "$t/state_with_file_backup/kaisian/backups"
+    ! XDG_STATE_HOME="$t/state_with_file_backup" preflight_targets || exit 1
   )
   status=$?
   /bin/rm -rf "$t"
@@ -4200,9 +4260,9 @@ task5_preflight_overlap_matrix_case() {
   chk="$t/checkout/pkg"
   hm="$t/home"
   sb="$t/sandbox"
-  /bin/mkdir -p "$chk" "$hm" "$sb"
+  /bin/mkdir -p "$chk/dot-config" "$hm/.config" "$sb"
 
-  printf 'x\n' > "$chk/dot-zshrc"
+  printf 'file\n' > "$chk/dot-config/file"
   GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t/checkout" init -q || { /bin/rm -rf "$t"; return 1; }
   GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t/checkout" -c commit.gpgSign=false config user.email test@example.invalid || { /bin/rm -rf "$t"; return 1; }
   GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t/checkout" -c commit.gpgSign=false config user.name test || { /bin/rm -rf "$t"; return 1; }
@@ -4217,38 +4277,86 @@ task5_preflight_overlap_matrix_case() {
     . "$SCRIPT"
     CHECKOUT_DIR="$t/checkout"
     SANDBOX="$sb"
+    LOCK_DIR="$t/lock"
+    mkdir -p "$LOCK_DIR"
     PHYSICAL_HOME="$hm"
     STATE_ROOT="$hm/.local/state/kaisian"
+    build_package_map || exit 1
+    validate_typed_tree || exit 1
+
+    # 1. Target equals guard
+    ! ( CHECKOUT_DIR="$hm/.config/file" preflight_targets ) || exit 1
+    ! ( STATE_ROOT="$hm/.config/file" preflight_targets ) || exit 1
+    ! ( LOCK_DIR="$hm/.config/file" preflight_targets ) || exit 1
+
+    # 2. Target inside guard (guard is ancestor of target)
+    ! ( CHECKOUT_DIR="$hm/.config" preflight_targets ) || exit 1
+    ! ( STATE_ROOT="$hm/.config" preflight_targets ) || exit 1
+    ! ( LOCK_DIR="$hm/.config" preflight_targets ) || exit 1
+
+    # 3. Guard inside target (target is ancestor of guard)
+    ! ( CHECKOUT_DIR="$hm/.config/file/sub" preflight_targets ) || exit 1
+    ! ( STATE_ROOT="$hm/.config/file/sub" preflight_targets ) || exit 1
+    ! ( LOCK_DIR="$hm/.config/file/sub" preflight_targets ) || exit 1
+
+    # 4. Checkout vs State overlaps (equal, ancestor, descendant)
+    ! ( CHECKOUT_DIR="$STATE_ROOT" preflight_targets ) || exit 1
+    ! ( CHECKOUT_DIR="$STATE_ROOT/sub" preflight_targets ) || exit 1
+    ! ( STATE_ROOT="$CHECKOUT_DIR/sub" preflight_targets ) || exit 1
+
+    # 5. Checkout vs Lock overlaps (equal, ancestor, descendant)
+    ! ( CHECKOUT_DIR="$LOCK_DIR" preflight_targets ) || exit 1
+    ! ( CHECKOUT_DIR="$LOCK_DIR/sub" preflight_targets ) || exit 1
+    ! ( LOCK_DIR="$CHECKOUT_DIR/sub" preflight_targets ) || exit 1
+
+    # 6. State vs Lock overlaps (equal, ancestor, descendant)
+    ! ( STATE_ROOT="$LOCK_DIR" preflight_targets ) || exit 1
+    ! ( STATE_ROOT="$LOCK_DIR/sub" preflight_targets ) || exit 1
+    ! ( LOCK_DIR="$STATE_ROOT/sub" preflight_targets ) || exit 1
+
+    # 7. Root '/' ancestor overlap
+    ! ( CHECKOUT_DIR="/" preflight_targets ) || exit 1
+    ! ( STATE_ROOT="/" preflight_targets ) || exit 1
+
+    # 8. Sibling directories pass
+    preflight_targets || exit 1
+  ) || { /bin/rm -rf "$t"; return 1; }
+
+  # 9. Dedicated target/sandbox overlap fixture reaching guard while sandbox is an existing valid dir
+  t2=$(mktemp -d "$ROOT/task5-sboverlap.XXXXXX") || { /bin/rm -rf "$t"; return 1; }
+  chk2="$t2/checkout/pkg"
+  hm2="$t2/home"
+  sb2="$hm2/.config"
+  mkdir -p "$chk2/dot-config" "$sb2"
+
+  printf 'file\n' > "$chk2/dot-config/file"
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t2/checkout" init -q || { /bin/rm -rf "$t" "$t2"; return 1; }
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t2/checkout" -c commit.gpgSign=false config user.email test@example.invalid || { /bin/rm -rf "$t" "$t2"; return 1; }
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t2/checkout" -c commit.gpgSign=false config user.name test || { /bin/rm -rf "$t" "$t2"; return 1; }
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t2/checkout" add . || { /bin/rm -rf "$t" "$t2"; return 1; }
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t2/checkout" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm fixture || { /bin/rm -rf "$t" "$t2"; return 1; }
+
+  printf 'pkg\tpkg\tpkg\n' > "$sb2/groups.tsv"
+  printf 'pkg\n' > "$sb2/selected.txt"
+
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+    CHECKOUT_DIR="$t2/checkout"
+    SANDBOX="$sb2"
+    PHYSICAL_HOME="$hm2"
+    STATE_ROOT="$hm2/.local/state/kaisian"
 
     build_package_map || exit 1
     validate_typed_tree || exit 1
 
-    # 1. CHECKOUT_DIR equals STATE_ROOT fails
-    ! ( CHECKOUT_DIR="$STATE_ROOT" preflight_targets ) || exit 1
+    test -d "$SANDBOX" || exit 1
+    test -f "$SANDBOX/mapping.tsv" || exit 1
 
-    # 2. CHECKOUT_DIR inside STATE_ROOT fails
-    ! ( CHECKOUT_DIR="$STATE_ROOT/sub" preflight_targets ) || exit 1
-
-    # 3. STATE_ROOT inside CHECKOUT_DIR fails
-    ! ( STATE_ROOT="$CHECKOUT_DIR/sub" preflight_targets ) || exit 1
-
-    # 4. Target overlaps CHECKOUT_DIR fails
-    ! ( CHECKOUT_DIR="$hm/.zshrc" preflight_targets ) || exit 1
-
-    # 5. Target overlaps STATE_ROOT fails
-    ! ( STATE_ROOT="$hm/.zshrc" preflight_targets ) || exit 1
-
-    # 6. Target overlaps LOCK_DIR fails
-    ! ( LOCK_DIR="$hm/.zshrc" preflight_targets ) || exit 1
-
-    # 7. Target overlaps SANDBOX fails
-    ! ( SANDBOX="$hm/.zshrc" preflight_targets ) || exit 1
-
-    # 8. Sibling directories pass
-    preflight_targets || exit 1
+    ! preflight_targets
   )
   status=$?
-  /bin/rm -rf "$t"
+  /bin/rm -rf "$t" "$t2"
   return "$status"
 }
 
@@ -4257,10 +4365,19 @@ task5_preflight_cross_device_case() {
   chk="$t/checkout/pkg"
   hm="$t/home"
   sb="$t/sandbox"
-  /bin/mkdir -p "$chk" "$hm/.local/state" "$sb"
+  /bin/mkdir -p "$chk/dot-config/app" "$hm/.config/app" "$hm/.local/state" "$sb"
 
-  printf 'x\n' > "$chk/dot-zshrc"
-  printf 'conflict\n' > "$hm/.zshrc"
+  printf 'x1\n' > "$chk/dot-zshrc"
+  printf 'x2\n' > "$chk/dot-config/app/config"
+  printf 'x3\n' > "$chk/dot-broken"
+
+  printf 'conflict_1\n' > "$hm/.zshrc"
+  printf 'conflict_2\n' > "$hm/.config/app/config"
+  ln -s "$t/nonexistent_dest" "$hm/.broken"
+
+  zshrc_ino=$(/usr/bin/stat -f '%i' "$hm/.zshrc")
+  app_ino=$(/usr/bin/stat -f '%i' "$hm/.config/app/config")
+  broken_target=$(/usr/bin/readlink "$hm/.broken")
 
   GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t/checkout" init -q || { /bin/rm -rf "$t"; return 1; }
   GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t/checkout" -c commit.gpgSign=false config user.email test@example.invalid || { /bin/rm -rf "$t"; return 1; }
@@ -4285,25 +4402,45 @@ task5_preflight_cross_device_case() {
     # 1. Normal run on same filesystem succeeds
     preflight_targets || exit 1
     test -s "$sb/conflicts.tsv" || exit 1
+    test "$(wc -l < "$sb/conflicts.tsv" | tr -d ' ')" = 3 || exit 1
 
-    # 2. Mock stat returning different device for backup ancestor
+    # 2. Mock stat: first conflict (.zshrc) and broken link match, but later conflict (.config/app/config) backup ancestor mismatches
     mock_bin="$t/mock_bin"
     mkdir -p "$mock_bin"
-    cat << 'EOF' > "$mock_bin/stat"
+    cat << 'MOCK' > "$mock_bin/stat"
 #!/bin/bash
 target_path="${3:-}"
 case "$target_path" in
-  */.local*|*/state*|*/backups*) printf '99999\n' ;;
-  *) /usr/bin/stat "$@" ;;
+  *app/config*)
+    printf '99999\n'
+    ;;
+  *)
+    /usr/bin/stat "$@"
+    ;;
 esac
-EOF
+MOCK
     chmod +x "$mock_bin/stat"
 
-    # With differing device stat, preflight_targets must fail
+    # With differing device stat on later conflict, preflight_targets must fail
     (
       KAISIAN_STAT_EXEC="$mock_bin/stat"
       ! preflight_targets
     ) || exit 1
+
+    # Assert non-mutation and invariants on target files
+    test -f "$hm/.zshrc" || exit 1
+    test "$(/usr/bin/stat -f '%i' "$hm/.zshrc")" = "$zshrc_ino" || exit 1
+    test "$(cat "$hm/.zshrc")" = "conflict_1" || exit 1
+
+    test -f "$hm/.config/app/config" || exit 1
+    test "$(/usr/bin/stat -f '%i' "$hm/.config/app/config")" = "$app_ino" || exit 1
+    test "$(cat "$hm/.config/app/config")" = "conflict_2" || exit 1
+
+    test -L "$hm/.broken" || exit 1
+    test "$(/usr/bin/readlink "$hm/.broken")" = "$broken_target" || exit 1
+
+    # No backup directory created
+    test ! -d "$STATE_ROOT/backups" || test -z "$(find "$STATE_ROOT/backups" -mindepth 1 2>/dev/null)" || exit 1
   )
   status=$?
   /bin/rm -rf "$t"

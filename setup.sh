@@ -1,9 +1,11 @@
 #!/bin/bash
 set -u
 
-readonly KAISIAN_VERSION='0.1.0'
-readonly DEFAULT_REPOSITORY='taiansu/dotfiles'
-readonly DEFAULT_DOTFILES_COMMIT='0b3b0c3f206e1f4fb35dac82794a871c5c18f405'
+if test -z "${KAISIAN_VERSION-}"; then
+  readonly KAISIAN_VERSION='0.1.0'
+  readonly DEFAULT_REPOSITORY='taiansu/dotfiles'
+  readonly DEFAULT_DOTFILES_COMMIT='0b3b0c3f206e1f4fb35dac82794a871c5c18f405'
+fi
 
 LANGUAGE='en'
 PHYSICAL_HOME=''
@@ -249,6 +251,8 @@ validate_typed_tree() {
 
 paths_overlap() {
   test "$1" = "$2" && return 0
+  test "$1" = '/' && return 0
+  test "$2" = '/' && return 0
   case "$1/" in "$2/"*) return 0 ;; esac
   case "$2/" in "$1/"*) return 0 ;; esac
   return 1
@@ -290,15 +294,26 @@ stat_dev() {
 }
 
 preflight_targets() {
+  has_control_char "${PHYSICAL_HOME-}" && return 1
+  has_control_char "${HOME-}" && return 1
+  has_control_char "${XDG_STATE_HOME-}" && return 1
+  has_control_char "${STATE_ROOT-}" && return 1
+  has_control_char "${CHECKOUT_DIR-}" && return 1
+  has_control_char "${LOCK_DIR-}" && return 1
+  has_control_char "${SANDBOX-}" && return 1
+
   : "${PHYSICAL_HOME:=${HOME-}}"
   test -n "$PHYSICAL_HOME" && test "${PHYSICAL_HOME#/}" != "$PHYSICAL_HOME" || return 1
   test -d "$PHYSICAL_HOME" && test ! -L "$PHYSICAL_HOME" || return 1
   PHYSICAL_HOME=$(canonicalize_path "$PHYSICAL_HOME") || return 1
+  has_control_char "$PHYSICAL_HOME" && return 1
+
   if test -n "${XDG_STATE_HOME+x}" && test -n "$XDG_STATE_HOME"; then
     case "$XDG_STATE_HOME" in
       /*) STATE_ROOT="$XDG_STATE_HOME/kaisian" ;;
       *) return 1 ;;
     esac
+    test ! -L "$XDG_STATE_HOME" || return 1
   elif test -z "$STATE_ROOT"; then
     STATE_ROOT="$PHYSICAL_HOME/.local/state/kaisian"
   fi
@@ -306,6 +321,12 @@ preflight_targets() {
     /*) ;;
     *) return 1 ;;
   esac
+  has_control_char "$STATE_ROOT" && return 1
+
+  test ! -L "$STATE_ROOT" || return 1
+
+  STATE_ROOT=$(canonicalize_path "$STATE_ROOT") || return 1
+  has_control_char "$STATE_ROOT" && return 1
 
   sr_curr="$STATE_ROOT"
   while test "$sr_curr" != '/' && test -n "$sr_curr"; do
@@ -315,8 +336,25 @@ preflight_targets() {
     test -n "$sr_curr" || sr_curr='/'
   done
 
-  STATE_ROOT=$(canonicalize_path "$STATE_ROOT") || return 1
   backup_base="$STATE_ROOT/backups"
+
+  # Compute unique non-reserved timestamped candidate BACKUP_ROOT
+  n=0
+  while :; do
+    BACKUP_ROOT="$backup_base/$(/bin/date -u '+%Y%m%dT%H%M%SZ')-$$"
+    test "$n" -eq 0 || BACKUP_ROOT="$BACKUP_ROOT-$n"
+    test ! -e "$BACKUP_ROOT" && test ! -L "$BACKUP_ROOT" && break
+    n=$((n + 1))
+  done
+
+  # Validate that no existing ancestor in the backup tree down from STATE_ROOT is a symlink or non-directory
+  b_curr="$backup_base"
+  while test "$b_curr" != '/' && test "$b_curr" != "$STATE_ROOT"; do
+    if test -L "$b_curr"; then return 1; fi
+    if test -e "$b_curr" && test ! -d "$b_curr"; then return 1; fi
+    b_curr=${b_curr%/*}
+    test -n "$b_curr" || b_curr='/'
+  done
 
   canon_checkout=''
   if test -n "$CHECKOUT_DIR"; then
@@ -365,7 +403,7 @@ preflight_targets() {
       *) return 1 ;;
     esac
 
-    for guard in "$canon_checkout" "$STATE_ROOT" "$canon_lock" "$canon_sandbox"; do
+    for guard in "$canon_checkout" "$STATE_ROOT" "$canon_lock" "$canon_sandbox" "$BACKUP_ROOT"; do
       test -n "$guard" || continue
       paths_overlap "$dst" "$guard" && return 1
     done
@@ -396,23 +434,8 @@ preflight_targets() {
 
     is_exact_leaf=0
     if test -L "$dst"; then
-      actual_link=$(/usr/bin/readlink "$dst" 2>/dev/null || true)
-      if test -n "$actual_link"; then
-        if test "$actual_link" = "$source"; then
-          is_exact_leaf=1
-        else
-          case "$actual_link" in
-            /*) resolved="$actual_link" ;;
-            *) resolved="${dst%/*}/$actual_link" ;;
-          esac
-          if test -e "$dst"; then
-            canon_resolved=$(canonicalize_path "$resolved" 2>/dev/null || true)
-            canon_source=$(canonicalize_path "$source" 2>/dev/null || true)
-            if test -n "$canon_resolved" && test -n "$canon_source" && test "$canon_resolved" = "$canon_source"; then
-              is_exact_leaf=1
-            fi
-          fi
-        fi
+      if test -e "$dst" && test "$dst" -ef "$source"; then
+        is_exact_leaf=1
       fi
     fi
 
@@ -420,7 +443,16 @@ preflight_targets() {
       continue
     fi
 
-    backup="$backup_base/files/$target"
+    backup="$BACKUP_ROOT/files/$target"
+
+    # Validate that every existing ancestor of backup destination is safe (no symlink, real dir)
+    bk_ancestor_check="$backup"
+    while test "$bk_ancestor_check" != '/' && test -n "$bk_ancestor_check"; do
+      if test -L "$bk_ancestor_check"; then return 1; fi
+      if test -e "$bk_ancestor_check" && test ! -d "$bk_ancestor_check"; then return 1; fi
+      bk_ancestor_check=${bk_ancestor_check%/*}
+      test -n "$bk_ancestor_check" || bk_ancestor_check='/'
+    done
 
     dst_dev=$(stat_dev "$dst") || return 1
     backup_ancestor=$(nearest_existing "$backup")
@@ -450,14 +482,16 @@ move_conflicts() {
   test "$DRY_RUN" -eq 0 || return 0
   test -f "$CONFLICTS_FILE" || return 1
   test ! -s "$CONFLICTS_FILE" && return 0
-  base=${STATE_ROOT:-${XDG_STATE_HOME:-"$PHYSICAL_HOME/.local/state"}}/backups
-  n=0
-  while :; do
-    BACKUP_ROOT="$base/$(/bin/date -u '+%Y%m%dT%H%M%SZ')-$$"
-    test "$n" -eq 0 || BACKUP_ROOT="$BACKUP_ROOT-$n"
-    test ! -e "$BACKUP_ROOT" && test ! -L "$BACKUP_ROOT" && break
-    n=$((n + 1))
-  done
+  if test -z "${BACKUP_ROOT-}"; then
+    base=${STATE_ROOT:-${XDG_STATE_HOME:-"$PHYSICAL_HOME/.local/state/kaisian"}}/backups
+    n=0
+    while :; do
+      BACKUP_ROOT="$base/$(/bin/date -u '+%Y%m%dT%H%M%SZ')-$$"
+      test "$n" -eq 0 || BACKUP_ROOT="$BACKUP_ROOT-$n"
+      test ! -e "$BACKUP_ROOT" && test ! -L "$BACKUP_ROOT" && break
+      n=$((n + 1))
+    done
+  fi
   /bin/mkdir -p "$BACKUP_ROOT/files" || return 1
   while IFS='	' read -r source backup || test -n "$source"; do
     rel=${backup#*/files/}
