@@ -3784,32 +3784,43 @@ task5_mapping_fixture_case() {
 }
 task5_shared_directory_coalescing_case() {
   t=$(mktemp -d "$ROOT/task5-shared.XXXXXX") || return 1
-  /bin/mkdir -p "$t/sandbox"
-  printf 'dir\tpkg1\tdot-config\t.config\t.config\nfile\tpkg1\tdot-config/a\t.config/a\t.config/a\ndir\tpkg2\tdot-config\t.config\t.config\nfile\tpkg2\tdot-config/b\t.config/b\t.config/b\n' > "$t/sandbox/mapping.tsv"
-  ( export KAISIAN_TESTING=1; . "$SCRIPT"; SANDBOX="$t/sandbox"; MAPPING_FILE="$t/sandbox/mapping.tsv"; validate_typed_tree )
-  status=$?
-  /bin/rm -rf "$t"
-  return "$status"
+  /bin/mkdir -p "$t/checkout/pkg1/dot-config" "$t/checkout/pkg2/dot-config" "$t/sandbox"
+  printf a > "$t/checkout/pkg1/dot-config/a"; printf b > "$t/checkout/pkg2/dot-config/b"
+  git -C "$t/checkout" init -q
+  git -C "$t/checkout" -c commit.gpgSign=false config user.email test@example.invalid
+  git -C "$t/checkout" -c commit.gpgSign=false config user.name test
+  git -C "$t/checkout" add . && git -C "$t/checkout" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm fixture
+  printf 'pkg1\tone\tone\npkg2\ttwo\ttwo\n' > "$t/sandbox/groups.tsv"
+  printf 'pkg1\npkg2\n' > "$t/sandbox/selected.txt"
+  ( export KAISIAN_TESTING=1; . "$SCRIPT"; CHECKOUT_DIR="$t/checkout"; SANDBOX="$t/sandbox"; build_package_map && validate_typed_tree && test "$(grep -c '^dir.*\.config' "$SANDBOX/mapping.tsv")" = 1 )
+  status=$?; /bin/rm -rf "$t"; return "$status"
 }
 
 task5_prefix_collision_case() {
   t=$(mktemp -d "$ROOT/task5-prefix.XXXXXX") || return 1
-  /bin/mkdir -p "$t/sandbox"
-  printf 'file\tpkg\tfoo\tfoo\tfoo\nfile\tpkg\tfoo/bar\tfoo/bar\tfoo/bar\n' > "$t/sandbox/mapping.tsv"
-  ( export KAISIAN_TESTING=1; . "$SCRIPT"; SANDBOX="$t/sandbox"; MAPPING_FILE="$t/sandbox/mapping.tsv"; ! validate_typed_tree )
-  status=$?
-  /bin/rm -rf "$t"
-  return "$status"
+  /bin/mkdir -p "$t/checkout/pkg/-q" "$t/checkout/normal" "$t/sandbox"
+  printf x > "$t/checkout/pkg/-q/file"; printf y > "$t/checkout/normal/file"
+  git -C "$t/checkout" init -q
+  git -C "$t/checkout" -c commit.gpgSign=false config user.email test@example.invalid
+  git -C "$t/checkout" -c commit.gpgSign=false config user.name test
+  git -C "$t/checkout" add . && git -C "$t/checkout" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm fixture
+  printf 'pkg\tq\tq\nnormal\tn\tn\n' > "$t/sandbox/groups.tsv"; printf 'pkg\nnormal\n' > "$t/sandbox/selected.txt"
+  ( export KAISIAN_TESTING=1; . "$SCRIPT"; CHECKOUT_DIR="$t/checkout"; SANDBOX="$t/sandbox"; build_package_map && validate_typed_tree && grep -F -q -e $'file\tpkg\t-q/file' "$SANDBOX/mapping.tsv" )
+  status=$?; /bin/rm -rf "$t"; return "$status"
 }
+
+
 
 task5_unselected_declared_rejection_case() {
   t=$(mktemp -d "$ROOT/task5-declared.XXXXXX") || return 1
-  /bin/mkdir -p "$t/sandbox"
-  printf 'file\tbad\tdot-config/x\t.config/x\t.config/x\nfile\tbad\tdot-config/y\t.config/x\t.config/x\n' > "$t/sandbox/mapping.tsv"
-  ( export KAISIAN_TESTING=1; . "$SCRIPT"; SANDBOX="$t/sandbox"; MAPPING_FILE="$t/sandbox/mapping.tsv"; ! validate_typed_tree </dev/null )
-  status=$?
-  /bin/rm -rf "$t"
-  return "$status"
+  /bin/mkdir -p "$t/checkout/good" "$t/checkout/bad/dot-config" "$t/sandbox"
+  git -C "$t/checkout" init -q
+  git -C "$t/checkout" -c commit.gpgSign=false config user.email test@example.invalid
+  git -C "$t/checkout" -c commit.gpgSign=false config user.name test
+  git -C "$t/checkout" add . && git -C "$t/checkout" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm fixture
+  printf 'good\tgood\tgood\nbad\tbad\tbad\n' > "$t/sandbox/groups.tsv"; printf 'good\n' > "$t/sandbox/selected.txt"
+  ( export KAISIAN_TESTING=1; . "$SCRIPT"; CHECKOUT_DIR="$t/checkout"; SANDBOX="$t/sandbox"; ! build_package_map )
+  status=$?; /bin/rm -rf "$t"; return "$status"
 }
 task5_nonascii_locale_rejection_case() {
   t=$(mktemp -d "$ROOT/task5-locale.XXXXXX") || return 1
@@ -3822,13 +3833,34 @@ task5_nonascii_locale_rejection_case() {
 }
 
 task5_all_node_boundary_rejection_case() {
-  t=$(mktemp -d "$ROOT/task5-nodes.XXXXXX") || return 1
-  /bin/mkdir -p "$t/sandbox"
-  printf 'file\tpkg\tdot-config/x\t.config/x\t.config/x\nfile\tpkg\tdot-config/x\t.config/x\t.config/x\n' > "$t/sandbox/mapping.tsv"
-  ( export KAISIAN_TESTING=1; . "$SCRIPT"; SANDBOX="$t/sandbox"; MAPPING_FILE="$t/sandbox/mapping.tsv"; ! validate_typed_tree )
-  status=$?
-  /bin/rm -rf "$t"
-  return "$status"
+  for kind in clean empty hidden nonascii control symlink nestedgit gitlink untracked ignored; do
+    t=$(mktemp -d "$ROOT/task5-nodes.XXXXXX") || return 1
+    /bin/mkdir -p "$t/checkout/pkg/dot-config" "$t/sandbox"
+    printf x > "$t/checkout/pkg/dot-config/x"
+    git -C "$t/checkout" init -q
+    git -C "$t/checkout" -c commit.gpgSign=false config user.email test@example.invalid
+    git -C "$t/checkout" -c commit.gpgSign=false config user.name test
+    printf 'pkg\tpkg\tpkg\n' > "$t/sandbox/groups.tsv"; printf 'pkg\n' > "$t/sandbox/selected.txt"
+    expect=0
+    git -C "$t/checkout" add pkg/dot-config/x
+    git -C "$t/checkout" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm base
+    case "$kind" in
+      empty) mkdir "$t/checkout/pkg/empty"; expect=1 ;;
+      hidden) printf h > "$t/checkout/pkg/.hidden"; expect=1 ;;
+      nonascii) printf n > "$t/checkout/pkg/dot-é"; expect=1 ;;
+      control) bad=$(printf 'bad\001'); printf c > "$t/checkout/pkg/$bad"; expect=1 ;;
+      symlink) ln -s dot-config/x "$t/checkout/pkg/link"; expect=1 ;;
+      nestedgit) mkdir -p "$t/checkout/pkg/nested/.git"; expect=1 ;;
+      gitlink) git -C "$t/checkout" add pkg/dot-config/x; git -C "$t/checkout" update-index --add --cacheinfo 160000,0123456789012345678901234567890123456789,pkg/gitlink; expect=1 ;;
+      untracked) printf u > "$t/checkout/pkg/untracked"; expect=1 ;;
+      ignored) printf 'pkg/ignored\n' > "$t/checkout/.gitignore"; git -C "$t/checkout" add .gitignore; git -C "$t/checkout" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm ignore; printf i > "$t/checkout/pkg/ignored"; expect=1 ;;
+    esac
+    case "$kind" in untracked|ignored|gitlink) ;; *) git -C "$t/checkout" add -A ;; esac
+    ( export KAISIAN_TESTING=1; . "$SCRIPT"; CHECKOUT_DIR="$t/checkout"; SANDBOX="$t/sandbox"; build_package_map )
+    actual=$?
+    test "$actual" -eq "$expect" || { /bin/rm -rf "$t"; return 1; }
+  done
+  return 0
 }
 
 run_case 'Task 5 shared directory coalescing' task5_shared_directory_coalescing_case
