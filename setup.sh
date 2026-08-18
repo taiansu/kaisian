@@ -453,8 +453,10 @@ preflight_targets() {
     done
 
     dst_dev=$(stat_dev "$dst") || return 1
+    test -n "$dst_dev" || return 1
     backup_ancestor=$(nearest_existing "$backup")
     backup_dev=$(stat_dev "$backup_ancestor") || return 1
+    test -n "$backup_dev" || return 1
     test "$dst_dev" = "$backup_dev" || return 1
 
     printf '%s\t%s\n' "$dst" "$backup" >> "$CONFLICTS_FILE" || return 1

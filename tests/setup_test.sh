@@ -4532,7 +4532,7 @@ task5_preflight_cross_device_case() {
     test -s "$sb/conflicts.tsv" || exit 1
     test "$(wc -l < "$sb/conflicts.tsv" | tr -d ' ')" = 4 || exit 1
 
-    # 2. Mock stat logs every stat_dev input and assigns mismatch specifically to the later conflict backup ancestor
+    # 2. Mock stat: mismatch specifically on the last (.zshrc) backup ancestor after .broken, .config/app/config, .gitconfig pass
     mock_bin="$t/mock_bin"
     mkdir -p "$mock_bin"
     stat_log="$t/stat_trace.log"
@@ -4544,7 +4544,7 @@ task5_preflight_cross_device_case() {
 target_path="\${3:-}"
 printf '%s\n' "\$target_path" >> "$stat_log"
 
-if test "\$target_path" = "$nearest_backup_ancestor" && grep -Fxq "$hm/.config/app/config" "$stat_log"; then
+if test "\$target_path" = "$nearest_backup_ancestor" && grep -Fxq "$hm/.zshrc" "$stat_log"; then
   printf '99999\n'
 else
   /usr/bin/stat "\$@"
@@ -4557,11 +4557,15 @@ MOCK
       ! preflight_targets
     ) || exit 1
 
-    # Assert exact expected source and backup ancestor call sequence for all conflicts up to failure
-    expected_trace=$(printf '%s\n%s\n%s\n%s\n' \
+    # Assert exact 8 source/nearest-ancestor trace lines in Git conflict order:
+    expected_trace=$(printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
       "$hm/.broken" \
       "$nearest_backup_ancestor" \
       "$hm/.config/app/config" \
+      "$nearest_backup_ancestor" \
+      "$hm/.gitconfig" \
+      "$nearest_backup_ancestor" \
+      "$hm/.zshrc" \
       "$nearest_backup_ancestor")
     test "$(cat "$stat_log")" = "$expected_trace" || exit 1
 
@@ -4584,7 +4588,7 @@ MOCK
     # No backup directory created
     test ! -d "$STATE_ROOT/backups" || test -z "$(find "$STATE_ROOT/backups" -mindepth 1 2>/dev/null)" || exit 1
 
-    # 3. Stat failure / empty output
+    # 3. Stat failure (exit 1)
     cat << 'MOCK_FAIL' > "$mock_bin/stat_fail"
 #!/bin/bash
 exit 1
@@ -4596,11 +4600,44 @@ MOCK_FAIL
       ! preflight_targets
     ) || exit 1
 
-    # Target files remain intact after stat failure
+    # Invariants on all 4 target files and no state/BACKUP_ROOT creation
     test -f "$hm/.zshrc" || exit 1
+    test "$(/usr/bin/stat -f '%i' "$hm/.zshrc")" = "$zshrc_ino" || exit 1
+    test "$(cat "$hm/.zshrc")" = "conflict_1" || exit 1
     test -f "$hm/.gitconfig" || exit 1
+    test "$(/usr/bin/stat -f '%i' "$hm/.gitconfig")" = "$gitconfig_ino" || exit 1
+    test "$(cat "$hm/.gitconfig")" = "conflict_2" || exit 1
     test -f "$hm/.config/app/config" || exit 1
+    test "$(/usr/bin/stat -f '%i' "$hm/.config/app/config")" = "$app_ino" || exit 1
+    test "$(cat "$hm/.config/app/config")" = "conflict_3" || exit 1
     test -L "$hm/.broken" || exit 1
+    test "$(/usr/bin/readlink "$hm/.broken")" = "$broken_target" || exit 1
+    test ! -d "$STATE_ROOT/backups" || test -z "$(find "$STATE_ROOT/backups" -mindepth 1 2>/dev/null)" || exit 1
+
+    # 4. Stat empty output
+    cat << 'MOCK_EMPTY' > "$mock_bin/stat_empty"
+#!/bin/bash
+exit 0
+MOCK_EMPTY
+    chmod +x "$mock_bin/stat_empty"
+
+    (
+      KAISIAN_STAT_EXEC="$mock_bin/stat_empty"
+      ! preflight_targets
+    ) || exit 1
+
+    # Invariants on all 4 target files and no state/BACKUP_ROOT creation
+    test -f "$hm/.zshrc" || exit 1
+    test "$(/usr/bin/stat -f '%i' "$hm/.zshrc")" = "$zshrc_ino" || exit 1
+    test "$(cat "$hm/.zshrc")" = "conflict_1" || exit 1
+    test -f "$hm/.gitconfig" || exit 1
+    test "$(/usr/bin/stat -f '%i' "$hm/.gitconfig")" = "$gitconfig_ino" || exit 1
+    test "$(cat "$hm/.gitconfig")" = "conflict_2" || exit 1
+    test -f "$hm/.config/app/config" || exit 1
+    test "$(/usr/bin/stat -f '%i' "$hm/.config/app/config")" = "$app_ino" || exit 1
+    test "$(cat "$hm/.config/app/config")" = "conflict_3" || exit 1
+    test -L "$hm/.broken" || exit 1
+    test "$(/usr/bin/readlink "$hm/.broken")" = "$broken_target" || exit 1
     test ! -d "$STATE_ROOT/backups" || test -z "$(find "$STATE_ROOT/backups" -mindepth 1 2>/dev/null)" || exit 1
   )
   status=$?
