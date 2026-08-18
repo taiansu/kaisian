@@ -3377,6 +3377,8 @@ single_fetch_and_trace_assertions_case() {
     expected_env=$(printf 'ENV: HOME=%q PATH=%q LC_ALL=%q GIT_CONFIG_NOSYSTEM=%q GIT_CONFIG_GLOBAL=%q GIT_ATTR_NOSYSTEM=%q GIT_TERMINAL_PROMPT=%q GIT_ASKPASS=%q GIT_NO_REPLACE_OBJECTS=%q GIT_ALLOW_PROTOCOL=%q' \
       "$SANDBOX/git-home" "/usr/bin:/bin:/usr/sbin:/sbin" "C" "1" "/dev/null" "1" "0" "/usr/bin/false" "1" "https")
     expected_index=$(printf '%q' "$SANDBOX/verify-index-$$")
+    expected_ops=(ls-remote init config config fetch rev-parse ls-tree cat-file rev-parse rev-parse rev-parse config checkout cat-file rev-parse rev-parse rev-parse config diff-index read-tree update-index diff-index ls-tree hash-object hash-object hash-object hash-object status)
+    op_index=0
     fetch_seen=0
     ls_remote_seen=0
     trace_env=""
@@ -3396,6 +3398,13 @@ single_fetch_and_trace_assertions_case() {
       trace_cmd=${trace_line#git }
       trace_argv=()
       eval "trace_argv=( $trace_cmd )"
+      if test "${trace_argv[0]-}" = "-C"; then
+        trace_op=${trace_argv[2]-}
+      else
+        trace_op=${trace_argv[0]-}
+      fi
+      test "${expected_ops[$op_index]-}" = "$trace_op" || exit 1
+      op_index=$((op_index + 1))
       index_expected=0
       case "$trace_env" in
         "$expected_env") ;;
@@ -3444,6 +3453,7 @@ single_fetch_and_trace_assertions_case() {
       trace_env=""
     done < "$trace_log"
     test -z "$trace_env" || exit 1
+    test "$op_index" -eq "${#expected_ops[@]}" || exit 1
     test "$fetch_seen" -eq 1 || exit 1
     test "$ls_remote_seen" -eq 1 || exit 1
     # Assert no refs/heads or refs/remotes created
