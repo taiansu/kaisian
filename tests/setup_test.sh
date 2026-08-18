@@ -3786,7 +3786,7 @@ task5_shared_directory_coalescing_case() {
   t=$(mktemp -d "$ROOT/task5-shared.XXXXXX") || return 1
   /bin/mkdir -p "$t/sandbox"
   printf 'dir\tpkg1\tdot-config\t.config\t.config\nfile\tpkg1\tdot-config/a\t.config/a\t.config/a\ndir\tpkg2\tdot-config\t.config\t.config\nfile\tpkg2\tdot-config/b\t.config/b\t.config/b\n' > "$t/sandbox/mapping.tsv"
-  ( . "$SCRIPT"; SANDBOX="$t/sandbox"; MAPPING_FILE="$t/sandbox/mapping.tsv"; validate_typed_tree )
+  ( export KAISIAN_TESTING=1; . "$SCRIPT"; SANDBOX="$t/sandbox"; MAPPING_FILE="$t/sandbox/mapping.tsv"; validate_typed_tree )
   status=$?
   /bin/rm -rf "$t"
   return "$status"
@@ -3796,7 +3796,7 @@ task5_prefix_collision_case() {
   t=$(mktemp -d "$ROOT/task5-prefix.XXXXXX") || return 1
   /bin/mkdir -p "$t/sandbox"
   printf 'file\tpkg\tfoo\tfoo\tfoo\nfile\tpkg\tfoo/bar\tfoo/bar\tfoo/bar\n' > "$t/sandbox/mapping.tsv"
-  ( . "$SCRIPT"; SANDBOX="$t/sandbox"; MAPPING_FILE="$t/sandbox/mapping.tsv"; ! validate_typed_tree )
+  ( export KAISIAN_TESTING=1; . "$SCRIPT"; SANDBOX="$t/sandbox"; MAPPING_FILE="$t/sandbox/mapping.tsv"; ! validate_typed_tree )
   status=$?
   /bin/rm -rf "$t"
   return "$status"
@@ -3806,7 +3806,7 @@ task5_unselected_declared_rejection_case() {
   t=$(mktemp -d "$ROOT/task5-declared.XXXXXX") || return 1
   /bin/mkdir -p "$t/sandbox"
   printf 'file\tbad\tdot-config/x\t.config/x\t.config/x\nfile\tbad\tdot-config/y\t.config/x\t.config/x\n' > "$t/sandbox/mapping.tsv"
-  ( . "$SCRIPT"; SANDBOX="$t/sandbox"; MAPPING_FILE="$t/sandbox/mapping.tsv"; ! validate_typed_tree </dev/null )
+  ( export KAISIAN_TESTING=1; . "$SCRIPT"; SANDBOX="$t/sandbox"; MAPPING_FILE="$t/sandbox/mapping.tsv"; ! validate_typed_tree </dev/null )
   status=$?
   /bin/rm -rf "$t"
   return "$status"
@@ -3815,7 +3815,7 @@ task5_nonascii_locale_rejection_case() {
   t=$(mktemp -d "$ROOT/task5-locale.XXXXXX") || return 1
   /bin/mkdir -p "$t/sandbox"
   printf 'file\tpkg\tbad-é\tbad-é\tbad-é\n' > "$t/sandbox/mapping.tsv"
-  ( export LC_ALL=en_US.UTF-8; . "$SCRIPT"; SANDBOX="$t/sandbox"; MAPPING_FILE="$t/sandbox/mapping.tsv"; ! validate_typed_tree )
+  ( export KAISIAN_TESTING=1; export LC_ALL=en_US.UTF-8; . "$SCRIPT"; SANDBOX="$t/sandbox"; MAPPING_FILE="$t/sandbox/mapping.tsv"; ! validate_typed_tree )
   status=$?
   /bin/rm -rf "$t"
   return "$status"
@@ -3825,7 +3825,7 @@ task5_all_node_boundary_rejection_case() {
   t=$(mktemp -d "$ROOT/task5-nodes.XXXXXX") || return 1
   /bin/mkdir -p "$t/sandbox"
   printf 'file\tpkg\tdot-config/x\t.config/x\t.config/x\nfile\tpkg\tdot-config/x\t.config/x\t.config/x\n' > "$t/sandbox/mapping.tsv"
-  ( . "$SCRIPT"; SANDBOX="$t/sandbox"; MAPPING_FILE="$t/sandbox/mapping.tsv"; ! validate_typed_tree )
+  ( export KAISIAN_TESTING=1; . "$SCRIPT"; SANDBOX="$t/sandbox"; MAPPING_FILE="$t/sandbox/mapping.tsv"; ! validate_typed_tree )
   status=$?
   /bin/rm -rf "$t"
   return "$status"
