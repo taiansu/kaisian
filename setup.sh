@@ -1,9 +1,9 @@
 #!/bin/bash
 set -u
 
-test -n "${KAISIAN_VERSION-}" || readonly KAISIAN_VERSION='0.1.0'
-test -n "${DEFAULT_REPOSITORY-}" || readonly DEFAULT_REPOSITORY='taiansu/dotfiles'
-test -n "${DEFAULT_DOTFILES_COMMIT-}" || readonly DEFAULT_DOTFILES_COMMIT='0b3b0c3f206e1f4fb35dac82794a871c5c18f405'
+readonly KAISIAN_VERSION='0.1.0'
+readonly DEFAULT_REPOSITORY='taiansu/dotfiles'
+readonly DEFAULT_DOTFILES_COMMIT='0b3b0c3f206e1f4fb35dac82794a871c5c18f405'
 
 LANGUAGE='en'
 PHYSICAL_HOME=''
@@ -19,10 +19,14 @@ REPOSITORY="$DEFAULT_REPOSITORY"
 REQUESTED_REF="$DEFAULT_DOTFILES_COMMIT"
 RECORDED_LOCK_DEV_INO=''
 RECORDED_SANDBOX_DEV_INO=''
+GIT_EXEC=''
+STOW_EXEC=''
+FZF_EXEC=''
+PLUTIL_EXEC=''
 
 usage() {
-  cat <<'USAGE'
-setup.sh [OPTIONS]
+  printf '%s\n' \
+'setup.sh [OPTIONS]
 
 Selection, exactly zero or one:
   --profile NAME
@@ -37,8 +41,7 @@ Source and execution:
   --lang en|zh-TW
   --dry-run
   --yes
-  -h, --help
-USAGE
+  -h, --help'
 }
 
 resolve_language() {
@@ -121,7 +124,6 @@ die() {
 }
 
 parse_args() {
-  # Early scan for explicit --lang so error messages during parsing use requested language
   prev=''
   for arg in "$@"; do
     case "$prev" in
@@ -285,34 +287,99 @@ validate_home() {
   fi
 }
 
+canonicalize_path() {
+  in_path=$1
+  test -n "$in_path" || return 1
+  case "$in_path" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+
+  old_ifs=$IFS
+  IFS='/'
+  set -f
+  # shellcheck disable=SC2086
+  set -- $in_path
+  set +f
+  IFS=$old_ifs
+
+  stack=()
+  for seg in "$@"; do
+    case "$seg" in
+      ''|'.') ;;
+      '..')
+        if test ${#stack[@]} -gt 0; then
+          unset stack[$((${#stack[@]} - 1))]
+          stack=("${stack[@]}")
+        fi
+        ;;
+      *)
+        stack[${#stack[@]}]="$seg"
+        ;;
+    esac
+  done
+
+  norm=''
+  for seg in "${stack[@]}"; do
+    norm="$norm/$seg"
+  done
+  test -n "$norm" || norm='/'
+
+  dir="$norm"
+  suffix=''
+  while test -n "$dir" && test "$dir" != '/' && ! test -d "$dir"; do
+    base_name=${dir##*/}
+    suffix="/$base_name$suffix"
+    dir=${dir%/*}
+    test -n "$dir" || dir='/'
+  done
+
+  if test -d "$dir"; then
+    phys_dir=$(cd -P -- "$dir" 2>/dev/null && pwd -P) || phys_dir="$dir"
+    if test "$phys_dir" = '/'; then
+      norm="$suffix"
+      test -n "$norm" || norm='/'
+    else
+      norm="$phys_dir$suffix"
+    fi
+  fi
+
+  printf '%s\n' "$norm"
+}
+
 check_path_overlap_with_lock() {
   target_path=$1
   test -n "$target_path" || return 0
 
-  norm_target="$target_path"
-  while test "${norm_target%/}" != "$norm_target" && test "$norm_target" != '/'; do
-    norm_target="${norm_target%/}"
-  done
+  canon_target=$(canonicalize_path "$target_path") || die unsafe_path_overlap "$target_path" "$LOCK_DIR"
+  canon_lock=$(canonicalize_path "$LOCK_DIR") || die unsafe_path_overlap "$target_path" "$LOCK_DIR"
 
-  norm_lock="$LOCK_DIR"
-  while test "${norm_lock%/}" != "$norm_lock" && test "$norm_lock" != '/'; do
-    norm_lock="${norm_lock%/}"
-  done
-
-  if test "$norm_target" = "$norm_lock"; then
+  if test "$canon_target" = "$canon_lock"; then
     die unsafe_path_overlap "$target_path" "$LOCK_DIR"
   fi
 
-  case "$norm_lock" in
-    "$norm_target"/*)
+  case "$canon_lock" in
+    "$canon_target"/*)
       die unsafe_path_overlap "$target_path" "$LOCK_DIR"
       ;;
   esac
 
-  case "$norm_target" in
-    "$norm_lock"/*)
+  case "$canon_target" in
+    "$canon_lock"/*)
       die unsafe_path_overlap "$target_path" "$LOCK_DIR"
       ;;
+  esac
+}
+
+on_signal() {
+  sig=$1
+  trap - EXIT HUP INT TERM
+  cleanup
+  case "$sig" in
+    HUP) exit 129 ;;
+    INT) exit 130 ;;
+    TERM) exit 143 ;;
+    *) exit 1 ;;
   esac
 }
 
@@ -327,22 +394,34 @@ acquire_lock() {
 
   check_path_overlap_with_lock "$CHECKOUT_DIR"
   check_path_overlap_with_lock "$STATE_ROOT"
+  if test -n "${XDG_STATE_HOME-}"; then
+    check_path_overlap_with_lock "$XDG_STATE_HOME"
+  fi
 
   if ! ( umask 077 && /bin/mkdir "$LOCK_DIR" 2>/dev/null ); then
     die lock_failed "$LOCK_DIR"
   fi
 
-  RECORDED_LOCK_DEV_INO=$(/usr/bin/stat -f '%d %i' "$LOCK_DIR" 2>/dev/null || stat -f '%d %i' "$LOCK_DIR")
+  RECORDED_LOCK_DEV_INO=$(/usr/bin/stat -f '%d %i' "$LOCK_DIR" 2>/dev/null || stat -f '%d %i' "$LOCK_DIR" 2>/dev/null)
+  if test -z "$RECORDED_LOCK_DEV_INO"; then
+    /bin/rmdir "$LOCK_DIR" 2>/dev/null || true
+    die lock_failed "$LOCK_DIR"
+  fi
+
+  trap 'cleanup' EXIT
+  trap 'on_signal HUP' HUP
+  trap 'on_signal INT' INT
+  trap 'on_signal TERM' TERM
+
   printf '%s\n' "$$" > "$LOCK_DIR/pid" || die lock_failed "$LOCK_DIR"
 
   SANDBOX="$LOCK_DIR/sandbox"
   /bin/mkdir -m 0700 "$SANDBOX" 2>/dev/null || die lock_failed "$LOCK_DIR"
-  RECORDED_SANDBOX_DEV_INO=$(/usr/bin/stat -f '%d %i' "$SANDBOX" 2>/dev/null || stat -f '%d %i' "$SANDBOX")
+  RECORDED_SANDBOX_DEV_INO=$(/usr/bin/stat -f '%d %i' "$SANDBOX" 2>/dev/null || stat -f '%d %i' "$SANDBOX" 2>/dev/null)
+  test -n "$RECORDED_SANDBOX_DEV_INO" || die lock_failed "$LOCK_DIR"
 
   /bin/mkdir -m 0700 "$SANDBOX/git-home" "$SANDBOX/stow-cwd" "$SANDBOX/stow-home" 2>/dev/null || die lock_failed "$LOCK_DIR"
   : > "$SANDBOX/stow-home/.stow-global-ignore"
-
-  trap 'cleanup' EXIT HUP INT TERM
 }
 
 cleanup() {
@@ -372,8 +451,10 @@ cleanup() {
 run_git() {
   test -n "$SANDBOX" || die lock_failed 'sandbox not initialized'
   /bin/mkdir -p "$SANDBOX/git-home" 2>/dev/null || true
+  git_bin="${KAISIAN_GIT_EXEC:-${GIT_EXEC:-git}}"
+  runner_path="${KAISIAN_RUNNER_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"
   env -i \
-    PATH="$PATH" \
+    PATH="$runner_path" \
     HOME="$SANDBOX/git-home" \
     LC_ALL=C \
     GIT_CONFIG_NOSYSTEM=1 \
@@ -382,26 +463,33 @@ run_git() {
     GIT_TERMINAL_PROMPT=0 \
     GIT_ASKPASS=/usr/bin/false \
     GIT_NO_REPLACE_OBJECTS=1 \
-    git "$@"
+    "$git_bin" "$@"
 }
 
 run_stow() {
   test -n "$SANDBOX" || die lock_failed 'sandbox not initialized'
   /bin/mkdir -p "$SANDBOX/stow-cwd" "$SANDBOX/stow-home" 2>/dev/null || true
   test -f "$SANDBOX/stow-home/.stow-global-ignore" || : > "$SANDBOX/stow-home/.stow-global-ignore"
+  stow_bin="${KAISIAN_STOW_EXEC:-${STOW_EXEC:-stow}}"
+  runner_path="${KAISIAN_RUNNER_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"
   (
     cd "$SANDBOX/stow-cwd" && \
     env -i \
-      PATH="$PATH" \
+      PATH="$runner_path" \
       LC_ALL=C \
       HOME="$SANDBOX/stow-home" \
-      stow "$@"
+      "$stow_bin" "$@"
   )
 }
 
 require_prerequisites() {
   os_name=$(/usr/bin/uname -s 2>/dev/null || uname -s)
   test "$os_name" = 'Darwin' || die unsupported_os
+
+  GIT_EXEC=$(command -v git 2>/dev/null || which git 2>/dev/null || true)
+  STOW_EXEC=$(command -v stow 2>/dev/null || which stow 2>/dev/null || true)
+  FZF_EXEC=$(command -v fzf 2>/dev/null || which fzf 2>/dev/null || true)
+  PLUTIL_EXEC=$(command -v plutil 2>/dev/null || which plutil 2>/dev/null || true)
 
   missing=''
   for cmd in git stow fzf plutil; do
@@ -419,34 +507,36 @@ require_prerequisites() {
 
   probe_src="$SANDBOX/stow-probe-src"
   probe_tgt="$SANDBOX/stow-probe-tgt"
-  /bin/mkdir -p "$probe_src/pkg1" "$probe_src/pkg2" "$probe_tgt" 2>/dev/null || die lock_failed "$SANDBOX"
+  /bin/mkdir -p "$probe_src/pkg1/dot-config/app" "$probe_src/pkg2/excluded" "$probe_tgt" 2>/dev/null || die lock_failed "$SANDBOX"
 
+  # 1. --dotfiles and --no-folding (nested directory structure)
   echo 'test' > "$probe_src/pkg1/dot-testfile"
   echo 'ignoreme' > "$probe_src/pkg1/README"
+  echo 'nested' > "$probe_src/pkg1/dot-config/app/dot-nested"
   if ! run_stow -d "$probe_src" -t "$probe_tgt" --dotfiles --no-folding pkg1 >/dev/null 2>&1; then
     die unsupported_stow '--dotfiles --no-folding'
   fi
   test -L "$probe_tgt/.testfile" || die unsupported_stow '--dotfiles link creation'
   test -L "$probe_tgt/README" || die unsupported_stow 'built-in-ignore disabling'
+  test -d "$probe_tgt/.config" && test ! -L "$probe_tgt/.config" || die unsupported_stow '--no-folding directory creation'
+  test -d "$probe_tgt/.config/app" && test ! -L "$probe_tgt/.config/app" || die unsupported_stow '--no-folding nested directory'
+  test -L "$probe_tgt/.config/app/.nested" || die unsupported_stow '--no-folding leaf link'
 
+  # 2. --simulate
   echo 'test2' > "$probe_src/pkg2/dot-test2"
   if ! run_stow -d "$probe_src" -t "$probe_tgt" --dotfiles --no-folding --simulate pkg2 >/dev/null 2>&1; then
     die unsupported_stow '--simulate'
   fi
   test ! -e "$probe_tgt/.test2" || die unsupported_stow '--simulate isolated'
 
-  if ! run_stow -d "$probe_src" -t "$probe_tgt" --dotfiles --no-folding --compat -R pkg2 -D pkg1 >/dev/null 2>&1; then
+  # 3. Mixed -R / -D with --compat and anchored subtree ignore
+  echo 'sub' > "$probe_src/pkg2/excluded/dot-sub"
+  if ! run_stow -d "$probe_src" -t "$probe_tgt" --dotfiles --no-folding --compat --ignore='^excluded(/.*)?$' -R pkg2 -D pkg1 >/dev/null 2>&1; then
     die unsupported_stow 'mixed -R/-D --compat'
   fi
   test -L "$probe_tgt/.test2" || die unsupported_stow 'mixed -R restow'
   test ! -e "$probe_tgt/.testfile" || die unsupported_stow 'mixed -D unstow'
-
-  /bin/mkdir -p "$probe_tgt/excluded"
-  touch "$probe_tgt/excluded/keep"
-  if ! run_stow -d "$probe_src" -t "$probe_tgt" --dotfiles --no-folding --compat --ignore='^excluded(/.*)?$' -R pkg2 >/dev/null 2>&1; then
-    die unsupported_stow 'anchored ignore exclusion'
-  fi
-  test -f "$probe_tgt/excluded/keep" || die unsupported_stow 'anchored ignore preservation'
+  test ! -e "$probe_tgt/excluded" || die unsupported_stow 'anchored ignore exclusion'
 
   /bin/rm -rf -- "$probe_src" "$probe_tgt" 2>/dev/null || true
 }

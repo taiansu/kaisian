@@ -50,17 +50,22 @@ make_home() {
   (cd -P "$h" && pwd -P)
 }
 
-make_empty_bin() {
-  dir="$ROOT/empty-bin"
-  mkdir -p "$dir"
-  (cd -P "$dir" && pwd -P)
+make_fake_bin() {
+  dir=$(mktemp -d "$ROOT/fakebin.XXXXXX")
+  dir=$(cd -P "$dir" && pwd -P)
+  cat << 'EOF' > "$dir/uname"
+#!/bin/bash
+printf 'Darwin\n'
+EOF
+  chmod +x "$dir/uname"
+  printf '%s\n' "$dir"
 }
 
 # 1. --help succeeds when git/stow/fzf are absent
 help_without_tools_case() {
-  empty_bin=$(make_empty_bin)
+  fake_bin=$(make_fake_bin)
   test_home=$(make_home)
-  output=$(env -i HOME="$test_home" PATH="$empty_bin:/bin:/usr/bin" /bin/bash "$SCRIPT" --help 2>&1) || return 1
+  output=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --help 2>&1) || return 1
   assert_contains "$output" 'setup.sh [OPTIONS]' || return 1
   assert_contains "$output" '--interactive'
 }
@@ -68,6 +73,7 @@ help_without_tools_case() {
 # 2. --profile/--groups/--interactive/--all reject every pair
 selection_mutual_exclusion_case() {
   test_home=$(make_home)
+  fake_bin=$(make_fake_bin)
   pairs=(
     "--profile minimal --groups shell"
     "--profile minimal --interactive"
@@ -77,22 +83,30 @@ selection_mutual_exclusion_case() {
     "--interactive --all"
   )
   for pair in "${pairs[@]}"; do
-    output=$(env -i HOME="$test_home" PATH="/usr/bin:/bin" /bin/bash "$SCRIPT" $pair 2>&1)
+    output=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" $pair 2>&1)
     status=$?
-    if test "$status" -eq 0; then
-      printf 'Expected pair to fail: %s\n' "$pair" >&2
-      return 1
-    fi
+    test "$status" -ne 0 || return 1
+    assert_contains "$output" 'Selection flags (--profile, --groups, --interactive, --all) are mutually exclusive.' || return 1
   done
   return 0
 }
 
-# 3. unknown arguments and missing values fail
+# 3. unknown arguments and missing values fail with exact diagnostics
 unknown_and_missing_values_case() {
   test_home=$(make_home)
-  bad_args=(
-    "--unknown"
-    "-x"
+  fake_bin=$(make_fake_bin)
+
+  # Unknown arguments
+  out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --unknown 2>&1)
+  test $? -ne 0 || return 1
+  assert_contains "$out" "Unknown argument: --unknown" || return 1
+
+  out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" -x 2>&1)
+  test $? -ne 0 || return 1
+  assert_contains "$out" "Unknown argument: -x" || return 1
+
+  # Missing values
+  missing_val_pairs=(
     "--profile"
     "--profile="
     "--groups"
@@ -106,13 +120,11 @@ unknown_and_missing_values_case() {
     "--lang"
     "--lang="
   )
-  for arg in "${bad_args[@]}"; do
-    output=$(env -i HOME="$test_home" PATH="/usr/bin:/bin" /bin/bash "$SCRIPT" $arg 2>&1)
-    status=$?
-    if test "$status" -eq 0; then
-      printf 'Expected arg to fail: %s\n' "$arg" >&2
-      return 1
-    fi
+  for opt in "${missing_val_pairs[@]}"; do
+    out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" $opt 2>&1)
+    test $? -ne 0 || return 1
+    opt_name=${opt%=*}
+    assert_contains "$out" "Option '$opt_name' requires a non-empty value." || return 1
   done
   return 0
 }
@@ -120,50 +132,62 @@ unknown_and_missing_values_case() {
 # 4. --lang accepts only en and zh-TW
 lang_validation_case() {
   test_home=$(make_home)
+  fake_bin=$(make_fake_bin)
+
   # Invalid explicit languages
   for invalid_lang in "fr" "zh" "de" "en-US" "zh-CN"; do
-    output=$(env -i HOME="$test_home" PATH="/usr/bin:/bin" /bin/bash "$SCRIPT" --lang "$invalid_lang" 2>&1)
-    status=$?
-    if test "$status" -eq 0; then
-      printf 'Expected --lang %s to fail\n' "$invalid_lang" >&2
-      return 1
-    fi
+    out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --lang "$invalid_lang" 2>&1)
+    test $? -ne 0 || return 1
+    assert_contains "$out" "Invalid language '$invalid_lang'. Supported: en, zh-TW." || return 1
+
+    out_eq=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" "--lang=$invalid_lang" 2>&1)
+    test $? -ne 0 || return 1
+    assert_contains "$out_eq" "Invalid language '$invalid_lang'. Supported: en, zh-TW." || return 1
   done
 
-  # Valid explicit languages
-  for valid_lang in "en" "zh-TW"; do
-    output=$(env -i HOME="$test_home" PATH="/usr/bin:/bin" /bin/bash "$SCRIPT" --help --lang "$valid_lang" 2>&1) || return 1
-    output_eq=$(env -i HOME="$test_home" PATH="/usr/bin:/bin" /bin/bash "$SCRIPT" --help "--lang=$valid_lang" 2>&1) || return 1
-  done
+  # Valid explicit languages without --help short-circuit:
+  # Verify that valid language is accepted by parser and error diagnostic reflects chosen language
+  out_en=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --lang en --unknown 2>&1)
+  assert_contains "$out_en" "Error: Unknown argument: --unknown" || return 1
+
+  out_zh=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --lang zh-TW --unknown 2>&1)
+  assert_contains "$out_zh" "錯誤: 未知的參數：--unknown" || return 1
+
+  out_en_eq=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --lang=en --unknown 2>&1)
+  assert_contains "$out_en_eq" "Error: Unknown argument: --unknown" || return 1
+
+  out_zh_eq=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --lang=zh-TW --unknown 2>&1)
+  assert_contains "$out_zh_eq" "錯誤: 未知的參數：--unknown" || return 1
   return 0
 }
 
 # 5. LC_ALL > LC_MESSAGES > LANG > English fallback
 locale_precedence_case() {
   test_home=$(make_home)
+  fake_bin=$(make_fake_bin)
 
   # Explicit --lang en overrides zh_TW environment
-  out=$(env -i HOME="$test_home" PATH="/usr/bin:/bin" LC_ALL="zh_TW.UTF-8" /bin/bash "$SCRIPT" --lang en --unknown 2>&1)
+  out=$(env -i HOME="$test_home" PATH="$fake_bin" LC_ALL="zh_TW.UTF-8" /bin/bash "$SCRIPT" --lang en --unknown 2>&1)
   assert_contains "$out" "Error" || return 1
 
   # Explicit --lang zh-TW overrides English environment
-  out=$(env -i HOME="$test_home" PATH="/usr/bin:/bin" LC_ALL="C" /bin/bash "$SCRIPT" --lang zh-TW --unknown 2>&1)
+  out=$(env -i HOME="$test_home" PATH="$fake_bin" LC_ALL="C" /bin/bash "$SCRIPT" --lang zh-TW --unknown 2>&1)
   assert_contains "$out" "錯誤" || return 1
 
   # LC_ALL overrides LC_MESSAGES and LANG
-  out=$(env -i HOME="$test_home" PATH="/usr/bin:/bin" LC_ALL="C" LC_MESSAGES="zh_TW.UTF-8" LANG="zh_TW.UTF-8" /bin/bash "$SCRIPT" --unknown 2>&1)
+  out=$(env -i HOME="$test_home" PATH="$fake_bin" LC_ALL="C" LC_MESSAGES="zh_TW.UTF-8" LANG="zh_TW.UTF-8" /bin/bash "$SCRIPT" --unknown 2>&1)
   assert_contains "$out" "Error" || return 1
 
   # LC_MESSAGES overrides LANG
-  out=$(env -i HOME="$test_home" PATH="/usr/bin:/bin" LC_ALL="" LC_MESSAGES="zh_TW.UTF-8" LANG="C" /bin/bash "$SCRIPT" --unknown 2>&1)
+  out=$(env -i HOME="$test_home" PATH="$fake_bin" LC_ALL="" LC_MESSAGES="zh_TW.UTF-8" LANG="C" /bin/bash "$SCRIPT" --unknown 2>&1)
   assert_contains "$out" "錯誤" || return 1
 
   # LANG takes effect when LC_ALL and LC_MESSAGES are empty
-  out=$(env -i HOME="$test_home" PATH="/usr/bin:/bin" LC_ALL="" LC_MESSAGES="" LANG="zh_TW.UTF-8" /bin/bash "$SCRIPT" --unknown 2>&1)
+  out=$(env -i HOME="$test_home" PATH="$fake_bin" LC_ALL="" LC_MESSAGES="" LANG="zh_TW.UTF-8" /bin/bash "$SCRIPT" --unknown 2>&1)
   assert_contains "$out" "錯誤" || return 1
 
   # Default fallback is English
-  out=$(env -i HOME="$test_home" PATH="/usr/bin:/bin" LC_ALL="" LC_MESSAGES="" LANG="" /bin/bash "$SCRIPT" --unknown 2>&1)
+  out=$(env -i HOME="$test_home" PATH="$fake_bin" LC_ALL="" LC_MESSAGES="" LANG="" /bin/bash "$SCRIPT" --unknown 2>&1)
   assert_contains "$out" "Error" || return 1
   return 0
 }
@@ -171,9 +195,10 @@ locale_precedence_case() {
 # 6. zh, zh_TW.UTF-8, and zh-Hant select zh-TW text
 chinese_locale_variants_case() {
   test_home=$(make_home)
+  fake_bin=$(make_fake_bin)
   variants=("zh" "zh_TW.UTF-8" "zh-Hant" "zh_CN.UTF-8" "zh_HK")
   for var in "${variants[@]}"; do
-    out=$(env -i HOME="$test_home" PATH="/usr/bin:/bin" LC_ALL="$var" /bin/bash "$SCRIPT" --unknown 2>&1)
+    out=$(env -i HOME="$test_home" PATH="$fake_bin" LC_ALL="$var" /bin/bash "$SCRIPT" --unknown 2>&1)
     assert_contains "$out" "錯誤" || {
       printf 'Failed for locale variant: %s\n' "$var" >&2
       return 1
@@ -185,198 +210,276 @@ chinese_locale_variants_case() {
 # 7. normal execution reports every missing prerequisite without installing it
 missing_prerequisites_case() {
   test_home=$(make_home)
-  empty_bin=$(make_empty_bin)
-  out=$(env -i HOME="$test_home" PATH="$empty_bin:/usr/bin:/bin" /bin/bash "$SCRIPT" 2>&1)
+  fake_bin=$(make_fake_bin)
+  out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" 2>&1)
   status=$?
   test "$status" -ne 0 || return 1
+  assert_contains "$out" "git" || return 1
   assert_contains "$out" "stow" || return 1
   assert_contains "$out" "fzf" || return 1
+  assert_contains "$out" "plutil" || return 1
   return 0
 }
 
 # 8. relative, missing, symlinked, unowned, or unwritable HOME fails
 home_validation_case() {
+  fake_bin=$(make_fake_bin)
+
   # Relative HOME
-  out=$(env -i HOME="relative/home" PATH="/usr/bin:/bin" /bin/bash "$SCRIPT" 2>&1)
+  out=$(env -i HOME="relative/home" PATH="$fake_bin" /bin/bash "$SCRIPT" 2>&1)
   test $? -ne 0 || return 1
+  assert_contains "$out" "HOME directory is invalid" || return 1
 
   # Missing HOME
-  out=$(env -i HOME="$ROOT/nonexistent_home" PATH="/usr/bin:/bin" /bin/bash "$SCRIPT" 2>&1)
+  out=$(env -i HOME="$ROOT/nonexistent_home" PATH="$fake_bin" /bin/bash "$SCRIPT" 2>&1)
   test $? -ne 0 || return 1
+  assert_contains "$out" "HOME directory is invalid" || return 1
 
   # Symlinked HOME
   real_h=$(make_home)
   sym_h="$ROOT/sym_home"
   ln -s "$real_h" "$sym_h"
-  out=$(env -i HOME="$sym_h" PATH="/usr/bin:/bin" /bin/bash "$SCRIPT" 2>&1)
+  out=$(env -i HOME="$sym_h" PATH="$fake_bin" /bin/bash "$SCRIPT" 2>&1)
   test $? -ne 0 || return 1
+  assert_contains "$out" "HOME directory is invalid" || return 1
 
   # Unwritable HOME
   unwritable_h=$(make_home)
   chmod 500 "$unwritable_h"
-  out=$(env -i HOME="$unwritable_h" PATH="/usr/bin:/bin" /bin/bash "$SCRIPT" 2>&1)
+  out=$(env -i HOME="$unwritable_h" PATH="$fake_bin" /bin/bash "$SCRIPT" 2>&1)
   test $? -ne 0 || return 1
+  assert_contains "$out" "HOME directory is invalid" || return 1
   chmod 700 "$unwritable_h"
+
+  # Unowned HOME (root-owned /private/var/root on macOS)
+  if test -d "/private/var/root"; then
+    out=$(env -i HOME="/private/var/root" PATH="$fake_bin" /bin/bash "$SCRIPT" 2>&1)
+    test $? -ne 0 || return 1
+    assert_contains "$out" "HOME directory is invalid" || return 1
+  fi
   return 0
 }
 
 # 9. existing /private/tmp/kaisian-$UID.lock fails and is never removed
 existing_lock_case() {
   test_home=$(make_home)
+  fake_bin=$(make_fake_bin)
   uid=$(/usr/bin/id -u)
   lock_dir="/private/tmp/kaisian-$uid.lock"
 
   if test -d "$lock_dir"; then
-    rm -rf "$lock_dir" 2>/dev/null || true
+    printf 'Skipping existing_lock_case: pre-existing external lock at %s\n' "$lock_dir" >&2
+    return 0
   fi
 
   mkdir -m 0700 "$lock_dir" || return 1
+  test_lock_ino=$(/usr/bin/stat -f '%d %i' "$lock_dir")
   touch "$lock_dir/existing_marker"
 
-  out=$(env -i HOME="$test_home" PATH="/usr/bin:/bin" /bin/bash "$SCRIPT" 2>&1)
+  out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" 2>&1)
   status=$?
   test "$status" -ne 0 || return 1
+  assert_contains "$out" "Failed to acquire lock at" || return 1
 
   # Verify lock directory and marker are still there
   test -d "$lock_dir" || return 1
   test -f "$lock_dir/existing_marker" || return 1
 
-  # Cleanup our test marker and lock
-  rm -f "$lock_dir/existing_marker"
-  rmdir "$lock_dir"
+  curr_ino=$(/usr/bin/stat -f '%d %i' "$lock_dir" 2>/dev/null || true)
+  if test "$curr_ino" = "$test_lock_ino"; then
+    rm -f "$lock_dir/existing_marker"
+    rmdir "$lock_dir"
+  fi
   return 0
 }
 
 # 10. runs with different TMPDIR values contend on the same fixed lock
 tmpdir_lock_contention_case() {
   test_home=$(make_home)
+  fake_bin=$(make_fake_bin)
   uid=$(/usr/bin/id -u)
   lock_dir="/private/tmp/kaisian-$uid.lock"
 
   if test -d "$lock_dir"; then
-    rm -rf "$lock_dir" 2>/dev/null || true
+    printf 'Skipping tmpdir_lock_contention_case: pre-existing external lock at %s\n' "$lock_dir" >&2
+    return 0
   fi
 
   mkdir -m 0700 "$lock_dir" || return 1
+  test_lock_ino=$(/usr/bin/stat -f '%d %i' "$lock_dir")
 
-  out=$(env -i TMPDIR="$ROOT/custom_tmp" HOME="$test_home" PATH="/usr/bin:/bin" /bin/bash "$SCRIPT" 2>&1)
+  out=$(env -i TMPDIR="$ROOT/custom_tmp" HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" 2>&1)
   status=$?
   test "$status" -ne 0 || return 1
+  assert_contains "$out" "Failed to acquire lock at /private/tmp/kaisian-$uid.lock" || return 1
 
-  rmdir "$lock_dir"
+  curr_ino=$(/usr/bin/stat -f '%d %i' "$lock_dir" 2>/dev/null || true)
+  if test "$curr_ino" = "$test_lock_ino"; then
+    rmdir "$lock_dir"
+  fi
   return 0
 }
 
 # 11. repo-dir/state paths equal to, above, or below the lock fail; sibling paths pass
 path_overlap_with_lock_case() {
   test_home=$(make_home)
+  fake_bin=$(make_fake_bin)
   uid=$(/usr/bin/id -u)
   lock_dir="/private/tmp/kaisian-$uid.lock"
 
   # Equals lock
-  out=$(env -i HOME="$test_home" PATH="/usr/bin:/bin" /bin/bash "$SCRIPT" --repo-dir "$lock_dir" 2>&1)
+  out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --repo-dir "$lock_dir" 2>&1)
   test $? -ne 0 || return 1
+  assert_contains "$out" "overlaps with lock or sandbox directory" || return 1
 
   # Ancestor of lock (/private/tmp)
-  out=$(env -i HOME="$test_home" PATH="/usr/bin:/bin" /bin/bash "$SCRIPT" --repo-dir "/private/tmp" 2>&1)
+  out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --repo-dir "/private/tmp" 2>&1)
   test $? -ne 0 || return 1
+  assert_contains "$out" "overlaps with lock or sandbox directory" || return 1
 
   # Descendant of lock
-  out=$(env -i HOME="$test_home" PATH="/usr/bin:/bin" /bin/bash "$SCRIPT" --repo-dir "$lock_dir/sub" 2>&1)
+  out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --repo-dir "$lock_dir/sub" 2>&1)
   test $? -ne 0 || return 1
+  assert_contains "$out" "overlaps with lock or sandbox directory" || return 1
 
+  # Dot and dotdot and doubled-slash aliases of lock
+  out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --repo-dir "/private/tmp/./kaisian-$uid.lock" 2>&1)
+  test $? -ne 0 || return 1
+  assert_contains "$out" "overlaps with lock or sandbox directory" || return 1
+
+  out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --repo-dir "/private/tmp/kaisian-$uid.lock/../kaisian-$uid.lock" 2>&1)
+  test $? -ne 0 || return 1
+  assert_contains "$out" "overlaps with lock or sandbox directory" || return 1
+
+  out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --repo-dir "/private/tmp//kaisian-$uid.lock" 2>&1)
+  test $? -ne 0 || return 1
+  assert_contains "$out" "overlaps with lock or sandbox directory" || return 1
+
+  # State root equal / ancestor / descendant of lock
+  out=$(env -i HOME="$test_home" XDG_STATE_HOME="$lock_dir" PATH="$fake_bin" /bin/bash "$SCRIPT" 2>&1)
+  test $? -ne 0 || return 1
+  assert_contains "$out" "overlaps with lock or sandbox directory" || return 1
+
+  out=$(env -i HOME="$test_home" XDG_STATE_HOME="/private/tmp" PATH="$fake_bin" /bin/bash "$SCRIPT" 2>&1)
+  test $? -ne 0 || return 1
+  assert_contains "$out" "overlaps with lock or sandbox directory" || return 1
+
+  out=$(env -i HOME="$test_home" XDG_STATE_HOME="$lock_dir/state" PATH="$fake_bin" /bin/bash "$SCRIPT" 2>&1)
+  test $? -ne 0 || return 1
+  assert_contains "$out" "overlaps with lock or sandbox directory" || return 1
+
+  # Sibling path is valid: does NOT fail with unsafe_path_overlap (reaches prerequisite check)
+  sibling_dir="$ROOT/sibling-repo"
+  mkdir -p "$sibling_dir"
+  out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --repo-dir "$sibling_dir" 2>&1)
+  test $? -ne 0 || return 1
+  case "$out" in
+    *"overlaps with lock"*)
+      printf 'Sibling repo-dir incorrectly failed with path overlap: %s\n' "$out" >&2
+      return 1
+      ;;
+  esac
+  assert_contains "$out" "Missing required commands" || return 1
   return 0
 }
 
 # 12. cleanup leaves an unrecognized lock entry untouched
 cleanup_leaves_unrecognized_lock_case() {
-  export KAISIAN_TESTING=1
-  . "$SCRIPT"
   uid=$(/usr/bin/id -u)
-  LOCK_DIR="/private/tmp/kaisian-$uid.lock"
-  if test -d "$LOCK_DIR"; then
-    rm -rf "$LOCK_DIR" 2>/dev/null || true
+  lock_dir="/private/tmp/kaisian-$uid.lock"
+
+  if test -d "$lock_dir"; then
+    printf 'Skipping cleanup_leaves_unrecognized_lock_case: pre-existing external lock at %s\n' "$lock_dir" >&2
+    return 0
   fi
 
-  mkdir -m 0700 "$LOCK_DIR" || return 1
-  SANDBOX="$LOCK_DIR/sandbox"
-  mkdir -m 0700 "$SANDBOX" || return 1
-  RECORDED_LOCK_DEV_INO=$(/usr/bin/stat -f '%d %i' "$LOCK_DIR")
-  RECORDED_SANDBOX_DEV_INO=$(/usr/bin/stat -f '%d %i' "$SANDBOX")
-  touch "$LOCK_DIR/pid"
-  touch "$LOCK_DIR/unrecognized_file"
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+    LOCK_DIR="/private/tmp/kaisian-$uid.lock"
+    mkdir -m 0700 "$LOCK_DIR" || exit 1
+    SANDBOX="$LOCK_DIR/sandbox"
+    mkdir -m 0700 "$SANDBOX" || exit 1
+    RECORDED_LOCK_DEV_INO=$(/usr/bin/stat -f '%d %i' "$LOCK_DIR")
+    RECORDED_SANDBOX_DEV_INO=$(/usr/bin/stat -f '%d %i' "$SANDBOX")
+    touch "$LOCK_DIR/pid"
+    touch "$LOCK_DIR/unrecognized_file"
 
-  # Run cleanup
-  cleanup
+    cleanup
 
-  # Sandbox and pid should be removed, but unrecognized_file and lock_dir must remain
-  assert_not_exists "$SANDBOX" || return 1
-  assert_not_exists "$LOCK_DIR/pid" || return 1
-  test -f "$LOCK_DIR/unrecognized_file" || return 1
-  test -d "$LOCK_DIR" || return 1
+    assert_not_exists "$SANDBOX" || exit 1
+    assert_not_exists "$LOCK_DIR/pid" || exit 1
+    test -f "$LOCK_DIR/unrecognized_file" || exit 1
+    test -d "$LOCK_DIR" || exit 1
 
-  # Clean up test artifact
-  rm -f "$LOCK_DIR/unrecognized_file"
-  rmdir "$LOCK_DIR"
+    rm -f "$LOCK_DIR/unrecognized_file"
+    rmdir "$LOCK_DIR"
+    exit 0
+  ) || return 1
   return 0
 }
 
 # 13. Bilingual message key parity test
 message_key_parity_case() {
-  export KAISIAN_TESTING=1
-  . "$SCRIPT"
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
 
-  keys=(
-    "error_prefix"
-    "missing_tools"
-    "unsupported_os"
-    "no_tty"
-    "selection_conflict"
-    "unknown_argument"
-    "missing_option_value"
-    "invalid_language"
-    "invalid_home"
-    "lock_failed"
-    "unsafe_path_overlap"
-    "unsupported_stow"
-  )
+    keys=(
+      "error_prefix"
+      "missing_tools"
+      "unsupported_os"
+      "no_tty"
+      "selection_conflict"
+      "unknown_argument"
+      "missing_option_value"
+      "invalid_language"
+      "invalid_home"
+      "lock_failed"
+      "unsafe_path_overlap"
+      "unsupported_stow"
+    )
 
-  for key in "${keys[@]}"; do
-    en_msg=$(LANGUAGE=en message "$key" "test_arg" "test_arg2") || {
-      printf 'message_en failed for key: %s\n' "$key" >&2
-      return 1
-    }
-    zh_msg=$(LANGUAGE=zh-TW message "$key" "test_arg" "test_arg2") || {
-      printf 'message_zh_tw failed for key: %s\n' "$key" >&2
-      return 1
-    }
-    test -n "$en_msg" || return 1
-    test -n "$zh_msg" || return 1
-  done
+    for key in "${keys[@]}"; do
+      en_msg=$(LANGUAGE=en message "$key" "test_arg" "test_arg2") || {
+        printf 'message_en failed for key: %s\n' "$key" >&2
+        exit 1
+      }
+      zh_msg=$(LANGUAGE=zh-TW message "$key" "test_arg" "test_arg2") || {
+        printf 'message_zh_tw failed for key: %s\n' "$key" >&2
+        exit 1
+      }
+      test -n "$en_msg" || exit 1
+      test -n "$zh_msg" || exit 1
+    done
 
-  # Unknown key returns 64
-  LANGUAGE=en message "unknown_test_key" >/dev/null 2>&1
-  test $? -eq 64 || return 1
-  LANGUAGE=zh-TW message "unknown_test_key" >/dev/null 2>&1
-  test $? -eq 64 || return 1
+    # Unknown key returns 64
+    LANGUAGE=en message "unknown_test_key" >/dev/null 2>&1
+    test $? -eq 64 || exit 1
+    LANGUAGE=zh-TW message "unknown_test_key" >/dev/null 2>&1
+    test $? -eq 64 || exit 1
+    exit 0
+  ) || return 1
   return 0
 }
 
 # 14. run_git environment sanitization
 run_git_sanitization_case() {
-  export KAISIAN_TESTING=1
-  . "$SCRIPT"
-
   uid=$(/usr/bin/id -u)
-  LOCK_DIR="/private/tmp/kaisian-$uid.lock"
-  if test -d "$LOCK_DIR"; then
-    rm -rf "$LOCK_DIR" 2>/dev/null || true
+  lock_dir="/private/tmp/kaisian-$uid.lock"
+  if test -d "$lock_dir"; then
+    printf 'Skipping run_git_sanitization_case: pre-existing external lock at %s\n' "$lock_dir" >&2
+    return 0
   fi
 
-  acquire_lock
-  mock_bin="$ROOT/mock-git-bin"
-  mkdir -p "$mock_bin"
-  cat << 'EOF' > "$mock_bin/git"
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+
+    acquire_lock
+    mock_bin="$ROOT/mock-git-bin"
+    mkdir -p "$mock_bin"
+    cat << 'EOF' > "$mock_bin/git"
 #!/bin/bash
 printf 'HOME=%s\n' "$HOME"
 printf 'LC_ALL=%s\n' "${LC_ALL-}"
@@ -390,40 +493,44 @@ printf 'GIT_DIR=%s\n' "${GIT_DIR-unset}"
 printf 'GIT_WORK_TREE=%s\n' "${GIT_WORK_TREE-unset}"
 printf 'GIT_AUTHOR_NAME=%s\n' "${GIT_AUTHOR_NAME-unset}"
 EOF
-  chmod +x "$mock_bin/git"
+    chmod +x "$mock_bin/git"
 
-  out=$(PATH="$mock_bin:/usr/bin:/bin" GIT_DIR="/hostile/dir" GIT_WORK_TREE="/hostile/wt" GIT_AUTHOR_NAME="hostile" run_git status)
-  cleanup
+    out=$(KAISIAN_GIT_EXEC="$mock_bin/git" GIT_DIR="/hostile/dir" GIT_WORK_TREE="/hostile/wt" GIT_AUTHOR_NAME="hostile" run_git status)
+    cleanup
 
-  assert_contains "$out" "HOME=$SANDBOX/git-home" || return 1
-  assert_contains "$out" "LC_ALL=C" || return 1
-  assert_contains "$out" "GIT_CONFIG_NOSYSTEM=1" || return 1
-  assert_contains "$out" "GIT_CONFIG_GLOBAL=/dev/null" || return 1
-  assert_contains "$out" "GIT_ATTR_NOSYSTEM=1" || return 1
-  assert_contains "$out" "GIT_TERMINAL_PROMPT=0" || return 1
-  assert_contains "$out" "GIT_ASKPASS=/usr/bin/false" || return 1
-  assert_contains "$out" "GIT_NO_REPLACE_OBJECTS=1" || return 1
-  assert_contains "$out" "GIT_DIR=unset" || return 1
-  assert_contains "$out" "GIT_WORK_TREE=unset" || return 1
-  assert_contains "$out" "GIT_AUTHOR_NAME=unset" || return 1
+    assert_contains "$out" "HOME=$SANDBOX/git-home" || exit 1
+    assert_contains "$out" "LC_ALL=C" || exit 1
+    assert_contains "$out" "GIT_CONFIG_NOSYSTEM=1" || exit 1
+    assert_contains "$out" "GIT_CONFIG_GLOBAL=/dev/null" || exit 1
+    assert_contains "$out" "GIT_ATTR_NOSYSTEM=1" || exit 1
+    assert_contains "$out" "GIT_TERMINAL_PROMPT=0" || exit 1
+    assert_contains "$out" "GIT_ASKPASS=/usr/bin/false" || exit 1
+    assert_contains "$out" "GIT_NO_REPLACE_OBJECTS=1" || exit 1
+    assert_contains "$out" "GIT_DIR=unset" || exit 1
+    assert_contains "$out" "GIT_WORK_TREE=unset" || exit 1
+    assert_contains "$out" "GIT_AUTHOR_NAME=unset" || exit 1
+    exit 0
+  ) || return 1
   return 0
 }
 
 # 15. run_stow environment sanitization
 run_stow_sanitization_case() {
-  export KAISIAN_TESTING=1
-  . "$SCRIPT"
-
   uid=$(/usr/bin/id -u)
-  LOCK_DIR="/private/tmp/kaisian-$uid.lock"
-  if test -d "$LOCK_DIR"; then
-    rm -rf "$LOCK_DIR" 2>/dev/null || true
+  lock_dir="/private/tmp/kaisian-$uid.lock"
+  if test -d "$lock_dir"; then
+    printf 'Skipping run_stow_sanitization_case: pre-existing external lock at %s\n' "$lock_dir" >&2
+    return 0
   fi
 
-  acquire_lock
-  mock_bin="$ROOT/mock-stow-bin"
-  mkdir -p "$mock_bin"
-  cat << 'EOF' > "$mock_bin/stow"
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+
+    acquire_lock
+    mock_bin="$ROOT/mock-stow-bin"
+    mkdir -p "$mock_bin"
+    cat << 'EOF' > "$mock_bin/stow"
 #!/bin/bash
 printf 'CWD=%s\n' "$(pwd -P)"
 printf 'HOME=%s\n' "$HOME"
@@ -432,37 +539,41 @@ printf 'STOW_DIR=%s\n' "${STOW_DIR-unset}"
 printf 'PERL5LIB=%s\n' "${PERL5LIB-unset}"
 printf 'PERL5OPT=%s\n' "${PERL5OPT-unset}"
 EOF
-  chmod +x "$mock_bin/stow"
+    chmod +x "$mock_bin/stow"
 
-  out=$(PATH="$mock_bin:/usr/bin:/bin" STOW_DIR="/hostile/stow" PERL5LIB="/hostile/lib" PERL5OPT="-Mhostile" run_stow --version)
-  cleanup
+    out=$(KAISIAN_STOW_EXEC="$mock_bin/stow" STOW_DIR="/hostile/stow" PERL5LIB="/hostile/lib" PERL5OPT="-Mhostile" run_stow --version)
+    cleanup
 
-  assert_contains "$out" "CWD=$SANDBOX/stow-cwd" || return 1
-  assert_contains "$out" "HOME=$SANDBOX/stow-home" || return 1
-  assert_contains "$out" "LC_ALL=C" || return 1
-  assert_contains "$out" "STOW_DIR=unset" || return 1
-  assert_contains "$out" "PERL5LIB=unset" || return 1
-  assert_contains "$out" "PERL5OPT=unset" || return 1
+    assert_contains "$out" "CWD=$SANDBOX/stow-cwd" || exit 1
+    assert_contains "$out" "HOME=$SANDBOX/stow-home" || exit 1
+    assert_contains "$out" "LC_ALL=C" || exit 1
+    assert_contains "$out" "STOW_DIR=unset" || exit 1
+    assert_contains "$out" "PERL5LIB=unset" || exit 1
+    assert_contains "$out" "PERL5OPT=unset" || exit 1
+    exit 0
+  ) || return 1
   return 0
 }
 
 # 16. behavioral stow probes in require_prerequisites
 stow_behavioral_probes_case() {
-  export KAISIAN_TESTING=1
-  . "$SCRIPT"
-
   uid=$(/usr/bin/id -u)
-  LOCK_DIR="/private/tmp/kaisian-$uid.lock"
-  if test -d "$LOCK_DIR"; then
-    rm -rf "$LOCK_DIR" 2>/dev/null || true
+  lock_dir="/private/tmp/kaisian-$uid.lock"
+  if test -d "$lock_dir"; then
+    printf 'Skipping stow_behavioral_probes_case: pre-existing external lock at %s\n' "$lock_dir" >&2
+    return 0
   fi
 
-  acquire_lock
-  mock_bin="$ROOT/mock-probe-bin"
-  mkdir -p "$mock_bin"
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
 
-  # Create a behavioral fake stow that implements the probe expectations
-  cat << 'EOF' > "$mock_bin/stow"
+    acquire_lock
+    mock_bin="$ROOT/mock-probe-bin"
+    mkdir -p "$mock_bin"
+
+    # Create a behavioral fake stow that implements the probe expectations
+    cat << 'EOF' > "$mock_bin/stow"
 #!/bin/bash
 set -u
 dir=""
@@ -491,60 +602,96 @@ if test "$simulate" -eq 1; then
   exit 0
 fi
 
-# Simulate link creation
+# Link creation
 for pkg in $restow_pkgs; do
   pkg_dir="$dir/$pkg"
   if test -d "$pkg_dir"; then
-    for f in "$pkg_dir"/*; do
-      test -e "$f" || continue
-      fname=$(basename "$f")
-      target_name="$fname"
-      case "$fname" in
-        dot-*) target_name=".${fname#dot-}" ;;
-      esac
-      ln -sf "$f" "$target/$target_name"
-    done
+    (
+      cd "$pkg_dir"
+      find . -type f | while read -r file; do
+        rel="${file#./}"
+        if test -n "$ignore_regex"; then
+          if printf '%s\n' "$rel" | grep -Eq "$ignore_regex"; then
+            continue
+          fi
+        fi
+        old_ifs=$IFS
+        IFS='/'
+        set -f
+        set -- $rel
+        set +f
+        IFS=$old_ifs
+        transformed=""
+        for comp in "$@"; do
+          case "$comp" in
+            dot-*) c=".${comp#dot-}" ;;
+            *) c="$comp" ;;
+          esac
+          transformed="$transformed/$c"
+        done
+        tgt_file="$target$transformed"
+        mkdir -p "$(dirname "$tgt_file")"
+        ln -sf "$pkg_dir/$rel" "$tgt_file"
+      done
+    )
   fi
 done
 
+# Deletion
 for pkg in $delete_pkgs; do
   pkg_dir="$dir/$pkg"
   if test -d "$pkg_dir"; then
-    for f in "$pkg_dir"/*; do
-      test -e "$f" || continue
-      fname=$(basename "$f")
-      target_name="$fname"
-      case "$fname" in
-        dot-*) target_name=".${fname#dot-}" ;;
-      esac
-      rm -f "$target/$target_name"
-    done
+    (
+      cd "$pkg_dir"
+      find . -type f | while read -r file; do
+        rel="${file#./}"
+        old_ifs=$IFS
+        IFS='/'
+        set -f
+        set -- $rel
+        set +f
+        IFS=$old_ifs
+        transformed=""
+        for comp in "$@"; do
+          case "$comp" in
+            dot-*) c=".${comp#dot-}" ;;
+            *) c="$comp" ;;
+          esac
+          transformed="$transformed/$c"
+        done
+        tgt_file="$target$transformed"
+        rm -f "$tgt_file"
+      done
+    )
   fi
 done
 exit 0
 EOF
-  chmod +x "$mock_bin/stow"
+    chmod +x "$mock_bin/stow"
 
-  # Create fake git, fzf, plutil in mock_bin
-  cat << 'EOF' > "$mock_bin/git"
+    cat << 'EOF' > "$mock_bin/git"
 #!/bin/bash
 exit 0
 EOF
-  cat << 'EOF' > "$mock_bin/fzf"
+    cat << 'EOF' > "$mock_bin/fzf"
 #!/bin/bash
 exit 0
 EOF
-  cat << 'EOF' > "$mock_bin/plutil"
+    cat << 'EOF' > "$mock_bin/plutil"
 #!/bin/bash
 exit 0
 EOF
-  chmod +x "$mock_bin/git" "$mock_bin/fzf" "$mock_bin/plutil"
+    chmod +x "$mock_bin/git" "$mock_bin/fzf" "$mock_bin/plutil"
 
-  PATH="$mock_bin:/usr/bin:/bin" require_prerequisites
-  probe_status=$?
-  cleanup
+    KAISIAN_GIT_EXEC="$mock_bin/git" \
+    KAISIAN_STOW_EXEC="$mock_bin/stow" \
+    PATH="$mock_bin:/usr/bin:/bin" require_prerequisites
+    probe_status=$?
+    cleanup
 
-  test "$probe_status" -eq 0 || return 1
+    test "$probe_status" -eq 0 || exit 1
+    exit 0
+  ) || return 1
   return 0
 }
 
