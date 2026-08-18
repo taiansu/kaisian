@@ -247,17 +247,27 @@ validate_typed_tree() {
   return "$result"
 }
 
+paths_overlap() {
+  test "$1" = "$2" && return 0
+  case "$1/" in "$2/"*) return 0 ;; esac
+  case "$2/" in "$1/"*) return 0 ;; esac
+  return 1
+}
+
 physical_parent_safe() {
-  path=$1
-  parent=${path%/*}
-  test "$parent" != "$PHYSICAL_HOME" || return 0
-  while test "$parent" != '/'; do
-    test ! -L "$parent" || return 1
+  target_path=$1
+  case "$target_path" in
+    "$PHYSICAL_HOME"/*) ;;
+    *) return 1 ;;
+  esac
+  parent=${target_path%/*}
+  while test "$parent" != "$PHYSICAL_HOME" && test "$parent" != '/'; do
+    if test -L "$parent"; then return 1; fi
     if test -e "$parent" && test ! -d "$parent"; then return 1; fi
     parent=${parent%/*}
     test -n "$parent" || parent='/'
-    test "$parent" != "$PHYSICAL_HOME" || return 0
   done
+  test "$parent" = "$PHYSICAL_HOME" || return 1
   return 0
 }
 
@@ -266,50 +276,157 @@ nearest_existing() {
   while test ! -e "$p" && test ! -L "$p"; do
     p=${p%/*}
     test -n "$p" || p='/'
+    test "$p" != '/' || break
   done
   printf '%s\n' "$p"
 }
 
-preflight_targets() {
-  if test -z "$STATE_ROOT"; then
-    STATE_ROOT=${XDG_STATE_HOME:-"$PHYSICAL_HOME/.local/state/kaisian"}
+stat_dev() {
+  if test "${KAISIAN_TESTING-0}" = '1' && test -n "${KAISIAN_STAT_EXEC-}"; then
+    "$KAISIAN_STAT_EXEC" -f '%d' "$1" 2>/dev/null
+  else
+    /usr/bin/stat -f '%d' "$1" 2>/dev/null
   fi
+}
+
+preflight_targets() {
   : "${PHYSICAL_HOME:=${HOME-}}"
   test -n "$PHYSICAL_HOME" && test "${PHYSICAL_HOME#/}" != "$PHYSICAL_HOME" || return 1
-  STATE_ROOT=${XDG_STATE_HOME:-"$PHYSICAL_HOME/.local/state"}
-  test "${STATE_ROOT#/}" != "$STATE_ROOT" || return 1
+  test -d "$PHYSICAL_HOME" && test ! -L "$PHYSICAL_HOME" || return 1
+  PHYSICAL_HOME=$(canonicalize_path "$PHYSICAL_HOME") || return 1
+  if test -n "${XDG_STATE_HOME+x}" && test -n "$XDG_STATE_HOME"; then
+    case "$XDG_STATE_HOME" in
+      /*) STATE_ROOT="$XDG_STATE_HOME/kaisian" ;;
+      *) return 1 ;;
+    esac
+  elif test -z "$STATE_ROOT"; then
+    STATE_ROOT="$PHYSICAL_HOME/.local/state/kaisian"
+  fi
+  case "$STATE_ROOT" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+
+  sr_curr="$STATE_ROOT"
+  while test "$sr_curr" != '/' && test -n "$sr_curr"; do
+    if test -L "$sr_curr"; then return 1; fi
+    if test -e "$sr_curr" && test ! -d "$sr_curr"; then return 1; fi
+    sr_curr=${sr_curr%/*}
+    test -n "$sr_curr" || sr_curr='/'
+  done
+
   STATE_ROOT=$(canonicalize_path "$STATE_ROOT") || return 1
   backup_base="$STATE_ROOT/backups"
+
+  canon_checkout=''
+  if test -n "$CHECKOUT_DIR"; then
+    canon_checkout=$(canonicalize_path "$CHECKOUT_DIR") || return 1
+  fi
+  canon_lock=''
+  if test -n "$LOCK_DIR"; then
+    canon_lock=$(canonicalize_path "$LOCK_DIR") || return 1
+  fi
+  canon_sandbox=''
+  if test -n "$SANDBOX"; then
+    canon_sandbox=$(canonicalize_path "$SANDBOX") || return 1
+  fi
+
+  if test -n "$canon_checkout" && test -n "$STATE_ROOT"; then
+    paths_overlap "$canon_checkout" "$STATE_ROOT" && return 1
+  fi
+  if test -n "$canon_checkout" && test -n "$canon_lock"; then
+    paths_overlap "$canon_checkout" "$canon_lock" && return 1
+  fi
+  if test -n "$canon_checkout" && test -n "$canon_sandbox"; then
+    paths_overlap "$canon_checkout" "$canon_sandbox" && return 1
+  fi
+  if test -n "$STATE_ROOT" && test -n "$canon_lock"; then
+    paths_overlap "$STATE_ROOT" "$canon_lock" && return 1
+  fi
+  if test -n "$STATE_ROOT" && test -n "$canon_sandbox"; then
+    paths_overlap "$STATE_ROOT" "$canon_sandbox" && return 1
+  fi
+
+  test -n "$SANDBOX" && test -d "$SANDBOX" || return 1
+  MAPPING_FILE="$SANDBOX/mapping.tsv"
+  test -f "$MAPPING_FILE" || return 1
+  test -f "$SANDBOX/selected.txt" || return 1
+
   CONFLICTS_FILE="$SANDBOX/conflicts.tsv"
   : > "$CONFLICTS_FILE" || return 1
-  # State and checkout/lock paths must not overlap the physical target tree.
-  for guard in "$CHECKOUT_DIR" "$STATE_ROOT" "$LOCK_DIR" "$SANDBOX"; do
-    test -n "$guard" || continue
-    guard=$(canonicalize_path "$guard") || return 1
-    while IFS='	' read -r typ pkg src target folded || test -n "$typ"; do
-      /usr/bin/grep -F -x -q -e "$pkg" "$SANDBOX/selected.txt" || continue
-      dst="$PHYSICAL_HOME/$target"
-      case "$dst/" in "$guard/"*) return 1 ;; esac
-      case "$guard/" in "$dst/"*) return 1 ;; esac
-    done < "$MAPPING_FILE"
-  done
-  while IFS='	' read -r typ pkg src target folded || test -n "$typ"; do
+
+  while IFS='	' read -r typ pkg src target folded extra || test -n "$typ"; do
+    test -n "$typ" || continue
     /usr/bin/grep -F -x -q -e "$pkg" "$SANDBOX/selected.txt" || continue
-    test "$typ" = file || continue
-    source="$CHECKOUT_DIR/$pkg/$src"
+
     dst="$PHYSICAL_HOME/$target"
-    physical_parent_safe "$dst" || return 1
-    test -e "$dst" || test -L "$dst" || continue
-    if test -L "$dst"; then
-      expected="$source"
-      actual=$(/usr/bin/readlink "$dst" 2>/dev/null || true)
-      test "$actual" = "$expected" && continue
+    case "$dst" in
+      "$PHYSICAL_HOME"/*) ;;
+      *) return 1 ;;
+    esac
+
+    for guard in "$canon_checkout" "$STATE_ROOT" "$canon_lock" "$canon_sandbox"; do
+      test -n "$guard" || continue
+      paths_overlap "$dst" "$guard" && return 1
+    done
+
+    if test "$typ" = 'dir'; then
+      physical_parent_safe "$dst" || return 1
+      if test -L "$dst"; then
+        return 1
+      fi
+      if test -e "$dst" && test ! -d "$dst"; then
+        return 1
+      fi
+      continue
     fi
-    source_dev=$(/usr/bin/stat -f '%d' "$source" 2>/dev/null) || return 1
-    ancestor=$(nearest_existing "$dst") || return 1
-    dest_dev=$(/usr/bin/stat -f '%d' "$ancestor" 2>/dev/null) || return 1
-    test "$source_dev" = "$dest_dev" || return 1
+
+    test "$typ" = 'file' || return 1
+    source="$CHECKOUT_DIR/$pkg/$src"
+
+    physical_parent_safe "$dst" || return 1
+
+    if test ! -e "$dst" && test ! -L "$dst"; then
+      continue
+    fi
+
+    if test -e "$dst" && test ! -L "$dst" && test ! -f "$dst" && test ! -d "$dst"; then
+      return 1
+    fi
+
+    is_exact_leaf=0
+    if test -L "$dst"; then
+      actual_link=$(/usr/bin/readlink "$dst" 2>/dev/null || true)
+      if test -n "$actual_link"; then
+        if test "$actual_link" = "$source"; then
+          is_exact_leaf=1
+        else
+          case "$actual_link" in
+            /*) resolved="$actual_link" ;;
+            *) resolved="${dst%/*}/$actual_link" ;;
+          esac
+          if test -e "$dst"; then
+            canon_resolved=$(canonicalize_path "$resolved" 2>/dev/null || true)
+            canon_source=$(canonicalize_path "$source" 2>/dev/null || true)
+            if test -n "$canon_resolved" && test -n "$canon_source" && test "$canon_resolved" = "$canon_source"; then
+              is_exact_leaf=1
+            fi
+          fi
+        fi
+      fi
+    fi
+
+    if test "$is_exact_leaf" -eq 1; then
+      continue
+    fi
+
     backup="$backup_base/files/$target"
+
+    dst_dev=$(stat_dev "$dst") || return 1
+    backup_ancestor=$(nearest_existing "$backup")
+    backup_dev=$(stat_dev "$backup_ancestor") || return 1
+    test "$dst_dev" = "$backup_dev" || return 1
+
     printf '%s\t%s\n' "$dst" "$backup" >> "$CONFLICTS_FILE" || return 1
   done < "$MAPPING_FILE"
   return 0
@@ -753,7 +870,7 @@ validate_home() {
     if test -n "$xdg_state"; then
       case "$xdg_state" in
         /*) STATE_ROOT="$xdg_state/kaisian" ;;
-        *) STATE_ROOT="$PHYSICAL_HOME/.local/state/kaisian" ;;
+        *) die invalid_targets "XDG_STATE_HOME must be absolute: $xdg_state" ;;
       esac
     else
       STATE_ROOT="$PHYSICAL_HOME/.local/state/kaisian"

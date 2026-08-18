@@ -623,6 +623,8 @@ message_key_parity_case() {
       "invalid_submodule"
       "submodule_failed"
       "git_operation_failed"
+      "invalid_package_tree"
+      "invalid_targets"
     )
     for key in "${keys[@]}"; do
       en_msg=$(LANGUAGE=en message "$key" "test_arg" "test_arg2") || {
@@ -3977,6 +3979,343 @@ run_case 'subshell lock cleanup safety on assertion failure' lock_cleanup_on_sub
 run_case 'discover_executable does not execute external which, dirname, or basename from PATH' discover_executable_purity_case
 run_case 'nonempty .stow-global-ignore makes probe fail while empty succeeds' stow_nonempty_ignore_probe_failure_case
 run_case 'Task 5 normalized package mapping fixture' task5_mapping_fixture_case
+
+task5_preflight_targets_classification_case() {
+  t=$(mktemp -d "$ROOT/task5-preflight-class.XXXXXX") || return 1
+  chk="$t/checkout/pkg"
+  hm="$t/home"
+  sb="$t/sandbox"
+  /bin/mkdir -p "$chk/dot-config" "$hm/.config" "$sb"
+
+  printf 'absent\n' > "$chk/dot-config/absent_file"
+  printf 'exact_abs\n' > "$chk/dot-zshrc"
+  printf 'exact_rel\n' > "$chk/dot-gitconfig"
+  printf 'regular\n' > "$chk/dot-config/regular_file"
+  printf 'dir_as_file\n' > "$chk/dot-config/dir_target"
+  printf 'broken_sym\n' > "$chk/dot-config/broken_sym"
+  printf 'wrong_sym\n' > "$chk/dot-config/wrong_sym"
+
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t/checkout" init -q || { /bin/rm -rf "$t"; return 1; }
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t/checkout" -c commit.gpgSign=false config user.email test@example.invalid || { /bin/rm -rf "$t"; return 1; }
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t/checkout" -c commit.gpgSign=false config user.name test || { /bin/rm -rf "$t"; return 1; }
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t/checkout" add . || { /bin/rm -rf "$t"; return 1; }
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t/checkout" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm fixture || { /bin/rm -rf "$t"; return 1; }
+
+  ln -s "$chk/dot-zshrc" "$hm/.zshrc"
+  ln -s "../checkout/pkg/dot-gitconfig" "$hm/.gitconfig"
+  printf 'existing_regular\n' > "$hm/.config/regular_file"
+  mkdir -p "$hm/.config/dir_target"
+  ln -s "$t/nonexistent_dest" "$hm/.config/broken_sym"
+  printf 'other\n' > "$hm/other_file"
+  ln -s "$hm/other_file" "$hm/.config/wrong_sym"
+
+  printf 'pkg\tpkg\tpkg\n' > "$sb/groups.tsv"
+  printf 'pkg\n' > "$sb/selected.txt"
+
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+    CHECKOUT_DIR="$t/checkout"
+    SANDBOX="$sb"
+    PHYSICAL_HOME="$hm"
+    STATE_ROOT="$hm/.local/state/kaisian"
+
+    build_package_map || exit 1
+    validate_typed_tree || exit 1
+    preflight_targets || exit 1
+
+    conflicts_content=$(cat "$sb/conflicts.tsv")
+
+    ! assert_contains "$conflicts_content" "$hm/.config/absent_file" || exit 1
+    ! assert_contains "$conflicts_content" "$hm/.zshrc" || exit 1
+    ! assert_contains "$conflicts_content" "$hm/.gitconfig" || exit 1
+
+    assert_contains "$conflicts_content" "$(printf '%s\t%s' "$hm/.config/regular_file" "$STATE_ROOT/backups/files/.config/regular_file")" || exit 1
+    assert_contains "$conflicts_content" "$(printf '%s\t%s' "$hm/.config/dir_target" "$STATE_ROOT/backups/files/.config/dir_target")" || exit 1
+    assert_contains "$conflicts_content" "$(printf '%s\t%s' "$hm/.config/broken_sym" "$STATE_ROOT/backups/files/.config/broken_sym")" || exit 1
+    assert_contains "$conflicts_content" "$(printf '%s\t%s' "$hm/.config/wrong_sym" "$STATE_ROOT/backups/files/.config/wrong_sym")" || exit 1
+
+    test "$(wc -l < "$sb/conflicts.tsv" | tr -d ' ')" = 4 || exit 1
+  )
+  status=$?
+  /bin/rm -rf "$t"
+  return "$status"
+}
+
+task5_preflight_targets_rejection_case() {
+  for kind in symlink_parent file_parent fifo_node socket_node escape_home; do
+    t=$(mktemp -d "$ROOT/task5-preflight-rej.XXXXXX") || return 1
+    chk="$t/checkout/pkg"
+    hm="$t/home"
+    sb="$t/sandbox"
+    /bin/mkdir -p "$chk/dot-config/app" "$hm/.config" "$sb"
+
+    printf 'leaf\n' > "$chk/dot-config/app/leaf"
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t/checkout" init -q || { /bin/rm -rf "$t"; return 1; }
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t/checkout" -c commit.gpgSign=false config user.email test@example.invalid || { /bin/rm -rf "$t"; return 1; }
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t/checkout" -c commit.gpgSign=false config user.name test || { /bin/rm -rf "$t"; return 1; }
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t/checkout" add . || { /bin/rm -rf "$t"; return 1; }
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t/checkout" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm fixture || { /bin/rm -rf "$t"; return 1; }
+
+    printf 'pkg\tpkg\tpkg\n' > "$sb/groups.tsv"
+    printf 'pkg\n' > "$sb/selected.txt"
+
+    case "$kind" in
+      symlink_parent)
+        mkdir -p "$t/real_app"
+        ln -s "$t/real_app" "$hm/.config/app"
+        ;;
+      file_parent)
+        printf 'file_parent\n' > "$hm/.config/app"
+        ;;
+      fifo_node)
+        mkdir -p "$hm/.config/app"
+        mkfifo "$hm/.config/app/leaf"
+        ;;
+      socket_node)
+        mkdir -p "$hm/.config/app"
+        python3 -c "import socket as s; sock = s.socket(s.AF_UNIX); sock.bind('$hm/.config/app/leaf')" 2>/dev/null || mkfifo "$hm/.config/app/leaf"
+        ;;
+      escape_home)
+        ;;
+    esac
+
+    (
+      export KAISIAN_TESTING=1
+      . "$SCRIPT"
+      CHECKOUT_DIR="$t/checkout"
+      SANDBOX="$sb"
+      PHYSICAL_HOME="$hm"
+      STATE_ROOT="$hm/.local/state/kaisian"
+
+      build_package_map || exit 1
+      validate_typed_tree || exit 1
+
+      if test "$kind" = "escape_home"; then
+        PHYSICAL_HOME="/nonexistent/escaped/home"
+      fi
+
+      ! preflight_targets
+    )
+    actual=$?
+    test "$actual" -eq 0 || { /bin/rm -rf "$t"; return 1; }
+    /bin/rm -rf "$t"
+  done
+  return 0
+}
+
+task5_preflight_selection_filtering_case() {
+  t=$(mktemp -d "$ROOT/task5-preflight-filter.XXXXXX") || return 1
+  chk="$t/checkout"
+  hm="$t/home"
+  sb="$t/sandbox"
+  /bin/mkdir -p "$chk/pkg_sel" "$chk/pkg_unsel" "$hm" "$sb"
+
+  printf 'sel\n' > "$chk/pkg_sel/dot-selected"
+  printf 'unsel\n' > "$chk/pkg_unsel/dot-unselected"
+
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$chk" init -q || { /bin/rm -rf "$t"; return 1; }
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$chk" -c commit.gpgSign=false config user.email test@example.invalid || { /bin/rm -rf "$t"; return 1; }
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$chk" -c commit.gpgSign=false config user.name test || { /bin/rm -rf "$t"; return 1; }
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$chk" add . || { /bin/rm -rf "$t"; return 1; }
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$chk" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm fixture || { /bin/rm -rf "$t"; return 1; }
+
+  mkdir -p "$t/other_dir"
+  ln -s "$t/other_dir" "$hm/.unselected"
+
+  printf 'pkg_sel\tsel\tsel\npkg_unsel\tunsel\tunsel\n' > "$sb/groups.tsv"
+  printf 'pkg_sel\n' > "$sb/selected.txt"
+  printf 'pkg_unsel\n' > "$sb/unselected.txt"
+
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+    CHECKOUT_DIR="$chk"
+    SANDBOX="$sb"
+    PHYSICAL_HOME="$hm"
+    STATE_ROOT="$hm/.local/state/kaisian"
+
+    build_package_map || exit 1
+    validate_typed_tree || exit 1
+    preflight_targets || exit 1
+    test ! -s "$sb/conflicts.tsv" || exit 1
+  )
+  status=$?
+  /bin/rm -rf "$t"
+  return "$status"
+}
+
+task5_preflight_state_root_validation_case() {
+  t=$(mktemp -d "$ROOT/task5-preflight-state.XXXXXX") || return 1
+  chk="$t/checkout/pkg"
+  hm="$t/home"
+  sb="$t/sandbox"
+  /bin/mkdir -p "$chk" "$hm" "$sb"
+
+  printf 'x\n' > "$chk/dot-zshrc"
+  printf 'conflict\n' > "$hm/.zshrc"
+
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t/checkout" init -q || { /bin/rm -rf "$t"; return 1; }
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t/checkout" -c commit.gpgSign=false config user.email test@example.invalid || { /bin/rm -rf "$t"; return 1; }
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t/checkout" -c commit.gpgSign=false config user.name test || { /bin/rm -rf "$t"; return 1; }
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t/checkout" add . || { /bin/rm -rf "$t"; return 1; }
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t/checkout" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm fixture || { /bin/rm -rf "$t"; return 1; }
+
+  printf 'pkg\tpkg\tpkg\n' > "$sb/groups.tsv"
+  printf 'pkg\n' > "$sb/selected.txt"
+
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+    CHECKOUT_DIR="$t/checkout"
+    SANDBOX="$sb"
+    PHYSICAL_HOME="$hm"
+
+    build_package_map || exit 1
+    validate_typed_tree || exit 1
+
+    # 1. Absolute XDG_STATE_HOME succeeds and computes exact custom backup path
+    XDG_STATE_HOME="$t/custom_state" preflight_targets || exit 1
+    assert_contains "$(cat "$sb/conflicts.tsv")" "$t/custom_state/kaisian/backups/files/.zshrc" || exit 1
+
+    # 2. Relative XDG_STATE_HOME fails
+    ! XDG_STATE_HOME="relative/state" preflight_targets || exit 1
+
+    # 3. Symlink ancestor in STATE_ROOT fails
+    mkdir -p "$t/real_state"
+    ln -s "$t/real_state" "$t/sym_state"
+    ! XDG_STATE_HOME="$t/sym_state" preflight_targets || exit 1
+
+    # 4. Non-directory ancestor in STATE_ROOT fails
+    touch "$t/file_state"
+    ! XDG_STATE_HOME="$t/file_state/sub" preflight_targets || exit 1
+  )
+  status=$?
+  /bin/rm -rf "$t"
+  return "$status"
+}
+
+task5_preflight_overlap_matrix_case() {
+  t=$(mktemp -d "$ROOT/task5-preflight-overlap.XXXXXX") || return 1
+  chk="$t/checkout/pkg"
+  hm="$t/home"
+  sb="$t/sandbox"
+  /bin/mkdir -p "$chk" "$hm" "$sb"
+
+  printf 'x\n' > "$chk/dot-zshrc"
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t/checkout" init -q || { /bin/rm -rf "$t"; return 1; }
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t/checkout" -c commit.gpgSign=false config user.email test@example.invalid || { /bin/rm -rf "$t"; return 1; }
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t/checkout" -c commit.gpgSign=false config user.name test || { /bin/rm -rf "$t"; return 1; }
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t/checkout" add . || { /bin/rm -rf "$t"; return 1; }
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t/checkout" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm fixture || { /bin/rm -rf "$t"; return 1; }
+
+  printf 'pkg\tpkg\tpkg\n' > "$sb/groups.tsv"
+  printf 'pkg\n' > "$sb/selected.txt"
+
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+    CHECKOUT_DIR="$t/checkout"
+    SANDBOX="$sb"
+    PHYSICAL_HOME="$hm"
+    STATE_ROOT="$hm/.local/state/kaisian"
+
+    build_package_map || exit 1
+    validate_typed_tree || exit 1
+
+    # 1. CHECKOUT_DIR equals STATE_ROOT fails
+    ! ( CHECKOUT_DIR="$STATE_ROOT" preflight_targets ) || exit 1
+
+    # 2. CHECKOUT_DIR inside STATE_ROOT fails
+    ! ( CHECKOUT_DIR="$STATE_ROOT/sub" preflight_targets ) || exit 1
+
+    # 3. STATE_ROOT inside CHECKOUT_DIR fails
+    ! ( STATE_ROOT="$CHECKOUT_DIR/sub" preflight_targets ) || exit 1
+
+    # 4. Target overlaps CHECKOUT_DIR fails
+    ! ( CHECKOUT_DIR="$hm/.zshrc" preflight_targets ) || exit 1
+
+    # 5. Target overlaps STATE_ROOT fails
+    ! ( STATE_ROOT="$hm/.zshrc" preflight_targets ) || exit 1
+
+    # 6. Target overlaps LOCK_DIR fails
+    ! ( LOCK_DIR="$hm/.zshrc" preflight_targets ) || exit 1
+
+    # 7. Target overlaps SANDBOX fails
+    ! ( SANDBOX="$hm/.zshrc" preflight_targets ) || exit 1
+
+    # 8. Sibling directories pass
+    preflight_targets || exit 1
+  )
+  status=$?
+  /bin/rm -rf "$t"
+  return "$status"
+}
+
+task5_preflight_cross_device_case() {
+  t=$(mktemp -d "$ROOT/task5-preflight-xdev.XXXXXX") || return 1
+  chk="$t/checkout/pkg"
+  hm="$t/home"
+  sb="$t/sandbox"
+  /bin/mkdir -p "$chk" "$hm/.local/state" "$sb"
+
+  printf 'x\n' > "$chk/dot-zshrc"
+  printf 'conflict\n' > "$hm/.zshrc"
+
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t/checkout" init -q || { /bin/rm -rf "$t"; return 1; }
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t/checkout" -c commit.gpgSign=false config user.email test@example.invalid || { /bin/rm -rf "$t"; return 1; }
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t/checkout" -c commit.gpgSign=false config user.name test || { /bin/rm -rf "$t"; return 1; }
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t/checkout" add . || { /bin/rm -rf "$t"; return 1; }
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t/checkout" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm fixture || { /bin/rm -rf "$t"; return 1; }
+
+  printf 'pkg\tpkg\tpkg\n' > "$sb/groups.tsv"
+  printf 'pkg\n' > "$sb/selected.txt"
+
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+    CHECKOUT_DIR="$t/checkout"
+    SANDBOX="$sb"
+    PHYSICAL_HOME="$hm"
+    STATE_ROOT="$hm/.local/state/kaisian"
+
+    build_package_map || exit 1
+    validate_typed_tree || exit 1
+
+    # 1. Normal run on same filesystem succeeds
+    preflight_targets || exit 1
+    test -s "$sb/conflicts.tsv" || exit 1
+
+    # 2. Mock stat returning different device for backup ancestor
+    mock_bin="$t/mock_bin"
+    mkdir -p "$mock_bin"
+    cat << 'EOF' > "$mock_bin/stat"
+#!/bin/bash
+target_path="${3:-}"
+case "$target_path" in
+  */.local*|*/state*|*/backups*) printf '99999\n' ;;
+  *) /usr/bin/stat "$@" ;;
+esac
+EOF
+    chmod +x "$mock_bin/stat"
+
+    # With differing device stat, preflight_targets must fail
+    (
+      KAISIAN_STAT_EXEC="$mock_bin/stat"
+      ! preflight_targets
+    ) || exit 1
+  )
+  status=$?
+  /bin/rm -rf "$t"
+  return "$status"
+}
+
+run_case 'Task 5 preflight target classification and exact conflict planning' task5_preflight_targets_classification_case
+run_case 'Task 5 preflight target rejection for symlink parents and special nodes' task5_preflight_targets_rejection_case
+run_case 'Task 5 preflight unselected package filtering' task5_preflight_selection_filtering_case
+run_case 'Task 5 preflight XDG_STATE_HOME and state root validation' task5_preflight_state_root_validation_case
+run_case 'Task 5 preflight path overlap matrix and sibling acceptance' task5_preflight_overlap_matrix_case
+run_case 'Task 5 preflight cross-device stat validation rejection' task5_preflight_cross_device_case
 
 printf '%s passed; %s failed\n' "$PASS" "$FAIL"
 test "$FAIL" -eq 0
