@@ -448,8 +448,13 @@ message_key_parity_case() {
       "lock_failed"
       "unsafe_path_overlap"
       "unsupported_stow"
+      "invalid_manifest"
+      "unknown_profile"
+      "unknown_group"
+      "empty_group_selection"
+      "empty_selection"
+      "fzf_failed"
     )
-
     for key in "${keys[@]}"; do
       en_msg=$(LANGUAGE=en message "$key" "test_arg" "test_arg2") || {
         printf 'message_en failed for key: %s\n' "$key" >&2
@@ -1218,6 +1223,564 @@ EOF
   ) || return 1
   return 0
 }
+
+# 22. Valid manifest parsing produces exact groups.tsv and profiles.tsv inside sandbox
+manifest_valid_and_tsv_output_case() {
+  checkout="$ROOT/checkout_valid"
+  mkdir -p "$checkout/shell" "$checkout/git" "$checkout/mise" "$checkout/terminal"
+  cp "$(dirname "$SCRIPT")/tests/fixtures/manifest-valid.json" "$checkout/.kaisian.json"
+
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+    test_home=$(make_home)
+    HOME="$test_home"
+    acquire_lock || exit 1
+    trap 'cleanup' EXIT
+
+    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+
+    test -f "$SANDBOX/groups.tsv" || exit 1
+    test -f "$SANDBOX/profiles.tsv" || exit 1
+
+    expected_groups=$(printf 'shell\tShell configuration\tShell 設定\ngit\tGit configuration\tGit 設定\nmise\tRuntime and tool version management\t執行環境與工具版本管理\nterminal\tTerminal emulator configuration\t終端機模擬器設定\n')
+    actual_groups=$(cat "$SANDBOX/groups.tsv")
+    test "$actual_groups" = "$expected_groups" || exit 1
+
+    actual_profiles=$(cat "$SANDBOX/profiles.tsv")
+    assert_contains "$actual_profiles" "$(printf 'minimal\tshell git')" || exit 1
+    assert_contains "$actual_profiles" "$(printf 'default\tshell git mise')" || exit 1
+    cleanup
+    trap - EXIT
+    exit 0
+  ) || return 1
+  return 0
+}
+
+# 23. Invalid manifest syntax, types, schema, and unknown keys fail with localized diagnostic
+manifest_invalid_syntax_and_types_case() {
+  checkout="$ROOT/checkout_invalid_test"
+  mkdir -p "$checkout/shell" "$checkout/git" "$checkout/mise" "$checkout/terminal"
+
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+    test_home=$(make_home)
+    HOME="$test_home"
+    acquire_lock || exit 1
+    trap 'cleanup' EXIT
+
+    assert_manifest_fails() {
+      json_content=$1
+      label=$2
+      printf '%s\n' "$json_content" > "$SANDBOX/test_manifest.json"
+      out=$(parse_manifest "$SANDBOX/test_manifest.json" "$checkout" 2>&1)
+      status=$?
+      if test "$status" -eq 0; then
+        printf 'Expected manifest to fail for %s but it passed\n' "$label" >&2
+        return 1
+      fi
+      assert_contains "$out" "Invalid manifest" || {
+        printf 'Output missing "Invalid manifest" for %s: %s\n' "$label" "$out" >&2
+        return 1
+      }
+      return 0
+    }
+
+    # 1. Malformed JSON syntax
+    assert_manifest_fails '{ "schema": 1, ' 'malformed json' || exit 1
+
+    # 2. Root not object
+    assert_manifest_fails '[1, 2, 3]' 'root array' || exit 1
+
+    # 3. Schema string
+    assert_manifest_fails '{"schema": "1", "groups": [{"name": "shell", "description": {"en": "e", "zh-TW": "z"}}]}' 'schema string' || exit 1
+
+    # 4. Schema float
+    assert_manifest_fails '{"schema": 1.5, "groups": [{"name": "shell", "description": {"en": "e", "zh-TW": "z"}}]}' 'schema float' || exit 1
+
+    # 5. Schema unsupported version
+    assert_manifest_fails '{"schema": 2, "groups": [{"name": "shell", "description": {"en": "e", "zh-TW": "z"}}]}' 'schema version 2' || exit 1
+
+    # 6. Groups not array
+    assert_manifest_fails '{"schema": 1, "groups": {}}' 'groups object' || exit 1
+
+    # 7. Groups empty array
+    assert_manifest_fails '{"schema": 1, "groups": []}' 'groups empty array' || exit 1
+
+    # 8. Group item not object
+    assert_manifest_fails '{"schema": 1, "groups": ["shell"]}' 'group item string' || exit 1
+
+    # 9. Group missing name
+    assert_manifest_fails '{"schema": 1, "groups": [{"description": {"en": "e", "zh-TW": "z"}}]}' 'group missing name' || exit 1
+
+    # 10. Group missing description
+    assert_manifest_fails '{"schema": 1, "groups": [{"name": "shell"}]}' 'group missing description' || exit 1
+
+    # 11. Group invalid name uppercase
+    assert_manifest_fails '{"schema": 1, "groups": [{"name": "Shell", "description": {"en": "e", "zh-TW": "z"}}]}' 'group name uppercase' || exit 1
+
+    # 12. Group invalid name leading digit
+    assert_manifest_fails '{"schema": 1, "groups": [{"name": "1shell", "description": {"en": "e", "zh-TW": "z"}}]}' 'group name leading digit' || exit 1
+
+    # 13. Group invalid name leading dash
+    assert_manifest_fails '{"schema": 1, "groups": [{"name": "-shell", "description": {"en": "e", "zh-TW": "z"}}]}' 'group name leading dash' || exit 1
+
+    # 14. Group invalid name with space
+    assert_manifest_fails '{"schema": 1, "groups": [{"name": "shell group", "description": {"en": "e", "zh-TW": "z"}}]}' 'group name with space' || exit 1
+
+    # 15. Duplicate group name
+    assert_manifest_fails '{"schema": 1, "groups": [{"name": "shell", "description": {"en": "e1", "zh-TW": "z1"}}, {"name": "shell", "description": {"en": "e2", "zh-TW": "z2"}}]}' 'duplicate group name' || exit 1
+
+    # 16. Unknown group key
+    assert_manifest_fails '{"schema": 1, "groups": [{"name": "shell", "description": {"en": "e", "zh-TW": "z"}, "extra_key": true}]}' 'unknown group key' || exit 1
+
+    # 17. Group description not object
+    assert_manifest_fails '{"schema": 1, "groups": [{"name": "shell", "description": "some text"}]}' 'description string' || exit 1
+
+    # 18. Group description missing en
+    assert_manifest_fails '{"schema": 1, "groups": [{"name": "shell", "description": {"zh-TW": "z"}}]}' 'description missing en' || exit 1
+
+    # 19. Group description missing zh-TW
+    assert_manifest_fails '{"schema": 1, "groups": [{"name": "shell", "description": {"en": "e"}}]}' 'description missing zh-TW' || exit 1
+
+    # 20. Group description unknown key
+    assert_manifest_fails '{"schema": 1, "groups": [{"name": "shell", "description": {"en": "e", "zh-TW": "z", "fr": "f"}}]}' 'description unknown key' || exit 1
+
+    # 21. Group description empty en
+    assert_manifest_fails '{"schema": 1, "groups": [{"name": "shell", "description": {"en": "", "zh-TW": "z"}}]}' 'description empty en' || exit 1
+
+    # 22. Group description empty zh-TW
+    assert_manifest_fails '{"schema": 1, "groups": [{"name": "shell", "description": {"en": "e", "zh-TW": ""}}]}' 'description empty zh-TW' || exit 1
+
+    # 23. Group description with tab
+    assert_manifest_fails '{"schema": 1, "groups": [{"name": "shell", "description": {"en": "has\ttab", "zh-TW": "z"}}]}' 'description with tab' || exit 1
+
+    # 24. Group description with newline
+    assert_manifest_fails "{\"schema\": 1, \"groups\": [{\"name\": \"shell\", \"description\": {\"en\": \"has\nnewline\", \"zh-TW\": \"z\"}}]}" 'description with newline' || exit 1
+
+    # 25. Group description with control character
+    assert_manifest_fails '{"schema": 1, "groups": [{"name": "shell", "description": {"en": "has\u0007bell", "zh-TW": "z"}}]}' 'description with control char' || exit 1
+
+    # 26. Unknown top-level key
+    assert_manifest_fails '{"schema": 1, "groups": [{"name": "shell", "description": {"en": "e", "zh-TW": "z"}}], "unknown_key": 123}' 'unknown top key' || exit 1
+
+    # 27. Profiles not object
+    assert_manifest_fails '{"schema": 1, "groups": [{"name": "shell", "description": {"en": "e", "zh-TW": "z"}}], "profiles": ["shell"]}' 'profiles array' || exit 1
+
+    # 28. Profile item not array
+    assert_manifest_fails '{"schema": 1, "groups": [{"name": "shell", "description": {"en": "e", "zh-TW": "z"}}], "profiles": {"minimal": "shell"}}' 'profile item string' || exit 1
+
+    # 29. Profile item empty array
+    assert_manifest_fails '{"schema": 1, "groups": [{"name": "shell", "description": {"en": "e", "zh-TW": "z"}}], "profiles": {"minimal": []}}' 'profile item empty' || exit 1
+
+    # 30. Profile item invalid name
+    assert_manifest_fails '{"schema": 1, "groups": [{"name": "shell", "description": {"en": "e", "zh-TW": "z"}}], "profiles": {"Profile1": ["shell"]}}' 'profile item uppercase' || exit 1
+
+    # 31. Profile references unknown group
+    assert_manifest_fails '{"schema": 1, "groups": [{"name": "shell", "description": {"en": "e", "zh-TW": "z"}}], "profiles": {"minimal": ["unknown_pkg"]}}' 'profile unknown group' || exit 1
+
+    # 32. Profile contains duplicate group
+    assert_manifest_fails '{"schema": 1, "groups": [{"name": "shell", "description": {"en": "e", "zh-TW": "z"}}], "profiles": {"minimal": ["shell", "shell"]}}' 'profile duplicate group' || exit 1
+
+    cleanup
+    trap - EXIT
+    exit 0
+  ) || return 1
+  return 0
+}
+
+# 24. Package directory alignment: non-hidden root directories must match declared groups exactly
+manifest_package_directory_alignment_case() {
+  checkout="$ROOT/checkout_alignment_test"
+  mkdir -p "$checkout/shell" "$checkout/git"
+
+  cat << 'EOF' > "$checkout/.kaisian.json"
+{
+  "schema": 1,
+  "groups": [
+    {
+      "name": "shell",
+      "description": { "en": "Shell", "zh-TW": "Shell" }
+    },
+    {
+      "name": "git",
+      "description": { "en": "Git", "zh-TW": "Git" }
+    }
+  ]
+}
+EOF
+
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+    test_home=$(make_home)
+    HOME="$test_home"
+    acquire_lock || exit 1
+    trap 'cleanup' EXIT
+
+    # 1. Matching directories pass
+    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+
+    # 2. Regular non-hidden files like README.md and hidden dirs like .git pass
+    echo 'hello' > "$checkout/README.md"
+    mkdir -p "$checkout/.git"
+    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+
+    # 3. Missing package directory fails
+    rmdir "$checkout/git"
+    out=$(parse_manifest "$checkout/.kaisian.json" "$checkout" 2>&1)
+    status=$?
+    test "$status" -ne 0 || exit 1
+    assert_contains "$out" "Invalid manifest" || exit 1
+    mkdir -p "$checkout/git"
+
+    # 4. Undeclared non-hidden package directory fails
+    mkdir -p "$checkout/extra_pkg"
+    out=$(parse_manifest "$checkout/.kaisian.json" "$checkout" 2>&1)
+    status=$?
+    test "$status" -ne 0 || exit 1
+    assert_contains "$out" "Invalid manifest" || exit 1
+    rmdir "$checkout/extra_pkg"
+
+    # 5. Symlinked package directory fails
+    rmdir "$checkout/git"
+    ln -s "$checkout/shell" "$checkout/git"
+    out=$(parse_manifest "$checkout/.kaisian.json" "$checkout" 2>&1)
+    status=$?
+    test "$status" -ne 0 || exit 1
+    assert_contains "$out" "Invalid manifest" || exit 1
+
+    cleanup
+    trap - EXIT
+    exit 0
+  ) || return 1
+  return 0
+}
+
+# 25. Documented plutil last-duplicate-key behavior
+manifest_plutil_duplicate_key_behavior_case() {
+  checkout="$ROOT/checkout_dup_key_test"
+  mkdir -p "$checkout/shell"
+
+  # Duplicate schema key: plutil collapses to last value
+  cat << 'EOF' > "$checkout/.kaisian.json"
+{
+  "schema": 2,
+  "schema": 1,
+  "groups": [
+    {
+      "name": "shell",
+      "description": {
+        "en": "Old description",
+        "en": "New description",
+        "zh-TW": "Shell 設定"
+      }
+    }
+  ]
+}
+EOF
+
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+    test_home=$(make_home)
+    HOME="$test_home"
+    acquire_lock || exit 1
+    trap 'cleanup' EXIT
+
+    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+
+    # Description should be the last collapsed value "New description"
+    expected_groups=$(printf 'shell\tNew description\tShell 設定\n')
+    actual_groups=$(cat "$SANDBOX/groups.tsv")
+    test "$actual_groups" = "$expected_groups" || exit 1
+
+    cleanup
+    trap - EXIT
+    exit 0
+  ) || return 1
+  return 0
+}
+
+# 26. Default (no flag) and --all resolve all packages in manifest order
+selection_default_and_all_case() {
+  checkout="$ROOT/checkout_sel_all"
+  mkdir -p "$checkout/shell" "$checkout/git" "$checkout/mise" "$checkout/terminal"
+  cp "$(dirname "$SCRIPT")/tests/fixtures/manifest-valid.json" "$checkout/.kaisian.json"
+
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+    test_home=$(make_home)
+    HOME="$test_home"
+    acquire_lock || exit 1
+    trap 'cleanup' EXIT
+
+    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+
+    # 1. No flag (SELECTION_MODE='none')
+    SELECTION_MODE='none' SELECTION_VALUE='' resolve_selection || exit 1
+    expected_selected=$(printf 'shell\ngit\nmise\nterminal\n')
+    actual_selected=$(cat "$SANDBOX/selected.txt")
+    test "$actual_selected" = "$expected_selected" || exit 1
+    test ! -s "$SANDBOX/unselected.txt" || exit 1
+
+    # 2. --all (SELECTION_MODE='all')
+    SELECTION_MODE='all' SELECTION_VALUE='' resolve_selection || exit 1
+    actual_selected=$(cat "$SANDBOX/selected.txt")
+    test "$actual_selected" = "$expected_selected" || exit 1
+    test ! -s "$SANDBOX/unselected.txt" || exit 1
+
+    cleanup
+    trap - EXIT
+    exit 0
+  ) || return 1
+  return 0
+}
+
+# 27. --profile selects profile packages in manifest order; unknown profile fails
+selection_profile_case() {
+  checkout="$ROOT/checkout_sel_prof"
+  mkdir -p "$checkout/shell" "$checkout/git" "$checkout/mise" "$checkout/terminal"
+  cp "$(dirname "$SCRIPT")/tests/fixtures/manifest-valid.json" "$checkout/.kaisian.json"
+
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+    test_home=$(make_home)
+    HOME="$test_home"
+    acquire_lock || exit 1
+    trap 'cleanup' EXIT
+
+    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+
+    # 1. --profile minimal => shell git
+    SELECTION_MODE='profile' SELECTION_VALUE='minimal' resolve_selection || exit 1
+    expected_selected=$(printf 'shell\ngit\n')
+    expected_unselected=$(printf 'mise\nterminal\n')
+    test "$(cat "$SANDBOX/selected.txt")" = "$expected_selected" || exit 1
+    test "$(cat "$SANDBOX/unselected.txt")" = "$expected_unselected" || exit 1
+
+    # 2. --profile default => shell git mise
+    SELECTION_MODE='profile' SELECTION_VALUE='default' resolve_selection || exit 1
+    expected_selected=$(printf 'shell\ngit\nmise\n')
+    expected_unselected=$(printf 'terminal\n')
+    test "$(cat "$SANDBOX/selected.txt")" = "$expected_selected" || exit 1
+    test "$(cat "$SANDBOX/unselected.txt")" = "$expected_unselected" || exit 1
+
+    # 3. Unknown profile fails with diagnostic
+    out=$(SELECTION_MODE='profile' SELECTION_VALUE='nonexistent' resolve_selection 2>&1)
+    status=$?
+    test "$status" -ne 0 || exit 1
+    assert_contains "$out" "Unknown profile" || exit 1
+
+    cleanup
+    trap - EXIT
+    exit 0
+  ) || return 1
+  return 0
+}
+
+# 28. --groups parses comma list, trims whitespace, deduplicates, and resolves in manifest order
+selection_groups_case() {
+  checkout="$ROOT/checkout_sel_grp"
+  mkdir -p "$checkout/shell" "$checkout/git" "$checkout/mise" "$checkout/terminal"
+  cp "$(dirname "$SCRIPT")/tests/fixtures/manifest-valid.json" "$checkout/.kaisian.json"
+
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+    test_home=$(make_home)
+    HOME="$test_home"
+    acquire_lock || exit 1
+    trap 'cleanup' EXIT
+
+    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+
+    # 1. 'terminal, shell,terminal' => shell terminal (manifest order)
+    SELECTION_MODE='groups' SELECTION_VALUE='terminal, shell,terminal' resolve_selection || exit 1
+    expected_selected=$(printf 'shell\nterminal\n')
+    expected_unselected=$(printf 'git\nmise\n')
+    test "$(cat "$SANDBOX/selected.txt")" = "$expected_selected" || exit 1
+    test "$(cat "$SANDBOX/unselected.txt")" = "$expected_unselected" || exit 1
+
+    # 2. 'git, mise' => git mise
+    SELECTION_MODE='groups' SELECTION_VALUE='git, mise' resolve_selection || exit 1
+    expected_selected=$(printf 'git\nmise\n')
+    expected_unselected=$(printf 'shell\nterminal\n')
+    test "$(cat "$SANDBOX/selected.txt")" = "$expected_selected" || exit 1
+    test "$(cat "$SANDBOX/unselected.txt")" = "$expected_unselected" || exit 1
+
+    # 3. Trailing comma fails
+    out=$(SELECTION_MODE='groups' SELECTION_VALUE='terminal,' resolve_selection 2>&1)
+    test $? -ne 0 || exit 1
+    assert_contains "$out" "Group selection cannot be empty" || exit 1
+
+    # 4. Leading comma fails
+    out=$(SELECTION_MODE='groups' SELECTION_VALUE=',shell' resolve_selection 2>&1)
+    test $? -ne 0 || exit 1
+    assert_contains "$out" "Group selection cannot be empty" || exit 1
+
+    # 5. Empty / whitespace fails
+    out=$(SELECTION_MODE='groups' SELECTION_VALUE='   ' resolve_selection 2>&1)
+    test $? -ne 0 || exit 1
+    assert_contains "$out" "Group selection cannot be empty" || exit 1
+
+    # 6. Unknown group fails
+    out=$(SELECTION_MODE='groups' SELECTION_VALUE='shell, nonexistent' resolve_selection 2>&1)
+    test $? -ne 0 || exit 1
+    assert_contains "$out" "Unknown group" || exit 1
+
+    cleanup
+    trap - EXIT
+    exit 0
+  ) || return 1
+  return 0
+}
+
+# 29. Interactive fzf selection, cancellation, localization, and error semantics
+selection_interactive_fzf_case() {
+  checkout="$ROOT/checkout_sel_fzf"
+  mkdir -p "$checkout/shell" "$checkout/git" "$checkout/mise" "$checkout/terminal"
+  cp "$(dirname "$SCRIPT")/tests/fixtures/manifest-valid.json" "$checkout/.kaisian.json"
+
+  fzf_mock_dir=$(mktemp -d "$ROOT/fzfmock.XXXXXX")
+
+  # 1 & 2. Normal selection and localized candidate checks
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+    test_home=$(make_home)
+    HOME="$test_home"
+    acquire_lock || exit 1
+    trap 'cleanup' EXIT
+
+    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+
+    # 1. Normal fzf output 'git\nterminal' => git terminal (in manifest order)
+    cat << 'EOF' > "$fzf_mock_dir/fzf_normal"
+#!/bin/bash
+test "$1" = '--multi' || exit 1
+test "$2" = '--with-nth=1,2' || exit 1
+cat > /dev/null
+printf 'git\tGit configuration\nterminal\tTerminal emulator configuration\n'
+exit 0
+EOF
+    chmod +x "$fzf_mock_dir/fzf_normal"
+
+    SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_normal" resolve_selection || exit 1
+    expected_selected=$(printf 'git\nterminal\n')
+    expected_unselected=$(printf 'shell\nmise\n')
+    test "$(cat "$SANDBOX/selected.txt")" = "$expected_selected" || exit 1
+    test "$(cat "$SANDBOX/unselected.txt")" = "$expected_unselected" || exit 1
+
+    # 2. Localized candidates check for zh-TW
+    cat << EOF > "$fzf_mock_dir/fzf_capture"
+#!/bin/bash
+cat > "$SANDBOX/captured_candidates.txt"
+printf 'shell\tShell 設定\n'
+exit 0
+EOF
+    chmod +x "$fzf_mock_dir/fzf_capture"
+
+    LANGUAGE='zh-TW' SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_capture" resolve_selection || exit 1
+    captured=$(cat "$SANDBOX/captured_candidates.txt")
+    assert_contains "$captured" "Shell 設定" || exit 1
+    assert_contains "$captured" "Git 設定" || exit 1
+    assert_contains "$captured" "執行環境與工具版本管理" || exit 1
+
+    cleanup
+    trap - EXIT
+    exit 0
+  ) || return 1
+
+  # 3. fzf Esc / Ctrl-C (exit 130) => clean zero exit before target mutation
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+    test_home=$(make_home)
+    HOME="$test_home"
+    acquire_lock || exit 1
+    trap 'cleanup' EXIT
+
+    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+
+    cat << 'EOF' > "$fzf_mock_dir/fzf_130"
+#!/bin/bash
+exit 130
+EOF
+    chmod +x "$fzf_mock_dir/fzf_130"
+
+    SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_130" resolve_selection
+    status=$?
+    test "$status" -eq 0 || exit 1
+
+    # Note: select_interactively calls cleanup on 130 before exiting
+    test ! -d "$LOCK_DIR" || exit 1
+    trap - EXIT
+    exit 0
+  ) || return 1
+
+  # 4, 5, 6. Empty selection, error status, and non-TTY error checks
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+    test_home=$(make_home)
+    HOME="$test_home"
+    acquire_lock || exit 1
+    trap 'cleanup' EXIT
+
+    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+
+    # 4. Confirmed empty selection => nonzero
+    cat << 'EOF' > "$fzf_mock_dir/fzf_empty"
+#!/bin/bash
+exit 0
+EOF
+    chmod +x "$fzf_mock_dir/fzf_empty"
+
+    out=$(SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_empty" resolve_selection 2>&1)
+    status=$?
+    test "$status" -ne 0 || exit 1
+    assert_contains "$out" "No packages selected" || exit 1
+
+    # 5. Unexpected fzf failure (e.g. exit 2) => nonzero
+    cat << 'EOF' > "$fzf_mock_dir/fzf_err"
+#!/bin/bash
+exit 2
+EOF
+    chmod +x "$fzf_mock_dir/fzf_err"
+
+    out=$(SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_err" resolve_selection 2>&1)
+    status=$?
+    test "$status" -ne 0 || exit 1
+    assert_contains "$out" "fzf interactive selection failed" || exit 1
+
+    # 6. Non-TTY interactive => localized nonzero
+    out=$(LANGUAGE='en' SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=0 resolve_selection 2>&1)
+    test $? -ne 0 || exit 1
+    assert_contains "$out" "A controlling terminal is required" || exit 1
+
+    out_zh=$(LANGUAGE='zh-TW' SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=0 resolve_selection 2>&1)
+    test $? -ne 0 || exit 1
+    assert_contains "$out_zh" "此操作需要可控制的終端機" || exit 1
+
+    cleanup
+    trap - EXIT
+    exit 0
+  ) || return 1
+  return 0
+}
+
+run_case 'valid manifest parsing produces exact groups.tsv and profiles.tsv' manifest_valid_and_tsv_output_case
+run_case 'invalid manifest syntax, types, schema, and unknown keys fail' manifest_invalid_syntax_and_types_case
+run_case 'package directory alignment matches declared groups exactly' manifest_package_directory_alignment_case
+run_case 'documented plutil last-duplicate-key behavior' manifest_plutil_duplicate_key_behavior_case
+run_case 'default (no flag) and --all resolve all packages in manifest order' selection_default_and_all_case
+run_case '--profile selects profile packages in manifest order' selection_profile_case
+run_case '--groups parses comma list, trims whitespace, deduplicates, and resolves in manifest order' selection_groups_case
+run_case 'interactive fzf selection, cancellation, localization, and error semantics' selection_interactive_fzf_case
 
 run_case '--help succeeds when git/stow/fzf are absent' help_without_tools_case
 run_case '--profile/--groups/--interactive/--all reject every pair' selection_mutual_exclusion_case

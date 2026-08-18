@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "groups": [
+    {
+      "name": "shell",
+      "description": {
+        "en": "Shell configuration",
+        "zh-TW": "Shell 設定"
+      }
+    },
+    {
+      "name": "git",
+      "description": {
+        "en": "Git configuration",
+        "zh-TW": "Git 設定"
+      }
+    },
+    {
+      "name": "mise",
+      "description": {
+        "en": "Runtime and tool version management",
+        "zh-TW": "執行環境與工具版本管理"
+      }
+    },
+    {
+      "name": "terminal",
+      "description": {
+        "en": "Terminal emulator configuration",
+        "zh-TW": "終端機模擬器設定"
+      }
+    }
+  ],
+  "profiles": {
+    "minimal": [
+      "shell",
+      "git"
+    ],
+    "default": [
+      "shell",
+      "git",
+      "mise"
+    ]
+  }
+}

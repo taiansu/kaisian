@@ -85,6 +85,12 @@ message_en() {
     lock_failed) printf 'Failed to acquire lock at %s. Another instance may be running, or a stale lock directory exists.' "${1-}" ;;
     unsafe_path_overlap) printf "Path '%s' overlaps with lock or sandbox directory '%s'." "${1-}" "${2-}" ;;
     unsupported_stow) printf 'GNU Stow does not support required behavior (%s).' "${1-}" ;;
+    invalid_manifest) printf 'Invalid manifest: %s' "${1-}" ;;
+    unknown_profile) printf "Unknown profile '%s'." "${1-}" ;;
+    unknown_group) printf "Unknown group '%s'." "${1-}" ;;
+    empty_group_selection) printf 'Group selection cannot be empty.' ;;
+    empty_selection) printf 'No packages selected.' ;;
+    fzf_failed) printf 'fzf interactive selection failed (status %s).' "${1-}" ;;
     *) return 64 ;;
   esac
 }
@@ -105,6 +111,12 @@ message_zh_tw() {
     lock_failed) printf '無法取得鎖定：%s。可能有其他執行個體正在執行，或存在殘留的鎖定目錄。' "${1-}" ;;
     unsafe_path_overlap) printf '路徑「%s」與鎖定或沙盒目錄「%s」重疊。' "${1-}" "${2-}" ;;
     unsupported_stow) printf 'GNU Stow 不支援必要功能（%s）。' "${1-}" ;;
+    invalid_manifest) printf '無效的 manifest：%s' "${1-}" ;;
+    unknown_profile) printf '未知的設定檔「%s」。' "${1-}" ;;
+    unknown_group) printf '未知的群組「%s」。' "${1-}" ;;
+    empty_group_selection) printf '群組選取不能為空。' ;;
+    empty_selection) printf '未選取任何套件。' ;;
+    fzf_failed) printf 'fzf 互動選取失敗（狀態碼 %s）。' "${1-}" ;;
     *) return 64 ;;
   esac
 }
@@ -626,6 +638,435 @@ require_prerequisites() {
   test ! -e "$probe_tgt/excluded" || die unsupported_stow 'anchored ignore exclusion'
 
   /bin/rm -rf -- "$probe_src" "$probe_tgt" 2>/dev/null || true
+}
+
+is_valid_name() {
+  case "$1" in
+    [!abcdefghijklmnopqrstuvwxyz]* | *[!abcdefghijklmnopqrstuvwxyz0123456789_-]*) return 1 ;;
+    "") return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+has_control_char() {
+  (
+    LC_ALL=C
+    case "$1" in
+      *[[:cntrl:]]*) exit 0 ;;
+      *) exit 1 ;;
+    esac
+  )
+}
+
+trim_whitespace() {
+  local var=$1
+  while case "$var" in [[:space:]]*) var="${var#[[:space:]]}"; true ;; *) false ;; esac; do :; done
+  while case "$var" in *[[:space:]]) var="${var%[[:space:]]}"; true ;; *) false ;; esac; do :; done
+  printf '%s' "$var"
+}
+
+parse_manifest() {
+  manifest=${1-}
+  test -n "$manifest" || die invalid_manifest 'manifest path is required'
+  test -f "$manifest" && test -r "$manifest" || die invalid_manifest "$manifest"
+
+  checkout_dir="${2:-${CHECKOUT_DIR:-${manifest%/*}}}"
+  test -n "$checkout_dir" || checkout_dir='.'
+  test -d "$checkout_dir" || die invalid_manifest "checkout directory '$checkout_dir' not found"
+
+  test -n "$SANDBOX" && test -d "$SANDBOX" || die lock_failed 'sandbox not initialized'
+
+  if test "${KAISIAN_TESTING-0}" = '1'; then
+    plutil_bin="${KAISIAN_PLUTIL_EXEC:-${PLUTIL_EXEC:-/usr/bin/plutil}}"
+  else
+    plutil_bin="${PLUTIL_EXEC:-/usr/bin/plutil}"
+  fi
+
+  # 1. Syntax check
+  "$plutil_bin" -convert json -o /dev/null -- "$manifest" 2>/dev/null || die invalid_manifest 'malformed JSON syntax'
+
+  # 2. Convert to XML in sandbox and wrap to inspect root dictionary keys
+  manifest_xml="$SANDBOX/manifest.xml"
+  "$plutil_bin" -convert xml1 -o "$manifest_xml" -- "$manifest" 2>/dev/null || die invalid_manifest 'XML conversion failed'
+
+  wrapper_xml="$SANDBOX/manifest_wrapper.xml"
+  "$plutil_bin" -create xml1 "$wrapper_xml" 2>/dev/null || die invalid_manifest 'plist wrapper creation failed'
+  "$plutil_bin" -insert root -xml "$(cat "$manifest_xml")" "$wrapper_xml" 2>/dev/null || die invalid_manifest 'plist wrapper insertion failed'
+
+  root_type=$("$plutil_bin" -type root "$wrapper_xml" 2>/dev/null || true)
+  test "$root_type" = 'dictionary' || die invalid_manifest 'root must be a JSON object'
+
+  root_keys=$("$plutil_bin" -extract root raw "$wrapper_xml" 2>/dev/null || true)
+  has_schema=0
+  has_groups=0
+  has_profiles=0
+  old_ifs=$IFS
+  IFS='
+'
+  for k in $root_keys; do
+    case "$k" in
+      schema) has_schema=1 ;;
+      groups) has_groups=1 ;;
+      profiles) has_profiles=1 ;;
+      *) IFS=$old_ifs; die invalid_manifest "unknown top-level key '$k'" ;;
+    esac
+  done
+  IFS=$old_ifs
+
+  test "$has_schema" -eq 1 || die invalid_manifest "missing 'schema' key"
+  test "$has_groups" -eq 1 || die invalid_manifest "missing 'groups' key"
+
+  # 3. Schema validation
+  schema_type=$("$plutil_bin" -type schema "$manifest" 2>/dev/null || true)
+  test "$schema_type" = 'integer' || die invalid_manifest "'schema' must be an integer"
+  schema_val=$("$plutil_bin" -extract schema raw "$manifest" 2>/dev/null || true)
+  test "$schema_val" = '1' || die invalid_manifest "unsupported schema version '$schema_val'"
+
+  # 4. Groups validation
+  groups_type=$("$plutil_bin" -type groups "$manifest" 2>/dev/null || true)
+  test "$groups_type" = 'array' || die invalid_manifest "'groups' must be an array"
+  group_count=$("$plutil_bin" -extract groups raw "$manifest" 2>/dev/null || true)
+  case "$group_count" in
+    [0-9]*) ;;
+    *) die invalid_manifest "invalid group count" ;;
+  esac
+  test "$group_count" -gt 0 || die invalid_manifest "'groups' cannot be empty"
+
+  groups_tsv="$SANDBOX/groups.tsv"
+  : > "$groups_tsv"
+  seen_group_names=''
+
+  i=0
+  while test "$i" -lt "$group_count"; do
+    gtype=$("$plutil_bin" -type "groups.$i" "$manifest" 2>/dev/null || true)
+    test "$gtype" = 'dictionary' || die invalid_manifest "group $i must be an object"
+
+    gkeys=$("$plutil_bin" -extract "groups.$i" raw "$manifest" 2>/dev/null || true)
+    has_name=0
+    has_desc=0
+    old_ifs=$IFS
+    IFS='
+'
+    for gk in $gkeys; do
+      case "$gk" in
+        name) has_name=1 ;;
+        description) has_desc=1 ;;
+        *) IFS=$old_ifs; die invalid_manifest "unknown key '$gk' in group $i" ;;
+      esac
+    done
+    IFS=$old_ifs
+    test "$has_name" -eq 1 || die invalid_manifest "group $i missing 'name'"
+    test "$has_desc" -eq 1 || die invalid_manifest "group $i missing 'description'"
+
+    name_type=$("$plutil_bin" -type "groups.$i.name" "$manifest" 2>/dev/null || true)
+    test "$name_type" = 'string' || die invalid_manifest "group $i 'name' must be a string"
+    gname=$("$plutil_bin" -extract "groups.$i.name" raw "$manifest" 2>/dev/null || true)
+    is_valid_name "$gname" || die invalid_manifest "invalid group name '$gname'"
+
+    case " $seen_group_names " in
+      *" $gname "*) die invalid_manifest "duplicate group name '$gname'" ;;
+    esac
+    if test -z "$seen_group_names"; then
+      seen_group_names="$gname"
+    else
+      seen_group_names="$seen_group_names $gname"
+    fi
+
+    desc_type=$("$plutil_bin" -type "groups.$i.description" "$manifest" 2>/dev/null || true)
+    test "$desc_type" = 'dictionary' || die invalid_manifest "group $i 'description' must be an object"
+
+    dkeys=$("$plutil_bin" -extract "groups.$i.description" raw "$manifest" 2>/dev/null || true)
+    has_en=0
+    has_zhtw=0
+    old_ifs=$IFS
+    IFS='
+'
+    for dk in $dkeys; do
+      case "$dk" in
+        en) has_en=1 ;;
+        zh-TW) has_zhtw=1 ;;
+        *) IFS=$old_ifs; die invalid_manifest "unknown key '$dk' in group $i description" ;;
+      esac
+    done
+    IFS=$old_ifs
+    test "$has_en" -eq 1 || die invalid_manifest "group $i description missing 'en'"
+    test "$has_zhtw" -eq 1 || die invalid_manifest "group $i description missing 'zh-TW'"
+
+    en_type=$("$plutil_bin" -type "groups.$i.description.en" "$manifest" 2>/dev/null || true)
+    test "$en_type" = 'string' || die invalid_manifest "group $i description.en must be a string"
+    desc_en=$("$plutil_bin" -extract "groups.$i.description.en" raw "$manifest" 2>/dev/null || true)
+    test -n "$desc_en" || die invalid_manifest "group $i description.en cannot be empty"
+    has_control_char "$desc_en" && die invalid_manifest "group $i description.en contains control/tab/newline characters"
+
+    zhtw_type=$("$plutil_bin" -type "groups.$i.description.zh-TW" "$manifest" 2>/dev/null || true)
+    test "$zhtw_type" = 'string' || die invalid_manifest "group $i description.zh-TW must be a string"
+    desc_zh=$("$plutil_bin" -extract "groups.$i.description.zh-TW" raw "$manifest" 2>/dev/null || true)
+    test -n "$desc_zh" || die invalid_manifest "group $i description.zh-TW cannot be empty"
+    has_control_char "$desc_zh" && die invalid_manifest "group $i description.zh-TW contains control/tab/newline characters"
+
+    printf '%s\t%s\t%s\n' "$gname" "$desc_en" "$desc_zh" >> "$groups_tsv"
+    i=$((i + 1))
+  done
+
+  # 5. Package directory alignment
+  for g in $seen_group_names; do
+    test -d "$checkout_dir/$g" && test ! -L "$checkout_dir/$g" || die invalid_manifest "missing package directory '$g'"
+  done
+
+  for entry in "$checkout_dir"/*; do
+    test -e "$entry" || continue
+    if test -d "$entry" && test ! -L "$entry"; then
+      entry_name="${entry##*/}"
+      case " $seen_group_names " in
+        *" $entry_name "*) ;;
+        *) die invalid_manifest "undeclared package directory '$entry_name'" ;;
+      esac
+    fi
+  done
+
+  # 6. Profiles validation
+  profiles_tsv="$SANDBOX/profiles.tsv"
+  : > "$profiles_tsv"
+
+  if test "$has_profiles" -eq 1; then
+    ptype=$("$plutil_bin" -type profiles "$manifest" 2>/dev/null || true)
+    test "$ptype" = 'dictionary' || die invalid_manifest "'profiles' must be an object"
+
+    pnames=$("$plutil_bin" -extract profiles raw "$manifest" 2>/dev/null || true)
+    old_ifs=$IFS
+    IFS='
+'
+    for pname in $pnames; do
+      IFS=$old_ifs
+      is_valid_name "$pname" || die invalid_manifest "invalid profile name '$pname'"
+
+      prof_type=$("$plutil_bin" -type "profiles.$pname" "$manifest" 2>/dev/null || true)
+      test "$prof_type" = 'array' || die invalid_manifest "profile '$pname' must be an array"
+
+      pcount=$("$plutil_bin" -extract "profiles.$pname" raw "$manifest" 2>/dev/null || true)
+      case "$pcount" in
+        [0-9]*) ;;
+        *) die invalid_manifest "invalid count for profile '$pname'" ;;
+      esac
+      test "$pcount" -gt 0 || die invalid_manifest "profile '$pname' cannot be empty"
+
+      seen_prof_groups=''
+      j=0
+      while test "$j" -lt "$pcount"; do
+        entry_type=$("$plutil_bin" -type "profiles.$pname.$j" "$manifest" 2>/dev/null || true)
+        test "$entry_type" = 'string' || die invalid_manifest "profile '$pname' entry $j must be a string"
+        entry_name=$("$plutil_bin" -extract "profiles.$pname.$j" raw "$manifest" 2>/dev/null || true)
+
+        case " $seen_group_names " in
+          *" $entry_name "*) ;;
+          *) die invalid_manifest "profile '$pname' references unknown group '$entry_name'" ;;
+        esac
+
+        case " $seen_prof_groups " in
+          *" $entry_name "*) die invalid_manifest "profile '$pname' contains duplicate group '$entry_name'" ;;
+        esac
+
+        if test -z "$seen_prof_groups"; then
+          seen_prof_groups="$entry_name"
+        else
+          seen_prof_groups="$seen_prof_groups $entry_name"
+        fi
+        j=$((j + 1))
+      done
+
+      printf '%s\t%s\n' "$pname" "$seen_prof_groups" >> "$profiles_tsv"
+      IFS='
+'
+    done
+    IFS=$old_ifs
+  fi
+}
+
+select_interactively() {
+  if test "${KAISIAN_TESTING-0}" = '1' && test "${KAISIAN_TESTING_TTY-}" = '0'; then
+    die no_tty
+  elif test "${KAISIAN_TESTING-0}" != '1' || test "${KAISIAN_TESTING_TTY-}" != '1'; then
+    ( : < /dev/tty && : > /dev/tty ) 2>/dev/null || die no_tty
+  fi
+
+  test -n "$SANDBOX" || die lock_failed 'sandbox not initialized'
+  test -f "$SANDBOX/groups.tsv" || die invalid_manifest 'groups table not found'
+
+  fzf_candidates="$SANDBOX/fzf_candidates.txt"
+  : > "$fzf_candidates"
+  while IFS='	' read -r gname desc_en desc_zh || test -n "$gname"; do
+    test -n "$gname" || continue
+    case "$LANGUAGE" in
+      zh-TW|zh_TW) desc="$desc_zh" ;;
+      *) desc="$desc_en" ;;
+    esac
+    printf '%s\t%s\n' "$gname" "$desc" >> "$fzf_candidates"
+  done < "$SANDBOX/groups.tsv"
+
+  fzf_output="$SANDBOX/fzf_output.txt"
+  : > "$fzf_output"
+
+  if test "${KAISIAN_TESTING-0}" = '1'; then
+    fzf_bin="${KAISIAN_FZF_EXEC:-${FZF_EXEC:-fzf}}"
+  else
+    fzf_bin="${FZF_EXEC:-fzf}"
+  fi
+
+  fzf_status=0
+  "$fzf_bin" --multi --with-nth=1,2 < "$fzf_candidates" > "$fzf_output" || fzf_status=$?
+
+  if test "$fzf_status" -eq 130; then
+    cleanup
+    exit 0
+  elif test "$fzf_status" -ne 0; then
+    die fzf_failed "$fzf_status"
+  fi
+
+  if test ! -s "$fzf_output"; then
+    die empty_selection
+  fi
+
+  selected_set=''
+  while IFS= read -r line || test -n "$line"; do
+    case "$line" in
+      *'	'*) item="${line%%	*}" ;;
+      *) item="$line" ;;
+    esac
+    item=$(trim_whitespace "$item")
+    test -n "$item" || continue
+    case " $selected_set " in
+      *" $item "*) ;;
+      *)
+        if test -z "$selected_set"; then
+          selected_set="$item"
+        else
+          selected_set="$selected_set $item"
+        fi
+        ;;
+    esac
+  done < "$fzf_output"
+
+  test -n "$selected_set" || die empty_selection
+
+  : > "$SANDBOX/selected.txt"
+  : > "$SANDBOX/unselected.txt"
+  while IFS='	' read -r gname desc_en desc_zh || test -n "$gname"; do
+    test -n "$gname" || continue
+    case " $selected_set " in
+      *" $gname "*) printf '%s\n' "$gname" >> "$SANDBOX/selected.txt" ;;
+      *) printf '%s\n' "$gname" >> "$SANDBOX/unselected.txt" ;;
+    esac
+  done < "$SANDBOX/groups.tsv"
+}
+
+resolve_selection() {
+  test -n "$SANDBOX" || die lock_failed 'sandbox not initialized'
+  test -f "$SANDBOX/groups.tsv" || die invalid_manifest 'groups table not found'
+
+  case "$SELECTION_MODE" in
+    none|all)
+      : > "$SANDBOX/selected.txt"
+      : > "$SANDBOX/unselected.txt"
+      while IFS='	' read -r gname desc_en desc_zh || test -n "$gname"; do
+        test -n "$gname" || continue
+        printf '%s\n' "$gname" >> "$SANDBOX/selected.txt"
+      done < "$SANDBOX/groups.tsv"
+      ;;
+    profile)
+      test -n "$SELECTION_VALUE" || die missing_option_value '--profile'
+      test -f "$SANDBOX/profiles.tsv" || die unknown_profile "$SELECTION_VALUE"
+
+      profile_groups=''
+      found_profile=0
+      while IFS='	' read -r pname pgroups || test -n "$pname"; do
+        if test "$pname" = "$SELECTION_VALUE"; then
+          profile_groups="$pgroups"
+          found_profile=1
+          break
+        fi
+      done < "$SANDBOX/profiles.tsv"
+
+      test "$found_profile" -eq 1 || die unknown_profile "$SELECTION_VALUE"
+
+      : > "$SANDBOX/selected.txt"
+      : > "$SANDBOX/unselected.txt"
+      while IFS='	' read -r gname desc_en desc_zh || test -n "$gname"; do
+        test -n "$gname" || continue
+        case " $profile_groups " in
+          *" $gname "*) printf '%s\n' "$gname" >> "$SANDBOX/selected.txt" ;;
+          *) printf '%s\n' "$gname" >> "$SANDBOX/unselected.txt" ;;
+        esac
+      done < "$SANDBOX/groups.tsv"
+      ;;
+    groups)
+      test -n "$SELECTION_VALUE" || die missing_option_value '--groups'
+
+      all_groups=''
+      while IFS='	' read -r gname desc_en desc_zh || test -n "$gname"; do
+        test -n "$gname" || continue
+        if test -z "$all_groups"; then
+          all_groups="$gname"
+        else
+          all_groups="$all_groups $gname"
+        fi
+      done < "$SANDBOX/groups.tsv"
+
+      cur="$SELECTION_VALUE"
+      selected_set=''
+      while :; do
+        has_more=0
+        case "$cur" in
+          *,*)
+            part="${cur%%,*}"
+            cur="${cur#*,}"
+            has_more=1
+            ;;
+          *)
+            part="$cur"
+            cur=''
+            ;;
+        esac
+        trimmed=$(trim_whitespace "$part")
+        test -n "$trimmed" || die empty_group_selection
+
+        case " $all_groups " in
+          *" $trimmed "*) ;;
+          *) die unknown_group "$trimmed" ;;
+        esac
+
+        case " $selected_set " in
+          *" $trimmed "*) ;;
+          *)
+            if test -z "$selected_set"; then
+              selected_set="$trimmed"
+            else
+              selected_set="$selected_set $trimmed"
+            fi
+            ;;
+        esac
+
+        test "$has_more" -eq 0 && break
+      done
+
+      test -n "$selected_set" || die empty_group_selection
+
+      : > "$SANDBOX/selected.txt"
+      : > "$SANDBOX/unselected.txt"
+      while IFS='	' read -r gname desc_en desc_zh || test -n "$gname"; do
+        test -n "$gname" || continue
+        case " $selected_set " in
+          *" $gname "*) printf '%s\n' "$gname" >> "$SANDBOX/selected.txt" ;;
+          *) printf '%s\n' "$gname" >> "$SANDBOX/unselected.txt" ;;
+        esac
+      done < "$SANDBOX/groups.tsv"
+      ;;
+    interactive)
+      select_interactively
+      ;;
+    *)
+      die selection_conflict
+      ;;
+  esac
 }
 
 main() {
