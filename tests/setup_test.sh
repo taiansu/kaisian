@@ -1811,19 +1811,18 @@ EOF
     test "$status" -ne 0 || exit 1
     assert_contains "$out" "fzf interactive selection failed" || exit 1
 
-    # 6. Bogus unknown record in fzf output => nonzero
-    cat << 'EOF' > "$fzf_mock_dir/fzf_bogus"
+    # 6. Bogus unknown record in fzf output (no tab) => nonzero
+    cat << 'EOF' > "$fzf_mock_dir/fzf_unknown"
 #!/bin/bash
-printf 'nonexistent_package\tSome desc\n'
+printf 'nonexistent_package\n'
 exit 0
 EOF
-    chmod +x "$fzf_mock_dir/fzf_bogus"
+    chmod +x "$fzf_mock_dir/fzf_unknown"
 
-    out=$(SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_bogus" resolve_selection 2>&1)
+    out=$(SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_unknown" resolve_selection 2>&1)
     status=$?
     test "$status" -ne 0 || exit 1
     assert_contains "$out" "fzf interactive selection failed" || exit 1
-
     # 7. Mixed valid + bogus record in fzf output => nonzero
     cat << 'EOF' > "$fzf_mock_dir/fzf_mixed"
 #!/bin/bash
@@ -1875,13 +1874,51 @@ EOF
     test "$status" -ne 0 || exit 1
     assert_contains "$out" "fzf interactive selection failed" || exit 1
 
-    # 11. Localized zh-TW fzf unknown record diagnostic without English words
-    out_fzf_zh=$(LANGUAGE='zh-TW' SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_bogus" resolve_selection 2>&1)
+    # 11. Wrong description in fzf output => nonzero
+    cat << 'EOF' > "$fzf_mock_dir/fzf_wrong_desc"
+#!/bin/bash
+printf 'shell\tbogus description\n'
+exit 0
+EOF
+    chmod +x "$fzf_mock_dir/fzf_wrong_desc"
+
+    out=$(SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_wrong_desc" resolve_selection 2>&1)
+    status=$?
+    test "$status" -ne 0 || exit 1
+    assert_contains "$out" "fzf interactive selection failed" || exit 1
+
+    # 12. Empty description suffix 'shell\t' in fzf output => nonzero
+    cat << 'EOF' > "$fzf_mock_dir/fzf_empty_suffix"
+#!/bin/bash
+printf 'shell\t\n'
+exit 0
+EOF
+    chmod +x "$fzf_mock_dir/fzf_empty_suffix"
+
+    out=$(SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_empty_suffix" resolve_selection 2>&1)
+    status=$?
+    test "$status" -ne 0 || exit 1
+    assert_contains "$out" "fzf interactive selection failed" || exit 1
+
+    # 13. Extra tab in fzf output record => nonzero
+    cat << 'EOF' > "$fzf_mock_dir/fzf_extra_tab"
+#!/bin/bash
+printf 'shell\tShell configuration\textra\n'
+exit 0
+EOF
+    chmod +x "$fzf_mock_dir/fzf_extra_tab"
+
+    out=$(SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_extra_tab" resolve_selection 2>&1)
+    status=$?
+    test "$status" -ne 0 || exit 1
+    assert_contains "$out" "fzf interactive selection failed" || exit 1
+
+    # 14. Localized zh-TW fzf unknown record diagnostic without English words
+    out_fzf_zh=$(LANGUAGE='zh-TW' SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_unknown" resolve_selection 2>&1)
     test $? -ne 0 || exit 1
     assert_contains "$out_fzf_zh" "fzf 互動選取失敗：輸出包含未知的紀錄「nonexistent_package」。" || exit 1
     ! assert_contains "$out_fzf_zh" "failed" || exit 1
     ! assert_contains "$out_fzf_zh" "unknown record" || exit 1
-
     # 12. Non-TTY interactive => localized nonzero
     out=$(LANGUAGE='en' SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=0 resolve_selection 2>&1)
     test $? -ne 0 || exit 1

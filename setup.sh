@@ -1047,21 +1047,31 @@ select_interactively() {
   while IFS= read -r line || test -n "$line"; do
     test -n "$line" || die fzf_failed empty_record
     case "$line" in
-      *'	'*) record_name="${line%%	*}" ;;
-      *) record_name="$line" ;;
+      *'	'*)
+        is_cand_match=0
+        while IFS= read -r cand_line || test -n "$cand_line"; do
+          if test "$line" = "$cand_line"; then
+            is_cand_match=1
+            record_name="${line%%	*}"
+            break
+          fi
+        done < "$fzf_candidates"
+        test "$is_cand_match" -eq 1 || die fzf_failed invalid_format "$line"
+        ;;
+      *)
+        is_valid_name "$line" || die fzf_failed invalid_format "$line"
+        is_group_match=0
+        while IFS='	' read -r gname desc_en desc_zh || test -n "$gname"; do
+          test -n "$gname" || continue
+          if test "$line" = "$gname"; then
+            is_group_match=1
+            record_name="$line"
+            break
+          fi
+        done < "$SANDBOX/groups.tsv"
+        test "$is_group_match" -eq 1 || die fzf_failed unknown_record "$line"
+        ;;
     esac
-    is_valid_name "$record_name" || die fzf_failed invalid_format "$line"
-
-    is_declared=0
-    while IFS='	' read -r gname desc_en desc_zh || test -n "$gname"; do
-      test -n "$gname" || continue
-      if test "$record_name" = "$gname"; then
-        is_declared=1
-        break
-      fi
-    done < "$SANDBOX/groups.tsv"
-
-    test "$is_declared" -eq 1 || die fzf_failed unknown_record "$record_name"
 
     case " $selected_set " in
       *" $record_name "*) ;;
