@@ -3778,6 +3778,10 @@ task5_mapping_fixture_case() {
     test "$(sed -n '2p' "$SANDBOX/mapping.tsv")" = "$(printf 'dir\tshell\tdot-config/zsh\t.config/zsh\t.config/zsh')" || exit 1
     test "$(sed -n '3p' "$SANDBOX/mapping.tsv")" = "$(printf 'file\tshell\tdot-config/zsh/aliasrc\t.config/zsh/aliasrc\t.config/zsh/aliasrc')" || exit 1
   )
+  status=$?
+  /bin/rm -rf "$t"
+  return "$status"
+}
 task5_shared_directory_coalescing_case() {
   t=$(mktemp -d "$ROOT/task5-shared.XXXXXX") || return 1
   /bin/mkdir -p "$t/sandbox"
@@ -3790,6 +3794,7 @@ task5_shared_directory_coalescing_case() {
 
 task5_prefix_collision_case() {
   t=$(mktemp -d "$ROOT/task5-prefix.XXXXXX") || return 1
+  /bin/mkdir -p "$t/sandbox"
   printf 'file\tpkg\tfoo\tfoo\tfoo\nfile\tpkg\tfoo/bar\tfoo/bar\tfoo/bar\n' > "$t/sandbox/mapping.tsv"
   ( . "$SCRIPT"; SANDBOX="$t/sandbox"; MAPPING_FILE="$t/sandbox/mapping.tsv"; ! validate_typed_tree )
   status=$?
@@ -3826,10 +3831,6 @@ task5_all_node_boundary_rejection_case() {
   return "$status"
 }
 
-  status=$?
-  /bin/rm -rf "$t"
-  return "$status"
-}
 run_case 'Task 5 shared directory coalescing' task5_shared_directory_coalescing_case
 run_case 'Task 5 prefix collision rejection' task5_prefix_collision_case
 run_case 'Task 5 declared unselected rejection' task5_unselected_declared_rejection_case
