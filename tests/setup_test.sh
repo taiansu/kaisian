@@ -146,7 +146,6 @@ lang_validation_case() {
   done
 
   # Valid explicit languages without --help short-circuit:
-  # Verify that valid language is accepted by parser and error diagnostic reflects chosen language
   out_en=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --lang en --unknown 2>&1)
   assert_contains "$out_en" "Error: Unknown argument: --unknown" || return 1
 
@@ -251,12 +250,10 @@ home_validation_case() {
   assert_contains "$out" "HOME directory is invalid" || return 1
   chmod 700 "$unwritable_h"
 
-  # Unowned HOME (root-owned /private/var/root on macOS)
-  if test -d "/private/var/root"; then
-    out=$(env -i HOME="/private/var/root" PATH="$fake_bin" /bin/bash "$SCRIPT" 2>&1)
-    test $? -ne 0 || return 1
-    assert_contains "$out" "HOME directory is invalid" || return 1
-  fi
+  # Unowned HOME using root-owned, readable/writable/searchable sticky /private/tmp (reaches owner UID check)
+  out=$(env -i HOME="/private/tmp" PATH="$fake_bin" /bin/bash "$SCRIPT" 2>&1)
+  test $? -ne 0 || return 1
+  assert_contains "$out" "HOME directory is invalid" || return 1
   return 0
 }
 
@@ -267,29 +264,28 @@ existing_lock_case() {
   uid=$(/usr/bin/id -u)
   lock_dir="/private/tmp/kaisian-$uid.lock"
 
-  if test -d "$lock_dir"; then
-    printf 'Skipping existing_lock_case: pre-existing external lock at %s\n' "$lock_dir" >&2
-    return 0
+  if test -e "$lock_dir"; then
+    printf 'FAIL: Pre-existing external lock at %s\n' "$lock_dir" >&2
+    return 1
   fi
 
-  mkdir -m 0700 "$lock_dir" || return 1
-  test_lock_ino=$(/usr/bin/stat -f '%d %i' "$lock_dir")
-  touch "$lock_dir/existing_marker"
+  (
+    mkdir -m 0700 "$lock_dir" || exit 1
+    test_lock_ino=$(/usr/bin/stat -f '%d %i' "$lock_dir" 2>/dev/null)
+    trap 'curr=$(/usr/bin/stat -f "%d %i" "'"$lock_dir"'" 2>/dev/null || true); if test "$curr" = "'"$test_lock_ino"'"; then rm -rf "'"$lock_dir"'"; fi' EXIT
 
-  out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" 2>&1)
-  status=$?
-  test "$status" -ne 0 || return 1
-  assert_contains "$out" "Failed to acquire lock at" || return 1
+    touch "$lock_dir/existing_marker"
 
-  # Verify lock directory and marker are still there
-  test -d "$lock_dir" || return 1
-  test -f "$lock_dir/existing_marker" || return 1
+    out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" 2>&1)
+    status=$?
+    test "$status" -ne 0 || exit 1
+    assert_contains "$out" "Failed to acquire lock at" || exit 1
 
-  curr_ino=$(/usr/bin/stat -f '%d %i' "$lock_dir" 2>/dev/null || true)
-  if test "$curr_ino" = "$test_lock_ino"; then
-    rm -f "$lock_dir/existing_marker"
-    rmdir "$lock_dir"
-  fi
+    # Verify lock directory and marker are still intact
+    test -d "$lock_dir" || exit 1
+    test -f "$lock_dir/existing_marker" || exit 1
+    exit 0
+  ) || return 1
   return 0
 }
 
@@ -300,23 +296,22 @@ tmpdir_lock_contention_case() {
   uid=$(/usr/bin/id -u)
   lock_dir="/private/tmp/kaisian-$uid.lock"
 
-  if test -d "$lock_dir"; then
-    printf 'Skipping tmpdir_lock_contention_case: pre-existing external lock at %s\n' "$lock_dir" >&2
-    return 0
+  if test -e "$lock_dir"; then
+    printf 'FAIL: Pre-existing external lock at %s\n' "$lock_dir" >&2
+    return 1
   fi
 
-  mkdir -m 0700 "$lock_dir" || return 1
-  test_lock_ino=$(/usr/bin/stat -f '%d %i' "$lock_dir")
+  (
+    mkdir -m 0700 "$lock_dir" || exit 1
+    test_lock_ino=$(/usr/bin/stat -f '%d %i' "$lock_dir" 2>/dev/null)
+    trap 'curr=$(/usr/bin/stat -f "%d %i" "'"$lock_dir"'" 2>/dev/null || true); if test "$curr" = "'"$test_lock_ino"'"; then rm -rf "'"$lock_dir"'"; fi' EXIT
 
-  out=$(env -i TMPDIR="$ROOT/custom_tmp" HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" 2>&1)
-  status=$?
-  test "$status" -ne 0 || return 1
-  assert_contains "$out" "Failed to acquire lock at /private/tmp/kaisian-$uid.lock" || return 1
-
-  curr_ino=$(/usr/bin/stat -f '%d %i' "$lock_dir" 2>/dev/null || true)
-  if test "$curr_ino" = "$test_lock_ino"; then
-    rmdir "$lock_dir"
-  fi
+    out=$(env -i TMPDIR="$ROOT/custom_tmp" HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" 2>&1)
+    status=$?
+    test "$status" -ne 0 || exit 1
+    assert_contains "$out" "Failed to acquire lock at /private/tmp/kaisian-$uid.lock" || exit 1
+    exit 0
+  ) || return 1
   return 0
 }
 
@@ -342,7 +337,7 @@ path_overlap_with_lock_case() {
   test $? -ne 0 || return 1
   assert_contains "$out" "overlaps with lock or sandbox directory" || return 1
 
-  # Dot and dotdot and doubled-slash aliases of lock
+  # Dot, dotdot, and doubled-slash aliases of lock
   out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --repo-dir "/private/tmp/./kaisian-$uid.lock" 2>&1)
   test $? -ne 0 || return 1
   assert_contains "$out" "overlaps with lock or sandbox directory" || return 1
@@ -355,12 +350,16 @@ path_overlap_with_lock_case() {
   test $? -ne 0 || return 1
   assert_contains "$out" "overlaps with lock or sandbox directory" || return 1
 
-  # State root equal / ancestor / descendant of lock
-  out=$(env -i HOME="$test_home" XDG_STATE_HOME="$lock_dir" PATH="$fake_bin" /bin/bash "$SCRIPT" 2>&1)
+  # Symlink + .. alias pointing into sandbox/lock
+  symlink_target="$lock_dir/sandbox"
+  symlink_path="$ROOT/to-sandbox"
+  ln -s "$symlink_target" "$symlink_path"
+  out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --repo-dir "$symlink_path/.." 2>&1)
   test $? -ne 0 || return 1
   assert_contains "$out" "overlaps with lock or sandbox directory" || return 1
 
-  out=$(env -i HOME="$test_home" XDG_STATE_HOME="/private/tmp" PATH="$fake_bin" /bin/bash "$SCRIPT" 2>&1)
+  # State root descendant of lock
+  out=$(env -i HOME="$test_home" XDG_STATE_HOME="$lock_dir" PATH="$fake_bin" /bin/bash "$SCRIPT" 2>&1)
   test $? -ne 0 || return 1
   assert_contains "$out" "overlaps with lock or sandbox directory" || return 1
 
@@ -368,7 +367,18 @@ path_overlap_with_lock_case() {
   test $? -ne 0 || return 1
   assert_contains "$out" "overlaps with lock or sandbox directory" || return 1
 
-  # Sibling path is valid: does NOT fail with unsafe_path_overlap (reaches prerequisite check)
+  # Safe sibling state root (XDG_STATE_HOME=/private/tmp -> STATE_ROOT=/private/tmp/kaisian) reaches prerequisite check
+  out=$(env -i HOME="$test_home" XDG_STATE_HOME="/private/tmp" PATH="$fake_bin" /bin/bash "$SCRIPT" 2>&1)
+  test $? -ne 0 || return 1
+  case "$out" in
+    *"overlaps with lock"*)
+      printf 'Safe XDG_STATE_HOME=/private/tmp incorrectly failed with path overlap: %s\n' "$out" >&2
+      return 1
+      ;;
+  esac
+  assert_contains "$out" "Missing required commands" || return 1
+
+  # Sibling repo-dir is valid: reaches prerequisite check without path overlap failure
   sibling_dir="$ROOT/sibling-repo"
   mkdir -p "$sibling_dir"
   out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --repo-dir "$sibling_dir" 2>&1)
@@ -388,9 +398,9 @@ cleanup_leaves_unrecognized_lock_case() {
   uid=$(/usr/bin/id -u)
   lock_dir="/private/tmp/kaisian-$uid.lock"
 
-  if test -d "$lock_dir"; then
-    printf 'Skipping cleanup_leaves_unrecognized_lock_case: pre-existing external lock at %s\n' "$lock_dir" >&2
-    return 0
+  if test -e "$lock_dir"; then
+    printf 'FAIL: Pre-existing external lock at %s\n' "$lock_dir" >&2
+    return 1
   fi
 
   (
@@ -398,6 +408,9 @@ cleanup_leaves_unrecognized_lock_case() {
     . "$SCRIPT"
     LOCK_DIR="/private/tmp/kaisian-$uid.lock"
     mkdir -m 0700 "$LOCK_DIR" || exit 1
+    test_ino=$(/usr/bin/stat -f '%d %i' "$LOCK_DIR" 2>/dev/null)
+    trap 'curr=$(/usr/bin/stat -f "%d %i" "'"$LOCK_DIR"'" 2>/dev/null || true); if test "$curr" = "'"$test_ino"'"; then rm -rf "'"$LOCK_DIR"'"; fi' EXIT
+
     SANDBOX="$LOCK_DIR/sandbox"
     mkdir -m 0700 "$SANDBOX" || exit 1
     RECORDED_LOCK_DEV_INO=$(/usr/bin/stat -f '%d %i' "$LOCK_DIR")
@@ -411,9 +424,6 @@ cleanup_leaves_unrecognized_lock_case() {
     assert_not_exists "$LOCK_DIR/pid" || exit 1
     test -f "$LOCK_DIR/unrecognized_file" || exit 1
     test -d "$LOCK_DIR" || exit 1
-
-    rm -f "$LOCK_DIR/unrecognized_file"
-    rmdir "$LOCK_DIR"
     exit 0
   ) || return 1
   return 0
@@ -453,7 +463,6 @@ message_key_parity_case() {
       test -n "$zh_msg" || exit 1
     done
 
-    # Unknown key returns 64
     LANGUAGE=en message "unknown_test_key" >/dev/null 2>&1
     test $? -eq 64 || exit 1
     LANGUAGE=zh-TW message "unknown_test_key" >/dev/null 2>&1
@@ -463,13 +472,13 @@ message_key_parity_case() {
   return 0
 }
 
-# 14. run_git environment sanitization
+# 14. run_git environment sanitization and production hook immunity
 run_git_sanitization_case() {
   uid=$(/usr/bin/id -u)
   lock_dir="/private/tmp/kaisian-$uid.lock"
-  if test -d "$lock_dir"; then
-    printf 'Skipping run_git_sanitization_case: pre-existing external lock at %s\n' "$lock_dir" >&2
-    return 0
+  if test -e "$lock_dir"; then
+    printf 'FAIL: Pre-existing external lock at %s\n' "$lock_dir" >&2
+    return 1
   fi
 
   (
@@ -477,6 +486,9 @@ run_git_sanitization_case() {
     . "$SCRIPT"
 
     acquire_lock
+    test_ino="$RECORDED_LOCK_DEV_INO"
+    trap 'curr=$(/usr/bin/stat -f "%d %i" "'"$lock_dir"'" 2>/dev/null || true); if test "$curr" = "'"$test_ino"'"; then rm -rf "'"$lock_dir"'"; fi' EXIT
+
     mock_bin="$ROOT/mock-git-bin"
     mkdir -p "$mock_bin"
     cat << 'EOF' > "$mock_bin/git"
@@ -495,7 +507,15 @@ printf 'GIT_AUTHOR_NAME=%s\n' "${GIT_AUTHOR_NAME-unset}"
 EOF
     chmod +x "$mock_bin/git"
 
-    out=$(KAISIAN_GIT_EXEC="$mock_bin/git" GIT_DIR="/hostile/dir" GIT_WORK_TREE="/hostile/wt" GIT_AUTHOR_NAME="hostile" run_git status)
+    # Hostile env script to verify /usr/bin/env immunity
+    cat << 'EOF' > "$mock_bin/env"
+#!/bin/bash
+printf 'HOSTILE_ENV_EXECUTED\n'
+exit 1
+EOF
+    chmod +x "$mock_bin/env"
+
+    out=$(KAISIAN_GIT_EXEC="$mock_bin/git" PATH="$mock_bin:$PATH" GIT_DIR="/hostile/dir" GIT_WORK_TREE="/hostile/wt" GIT_AUTHOR_NAME="hostile" run_git status)
     cleanup
 
     assert_contains "$out" "HOME=$SANDBOX/git-home" || exit 1
@@ -509,6 +529,13 @@ EOF
     assert_contains "$out" "GIT_DIR=unset" || exit 1
     assert_contains "$out" "GIT_WORK_TREE=unset" || exit 1
     assert_contains "$out" "GIT_AUTHOR_NAME=unset" || exit 1
+
+    case "$out" in
+      *"HOSTILE_ENV_EXECUTED"*)
+        printf 'run_git invoked shadowed bare env!\n' >&2
+        exit 1
+        ;;
+    esac
     exit 0
   ) || return 1
   return 0
@@ -518,9 +545,9 @@ EOF
 run_stow_sanitization_case() {
   uid=$(/usr/bin/id -u)
   lock_dir="/private/tmp/kaisian-$uid.lock"
-  if test -d "$lock_dir"; then
-    printf 'Skipping run_stow_sanitization_case: pre-existing external lock at %s\n' "$lock_dir" >&2
-    return 0
+  if test -e "$lock_dir"; then
+    printf 'FAIL: Pre-existing external lock at %s\n' "$lock_dir" >&2
+    return 1
   fi
 
   (
@@ -528,6 +555,9 @@ run_stow_sanitization_case() {
     . "$SCRIPT"
 
     acquire_lock
+    test_ino="$RECORDED_LOCK_DEV_INO"
+    trap 'curr=$(/usr/bin/stat -f "%d %i" "'"$lock_dir"'" 2>/dev/null || true); if test "$curr" = "'"$test_ino"'"; then rm -rf "'"$lock_dir"'"; fi' EXIT
+
     mock_bin="$ROOT/mock-stow-bin"
     mkdir -p "$mock_bin"
     cat << 'EOF' > "$mock_bin/stow"
@@ -555,13 +585,13 @@ EOF
   return 0
 }
 
-# 16. behavioral stow probes in require_prerequisites
+# 16. behavioral stow probes in require_prerequisites and compat enforcement
 stow_behavioral_probes_case() {
   uid=$(/usr/bin/id -u)
   lock_dir="/private/tmp/kaisian-$uid.lock"
-  if test -d "$lock_dir"; then
-    printf 'Skipping stow_behavioral_probes_case: pre-existing external lock at %s\n' "$lock_dir" >&2
-    return 0
+  if test -e "$lock_dir"; then
+    printf 'FAIL: Pre-existing external lock at %s\n' "$lock_dir" >&2
+    return 1
   fi
 
   (
@@ -569,10 +599,13 @@ stow_behavioral_probes_case() {
     . "$SCRIPT"
 
     acquire_lock
+    test_ino="$RECORDED_LOCK_DEV_INO"
+    trap 'curr=$(/usr/bin/stat -f "%d %i" "'"$lock_dir"'" 2>/dev/null || true); if test "$curr" = "'"$test_ino"'"; then rm -rf "'"$lock_dir"'"; fi' EXIT
+
     mock_bin="$ROOT/mock-probe-bin"
     mkdir -p "$mock_bin"
 
-    # Create a behavioral fake stow that implements the probe expectations
+    # Create a behavioral fake stow enforcing --compat, --ignore, --no-folding, --simulate
     cat << 'EOF' > "$mock_bin/stow"
 #!/bin/bash
 set -u
@@ -640,6 +673,181 @@ done
 # Deletion
 for pkg in $delete_pkgs; do
   pkg_dir="$dir/$pkg"
+  if test "$compat" -eq 1; then
+    # Compat mode: remove all links in target that point to pkg_dir, even if source was deleted
+    if test -d "$target"; then
+      (
+        cd "$target"
+        find . -type l | while read -r link; do
+          dest=$(readlink "$link" 2>/dev/null || true)
+          case "$dest" in
+            "$pkg_dir"/*)
+              rm -f "$link"
+              ;;
+          esac
+        done
+      )
+    fi
+  else
+    # Non-compat mode: only deletes links for files currently existing in pkg_dir
+    if test -d "$pkg_dir"; then
+      (
+        cd "$pkg_dir"
+        find . -type f | while read -r file; do
+          rel="${file#./}"
+          old_ifs=$IFS
+          IFS='/'
+          set -f
+          set -- $rel
+          set +f
+          IFS=$old_ifs
+          transformed=""
+          for comp in "$@"; do
+            case "$comp" in
+              dot-*) c=".${comp#dot-}" ;;
+              *) c="$comp" ;;
+            esac
+            transformed="$transformed/$c"
+          done
+          tgt_file="$target$transformed"
+          rm -f "$tgt_file"
+        done
+      )
+    fi
+  fi
+done
+exit 0
+EOF
+    chmod +x "$mock_bin/stow"
+
+    cat << 'EOF' > "$mock_bin/git"
+#!/bin/bash
+exit 0
+EOF
+    cat << 'EOF' > "$mock_bin/fzf"
+#!/bin/bash
+exit 0
+EOF
+    cat << 'EOF' > "$mock_bin/plutil"
+#!/bin/bash
+exit 0
+EOF
+    chmod +x "$mock_bin/git" "$mock_bin/fzf" "$mock_bin/plutil"
+
+    KAISIAN_GIT_EXEC="$mock_bin/git" \
+    KAISIAN_STOW_EXEC="$mock_bin/stow" \
+    PATH="$mock_bin:/usr/bin:/bin" require_prerequisites
+    probe_status=$?
+    cleanup
+
+    test "$probe_status" -eq 0 || exit 1
+    exit 0
+  ) || return 1
+  return 0
+}
+
+# 17. production hook immunity: KAISIAN_* variables are ignored when KAISIAN_TESTING is unset/0
+production_hook_immunity_case() {
+  test_home=$(make_home)
+  fake_bin=$(make_fake_bin)
+  mock_bin="$ROOT/mock-evil-bin"
+  mkdir -p "$mock_bin"
+  cat << 'EOF' > "$mock_bin/evil_git"
+#!/bin/bash
+printf 'EVIL_GIT_RAN\n'
+exit 1
+EOF
+  chmod +x "$mock_bin/evil_git"
+
+  out=$(env -i HOME="$test_home" KAISIAN_TESTING=0 KAISIAN_GIT_EXEC="$mock_bin/evil_git" PATH="$fake_bin" /bin/bash "$SCRIPT" 2>&1)
+  case "$out" in
+    *"EVIL_GIT_RAN"*)
+      printf 'Production invocation executed KAISIAN_GIT_EXEC override!\n' >&2
+      return 1
+      ;;
+  esac
+  return 0
+}
+
+# 18. compat probe failure on ignored compat behavior
+compat_probe_failure_on_ignored_compat_case() {
+  uid=$(/usr/bin/id -u)
+  lock_dir="/private/tmp/kaisian-$uid.lock"
+  if test -e "$lock_dir"; then
+    printf 'FAIL: Pre-existing external lock at %s\n' "$lock_dir" >&2
+    return 1
+  fi
+
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+
+    acquire_lock
+    test_ino="$RECORDED_LOCK_DEV_INO"
+    trap 'curr=$(/usr/bin/stat -f "%d %i" "'"$lock_dir"'" 2>/dev/null || true); if test "$curr" = "'"$test_ino"'"; then rm -rf "'"$lock_dir"'"; fi' EXIT
+
+    mock_bin="$ROOT/mock-nocompat-bin"
+    mkdir -p "$mock_bin"
+
+    # Fake stow that IGNORES --compat (does not clean up obsolete source links on -D)
+    cat << 'EOF' > "$mock_bin/stow"
+#!/bin/bash
+set -u
+dir=""
+target=""
+simulate=0
+restow_pkgs=""
+delete_pkgs=""
+
+while test $# -gt 0; do
+  case "$1" in
+    -d) dir=$2; shift 2 ;;
+    -t) target=$2; shift 2 ;;
+    --dotfiles|--no-folding|--compat) shift ;;
+    --simulate) simulate=1; shift ;;
+    --ignore=*) shift ;;
+    -R) restow_pkgs="$restow_pkgs $2"; shift 2 ;;
+    -D) delete_pkgs="$delete_pkgs $2"; shift 2 ;;
+    *) restow_pkgs="$restow_pkgs $1"; shift ;;
+  esac
+done
+
+if test "$simulate" -eq 1; then
+  exit 0
+fi
+
+for pkg in $restow_pkgs; do
+  pkg_dir="$dir/$pkg"
+  if test -d "$pkg_dir"; then
+    (
+      cd "$pkg_dir"
+      find . -type f | while read -r file; do
+        rel="${file#./}"
+        old_ifs=$IFS
+        IFS='/'
+        set -f
+        set -- $rel
+        set +f
+        IFS=$old_ifs
+        transformed=""
+        for comp in "$@"; do
+          case "$comp" in
+            dot-*) c=".${comp#dot-}" ;;
+            *) c="$comp" ;;
+          esac
+          transformed="$transformed/$c"
+        done
+        tgt_file="$target$transformed"
+        mkdir -p "$(dirname "$tgt_file")"
+        ln -sf "$pkg_dir/$rel" "$tgt_file"
+      done
+    )
+  fi
+done
+
+# Non-compat deletion: leaves deleted files in target untouched
+for pkg in $delete_pkgs; do
+  pkg_dir="$dir/$pkg"
   if test -d "$pkg_dir"; then
     (
       cd "$pkg_dir"
@@ -683,15 +891,41 @@ exit 0
 EOF
     chmod +x "$mock_bin/git" "$mock_bin/fzf" "$mock_bin/plutil"
 
-    KAISIAN_GIT_EXEC="$mock_bin/git" \
-    KAISIAN_STOW_EXEC="$mock_bin/stow" \
-    PATH="$mock_bin:/usr/bin:/bin" require_prerequisites
-    probe_status=$?
+    out=$(KAISIAN_GIT_EXEC="$mock_bin/git" KAISIAN_STOW_EXEC="$mock_bin/stow" PATH="$mock_bin:/usr/bin:/bin" require_prerequisites 2>&1)
+    status=$?
     cleanup
 
-    test "$probe_status" -eq 0 || exit 1
+    test "$status" -ne 0 || exit 1
+    assert_contains "$out" "GNU Stow does not support required behavior" || exit 1
     exit 0
   ) || return 1
+  return 0
+}
+
+# 19. subshell lock cleanup safety on assertion failure
+lock_cleanup_on_subshell_failure_case() {
+  uid=$(/usr/bin/id -u)
+  lock_dir="/private/tmp/kaisian-$uid.lock"
+  if test -e "$lock_dir"; then
+    printf 'FAIL: Pre-existing external lock at %s\n' "$lock_dir" >&2
+    return 1
+  fi
+
+  # Run a subshell that acquires lock and then exits with failure (simulating test assertion failure)
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+
+    acquire_lock
+    test_ino="$RECORDED_LOCK_DEV_INO"
+    trap 'curr=$(/usr/bin/stat -f "%d %i" "'"$lock_dir"'" 2>/dev/null || true); if test "$curr" = "'"$test_ino"'"; then rm -rf "'"$lock_dir"'"; fi' EXIT
+
+    # Force a test failure / non-zero exit
+    exit 1
+  ) || true
+
+  # Assert that the lock was cleaned up by the trap and no stale lock was left behind
+  test ! -e "$lock_dir" || return 1
   return 0
 }
 
@@ -711,6 +945,9 @@ run_case 'bilingual message key parity and unknown key check' message_key_parity
 run_case 'run_git environment sanitization' run_git_sanitization_case
 run_case 'run_stow environment sanitization' run_stow_sanitization_case
 run_case 'behavioral stow probes in require_prerequisites' stow_behavioral_probes_case
+run_case 'production runner hook immunity' production_hook_immunity_case
+run_case 'compat probe failure on ignored compat behavior' compat_probe_failure_on_ignored_compat_case
+run_case 'subshell lock cleanup safety on assertion failure' lock_cleanup_on_subshell_failure_case
 
 printf '%s passed; %s failed\n' "$PASS" "$FAIL"
 test "$FAIL" -eq 0

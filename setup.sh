@@ -303,48 +303,57 @@ canonicalize_path() {
   set +f
   IFS=$old_ifs
 
-  stack=()
+  curr_dir='/'
+  suffix=''
   for seg in "$@"; do
     case "$seg" in
       ''|'.') ;;
       '..')
-        if test ${#stack[@]} -gt 0; then
-          unset stack[$((${#stack[@]} - 1))]
-          stack=("${stack[@]}")
+        if test -z "$suffix"; then
+          if test -d "$curr_dir"; then
+            curr_dir=$(cd -P -- "$curr_dir/.." 2>/dev/null && pwd -P) || curr_dir='/'
+          else
+            curr_dir=${curr_dir%/*}
+            test -n "$curr_dir" || curr_dir='/'
+          fi
+        else
+          suffix=${suffix%/*}
         fi
         ;;
       *)
-        stack[${#stack[@]}]="$seg"
+        if test -z "$suffix"; then
+          next_path="$curr_dir/$seg"
+          if test "$curr_dir" = '/'; then
+            next_path="/$seg"
+          fi
+          if test -L "$next_path"; then
+            if test -d "$next_path"; then
+              curr_dir=$(cd -P -- "$next_path" 2>/dev/null && pwd -P) || curr_dir="$next_path"
+            else
+              phys_parent=$(cd -P -- "$(dirname "$next_path")" 2>/dev/null && pwd -P) || phys_parent=$(dirname "$next_path")
+              base=$(basename "$next_path")
+              suffix="/$base"
+              curr_dir="$phys_parent"
+            fi
+          elif test -d "$next_path"; then
+            curr_dir=$(cd -P -- "$next_path" 2>/dev/null && pwd -P) || curr_dir="$next_path"
+          else
+            suffix="/$seg"
+          fi
+        else
+          suffix="$suffix/$seg"
+        fi
         ;;
     esac
   done
 
-  norm=''
-  for seg in "${stack[@]}"; do
-    norm="$norm/$seg"
-  done
-  test -n "$norm" || norm='/'
-
-  dir="$norm"
-  suffix=''
-  while test -n "$dir" && test "$dir" != '/' && ! test -d "$dir"; do
-    base_name=${dir##*/}
-    suffix="/$base_name$suffix"
-    dir=${dir%/*}
-    test -n "$dir" || dir='/'
-  done
-
-  if test -d "$dir"; then
-    phys_dir=$(cd -P -- "$dir" 2>/dev/null && pwd -P) || phys_dir="$dir"
-    if test "$phys_dir" = '/'; then
-      norm="$suffix"
-      test -n "$norm" || norm='/'
-    else
-      norm="$phys_dir$suffix"
-    fi
+  if test "$curr_dir" = '/'; then
+    final_path="$suffix"
+    test -n "$final_path" || final_path='/'
+  else
+    final_path="$curr_dir$suffix"
   fi
-
-  printf '%s\n' "$norm"
+  printf '%s\n' "$final_path"
 }
 
 check_path_overlap_with_lock() {
@@ -394,9 +403,6 @@ acquire_lock() {
 
   check_path_overlap_with_lock "$CHECKOUT_DIR"
   check_path_overlap_with_lock "$STATE_ROOT"
-  if test -n "${XDG_STATE_HOME-}"; then
-    check_path_overlap_with_lock "$XDG_STATE_HOME"
-  fi
 
   if ! ( umask 077 && /bin/mkdir "$LOCK_DIR" 2>/dev/null ); then
     die lock_failed "$LOCK_DIR"
@@ -418,10 +424,17 @@ acquire_lock() {
   SANDBOX="$LOCK_DIR/sandbox"
   /bin/mkdir -m 0700 "$SANDBOX" 2>/dev/null || die lock_failed "$LOCK_DIR"
   RECORDED_SANDBOX_DEV_INO=$(/usr/bin/stat -f '%d %i' "$SANDBOX" 2>/dev/null || stat -f '%d %i' "$SANDBOX" 2>/dev/null)
-  test -n "$RECORDED_SANDBOX_DEV_INO" || die lock_failed "$LOCK_DIR"
+  if test -z "$RECORDED_SANDBOX_DEV_INO"; then
+    /bin/rmdir "$SANDBOX" 2>/dev/null || true
+    die lock_failed "$LOCK_DIR"
+  fi
 
   /bin/mkdir -m 0700 "$SANDBOX/git-home" "$SANDBOX/stow-cwd" "$SANDBOX/stow-home" 2>/dev/null || die lock_failed "$LOCK_DIR"
-  : > "$SANDBOX/stow-home/.stow-global-ignore"
+  : > "$SANDBOX/stow-home/.stow-global-ignore" || die lock_failed "$LOCK_DIR"
+
+  # Re-check path overlap after sandbox exists to ensure symlink-plus-.. cannot bypass lock containment
+  check_path_overlap_with_lock "$CHECKOUT_DIR"
+  check_path_overlap_with_lock "$STATE_ROOT"
 }
 
 cleanup() {
@@ -451,9 +464,14 @@ cleanup() {
 run_git() {
   test -n "$SANDBOX" || die lock_failed 'sandbox not initialized'
   /bin/mkdir -p "$SANDBOX/git-home" 2>/dev/null || true
-  git_bin="${KAISIAN_GIT_EXEC:-${GIT_EXEC:-git}}"
-  runner_path="${KAISIAN_RUNNER_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"
-  env -i \
+  if test "${KAISIAN_TESTING-0}" = '1'; then
+    git_bin="${KAISIAN_GIT_EXEC:-${GIT_EXEC:-git}}"
+    runner_path="${KAISIAN_RUNNER_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"
+  else
+    git_bin="${GIT_EXEC:-/usr/bin/git}"
+    runner_path='/usr/bin:/bin:/usr/sbin:/sbin'
+  fi
+  /usr/bin/env -i \
     PATH="$runner_path" \
     HOME="$SANDBOX/git-home" \
     LC_ALL=C \
@@ -470,11 +488,16 @@ run_stow() {
   test -n "$SANDBOX" || die lock_failed 'sandbox not initialized'
   /bin/mkdir -p "$SANDBOX/stow-cwd" "$SANDBOX/stow-home" 2>/dev/null || true
   test -f "$SANDBOX/stow-home/.stow-global-ignore" || : > "$SANDBOX/stow-home/.stow-global-ignore"
-  stow_bin="${KAISIAN_STOW_EXEC:-${STOW_EXEC:-stow}}"
-  runner_path="${KAISIAN_RUNNER_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"
+  if test "${KAISIAN_TESTING-0}" = '1'; then
+    stow_bin="${KAISIAN_STOW_EXEC:-${STOW_EXEC:-stow}}"
+    runner_path="${KAISIAN_RUNNER_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"
+  else
+    stow_bin="${STOW_EXEC:-stow}"
+    runner_path='/usr/bin:/bin:/usr/sbin:/sbin'
+  fi
   (
     cd "$SANDBOX/stow-cwd" && \
-    env -i \
+    /usr/bin/env -i \
       PATH="$runner_path" \
       LC_ALL=C \
       HOME="$SANDBOX/stow-home" \
@@ -513,6 +536,7 @@ require_prerequisites() {
   echo 'test' > "$probe_src/pkg1/dot-testfile"
   echo 'ignoreme' > "$probe_src/pkg1/README"
   echo 'nested' > "$probe_src/pkg1/dot-config/app/dot-nested"
+  echo 'obsolete' > "$probe_src/pkg1/dot-obsolete"
   if ! run_stow -d "$probe_src" -t "$probe_tgt" --dotfiles --no-folding pkg1 >/dev/null 2>&1; then
     die unsupported_stow '--dotfiles --no-folding'
   fi
@@ -521,6 +545,7 @@ require_prerequisites() {
   test -d "$probe_tgt/.config" && test ! -L "$probe_tgt/.config" || die unsupported_stow '--no-folding directory creation'
   test -d "$probe_tgt/.config/app" && test ! -L "$probe_tgt/.config/app" || die unsupported_stow '--no-folding nested directory'
   test -L "$probe_tgt/.config/app/.nested" || die unsupported_stow '--no-folding leaf link'
+  test -L "$probe_tgt/.obsolete" || die unsupported_stow '--dotfiles link creation'
 
   # 2. --simulate
   echo 'test2' > "$probe_src/pkg2/dot-test2"
@@ -531,11 +556,13 @@ require_prerequisites() {
 
   # 3. Mixed -R / -D with --compat and anchored subtree ignore
   echo 'sub' > "$probe_src/pkg2/excluded/dot-sub"
+  /bin/rm -f "$probe_src/pkg1/dot-obsolete"
   if ! run_stow -d "$probe_src" -t "$probe_tgt" --dotfiles --no-folding --compat --ignore='^excluded(/.*)?$' -R pkg2 -D pkg1 >/dev/null 2>&1; then
     die unsupported_stow 'mixed -R/-D --compat'
   fi
   test -L "$probe_tgt/.test2" || die unsupported_stow 'mixed -R restow'
   test ! -e "$probe_tgt/.testfile" || die unsupported_stow 'mixed -D unstow'
+  test ! -e "$probe_tgt/.obsolete" && test ! -L "$probe_tgt/.obsolete" || die unsupported_stow '--compat obsolete link deletion'
   test ! -e "$probe_tgt/excluded" || die unsupported_stow 'anchored ignore exclusion'
 
   /bin/rm -rf -- "$probe_src" "$probe_tgt" 2>/dev/null || true
