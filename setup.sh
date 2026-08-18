@@ -1,11 +1,9 @@
 #!/bin/bash
 set -u
 
-if test -z "${KAISIAN_VERSION-}"; then
-  readonly KAISIAN_VERSION='0.1.0'
-  readonly DEFAULT_REPOSITORY='taiansu/dotfiles'
-  readonly DEFAULT_DOTFILES_COMMIT='0b3b0c3f206e1f4fb35dac82794a871c5c18f405'
-fi
+readonly KAISIAN_VERSION='0.1.0'
+readonly DEFAULT_REPOSITORY='taiansu/dotfiles'
+readonly DEFAULT_DOTFILES_COMMIT='0b3b0c3f206e1f4fb35dac82794a871c5c18f405'
 
 LANGUAGE='en'
 PHYSICAL_HOME=''
@@ -306,29 +304,24 @@ preflight_targets() {
   test -n "$PHYSICAL_HOME" && test "${PHYSICAL_HOME#/}" != "$PHYSICAL_HOME" || return 1
   test -d "$PHYSICAL_HOME" && test ! -L "$PHYSICAL_HOME" || return 1
   PHYSICAL_HOME=$(canonicalize_path "$PHYSICAL_HOME") || return 1
-  has_control_char "$PHYSICAL_HOME" && return 1
-
   if test -n "${XDG_STATE_HOME+x}" && test -n "$XDG_STATE_HOME"; then
     case "$XDG_STATE_HOME" in
-      /*) STATE_ROOT="$XDG_STATE_HOME/kaisian" ;;
+      /*) raw_state_root="$XDG_STATE_HOME/kaisian" ;;
       *) return 1 ;;
     esac
-    test ! -L "$XDG_STATE_HOME" || return 1
   elif test -z "$STATE_ROOT"; then
-    STATE_ROOT="$PHYSICAL_HOME/.local/state/kaisian"
+    raw_state_root="$PHYSICAL_HOME/.local/state/kaisian"
+  else
+    raw_state_root="$STATE_ROOT"
   fi
-  case "$STATE_ROOT" in
+  case "$raw_state_root" in
     /*) ;;
     *) return 1 ;;
   esac
-  has_control_char "$STATE_ROOT" && return 1
+  has_control_char "$raw_state_root" && return 1
 
-  test ! -L "$STATE_ROOT" || return 1
-
-  STATE_ROOT=$(canonicalize_path "$STATE_ROOT") || return 1
-  has_control_char "$STATE_ROOT" && return 1
-
-  sr_curr="$STATE_ROOT"
+  # Walk every raw absolute existing component before canonicalize
+  sr_curr="$raw_state_root"
   while test "$sr_curr" != '/' && test -n "$sr_curr"; do
     if test -L "$sr_curr"; then return 1; fi
     if test -e "$sr_curr" && test ! -d "$sr_curr"; then return 1; fi
@@ -336,18 +329,23 @@ preflight_targets() {
     test -n "$sr_curr" || sr_curr='/'
   done
 
+  STATE_ROOT=$(canonicalize_path "$raw_state_root") || return 1
+  has_control_char "$STATE_ROOT" && return 1
   backup_base="$STATE_ROOT/backups"
 
   # Compute unique non-reserved timestamped candidate BACKUP_ROOT
   n=0
   while :; do
-    BACKUP_ROOT="$backup_base/$(/bin/date -u '+%Y%m%dT%H%M%SZ')-$$"
+    if test "${KAISIAN_TESTING-0}" = '1' && test -n "${KAISIAN_TEST_TIME-}"; then
+      utc_ts="$KAISIAN_TEST_TIME"
+    else
+      utc_ts=$(/bin/date -u '+%Y%m%dT%H%M%SZ')
+    fi
+    BACKUP_ROOT="$backup_base/$utc_ts-$$"
     test "$n" -eq 0 || BACKUP_ROOT="$BACKUP_ROOT-$n"
     test ! -e "$BACKUP_ROOT" && test ! -L "$BACKUP_ROOT" && break
     n=$((n + 1))
   done
-
-  # Validate that no existing ancestor in the backup tree down from STATE_ROOT is a symlink or non-directory
   b_curr="$backup_base"
   while test "$b_curr" != '/' && test "$b_curr" != "$STATE_ROOT"; do
     if test -L "$b_curr"; then return 1; fi
