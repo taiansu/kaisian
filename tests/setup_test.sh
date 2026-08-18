@@ -3155,10 +3155,20 @@ submodule_matrix_and_nested_levels_case() {
     REPOSITORY="https://github.com/taiansu/nogm"
     resolve_remote_ref
     chk_nogm=$(mktemp -d "$ROOT/chk-nogm.XXXXXX")
+    nogm_trace="$ROOT/nogm.trace"
+    : > "$nogm_trace"
+    export KAISIAN_GIT_TRACE_LOG="$nogm_trace"
+    nogm_payload_before=""
+    if test -d "$chk_nogm"; then
+      nogm_payload_before=$(cd "$chk_nogm" && /usr/bin/find . -path './.git' -prune -o -type f -print | /usr/bin/sort)
+    fi
     if ( initialize_repository "$chk_nogm" ) >/dev/null 2>&1; then
       printf 'Expected gitlink without .gitmodules to fail\n' >&2
       exit 1
     fi
+    nogm_payload_after=$(cd "$chk_nogm" && /usr/bin/find . -path './.git' -prune -o -type f -print | /usr/bin/sort)
+    test "$nogm_payload_after" = "$nogm_payload_before" || exit 1
+    ! /usr/bin/grep -Eq ' checkout ' "$nogm_trace" || exit 1
 
     # 2l. Orphan definition in .gitmodules without gitlink in tree
     repo_orphan=$(make_remote_repo)
@@ -3173,10 +3183,47 @@ submodule_matrix_and_nested_levels_case() {
     REPOSITORY="https://github.com/taiansu/orphan"
     resolve_remote_ref
     chk_orphan=$(mktemp -d "$ROOT/chk-orphan.XXXXXX")
+    orphan_trace="$ROOT/orphan.trace"
+    : > "$orphan_trace"
+    export KAISIAN_GIT_TRACE_LOG="$orphan_trace"
+    orphan_payload_before=""
+    if test -d "$chk_orphan"; then
+      orphan_payload_before=$(cd "$chk_orphan" && /usr/bin/find . -path './.git' -prune -o -type f -print | /usr/bin/sort)
+    fi
     if ( initialize_repository "$chk_orphan" ) >/dev/null 2>&1; then
       printf 'Expected orphan .gitmodules definition without gitlink to fail\n' >&2
       exit 1
     fi
+    orphan_payload_after=$(cd "$chk_orphan" && /usr/bin/find . -path './.git' -prune -o -type f -print | /usr/bin/sort)
+    test "$orphan_payload_after" = "$orphan_payload_before" || exit 1
+    ! /usr/bin/grep -Eq ' checkout ' "$orphan_trace" || exit 1
+
+    # 2m. Valid declaration set with an extra unlisted gitlink rejects pre-checkout
+    repo_extra=$(make_remote_repo)
+    (
+      cd "$repo_extra" || exit 1
+      git config -f .gitmodules submodule.helper.path ".vendor/helper"
+      git config -f .gitmodules submodule.helper.url "https://github.com/taiansu/nested"
+      git add .gitmodules
+      git update-index --add --cacheinfo 160000,"$subm_lvl2_sha",.vendor/helper
+      git update-index --add --cacheinfo 160000,"$subm_lvl2_sha",.vendor/unlisted
+      git -c user.email="t@e.com" -c user.name="T" commit -q -m "extra unlisted gitlink"
+    )
+    printf 'https://github.com/taiansu/extra=%s\n' "$repo_extra" >> "$map_file"
+    REPOSITORY="https://github.com/taiansu/extra"
+    resolve_remote_ref
+    chk_extra=$(mktemp -d "$ROOT/chk-extra.XXXXXX")
+    extra_trace="$ROOT/extra.trace"
+    : > "$extra_trace"
+    export KAISIAN_GIT_TRACE_LOG="$extra_trace"
+    extra_payload_before=""
+    if ( initialize_repository "$chk_extra" ) >/dev/null 2>&1; then
+      printf 'Expected extra unlisted gitlink to fail\n' >&2
+      exit 1
+    fi
+    extra_payload_after=$(cd "$chk_extra" && /usr/bin/find . -path './.git' -prune -o -type f -print | /usr/bin/sort)
+    test "$extra_payload_after" = "$extra_payload_before" || exit 1
+    ! /usr/bin/grep -Eq ' checkout ' "$extra_trace" || exit 1
 
     # 2m. Bad submodule path grammar cases
     bad_paths=(
@@ -3325,41 +3372,80 @@ single_fetch_and_trace_assertions_case() {
     chk_single=$(mktemp -d "$ROOT/chk-single.XXXXXX")
     initialize_repository "$chk_single" || exit 1
 
-    # Trace must be non-empty and every boundary must decode to the complete expected environment.
+    # Every trace boundary is an ENV record immediately followed by one decoded command.
     test -s "$trace_log" || exit 1
     expected_env=$(printf 'ENV: HOME=%q PATH=%q LC_ALL=%q GIT_CONFIG_NOSYSTEM=%q GIT_CONFIG_GLOBAL=%q GIT_ATTR_NOSYSTEM=%q GIT_TERMINAL_PROMPT=%q GIT_ASKPASS=%q GIT_NO_REPLACE_OBJECTS=%q GIT_ALLOW_PROTOCOL=%q' \
       "$SANDBOX/git-home" "/usr/bin:/bin:/usr/sbin:/sbin" "C" "1" "/dev/null" "1" "0" "/usr/bin/false" "1" "https")
-    while IFS= read -r trace_line; do
-      case "$trace_line" in
-        ENV:*)
-          case "$trace_line" in
-            "$expected_env"|"$expected_env GIT_INDEX_FILE="*) ;;
-            *) exit 1 ;;
-          esac
-          ;;
-      esac
-    done < "$trace_log"
-
-    # Decode every escaped command line and compare the complete fetch argv exactly.
+    expected_index=$(printf '%q' "$SANDBOX/verify-index-$$")
     fetch_seen=0
+    ls_remote_seen=0
+    trace_env=""
     while IFS= read -r trace_line; do
+      if test -z "$trace_env"; then
+        case "$trace_line" in
+          "$expected_env") trace_env="$trace_line" ;;
+          "$expected_env GIT_INDEX_FILE=$expected_index") trace_env="$trace_line" ;;
+          *) exit 1 ;;
+        esac
+        continue
+      fi
       case "$trace_line" in
-        git\ *)
-          trace_cmd=${trace_line#git }
-          eval "trace_argv=( $trace_cmd )"
-          if test "${trace_argv[0]-}" = "-C" && test "${trace_argv[2]-}" = "fetch"; then
-            test "${trace_argv[1]}" = "$chk_single" || exit 1
+        git\ *) ;;
+        *) exit 1 ;;
+      esac
+      trace_cmd=${trace_line#git }
+      trace_argv=()
+      eval "trace_argv=( $trace_cmd )"
+      index_expected=0
+      case "$trace_env" in
+        "$expected_env") ;;
+        *) index_expected=1 ;;
+      esac
+      if test "$index_expected" -eq 1; then
+        case " ${trace_argv[*]} " in
+          *" read-tree "*|*" update-index "*|*" diff-index "*) ;;
+          *) exit 1 ;;
+        esac
+      fi
+      if test "${trace_argv[0]-}" = "-C"; then
+        test "${trace_argv[1]-}" = "$chk_single" || exit 1
+        test -n "${trace_argv[2]-}" || exit 1
+        case "${trace_argv[2]}" in
+          init|config|fetch|rev-parse|ls-tree|cat-file|checkout|read-tree|update-index|diff-index|hash-object|status) ;;
+          *) exit 1 ;;
+        esac
+        case "${trace_argv[2]}" in
+          fetch)
             test "${#trace_argv[@]}" -eq 7 || exit 1
             test "${trace_argv[3]}" = "--no-tags" || exit 1
             test "${trace_argv[4]}" = "--depth=1" || exit 1
             test "${trace_argv[5]}" = "$CANONICAL_REPO" || exit 1
             test "${trace_argv[6]}" = "$RESOLVED_FETCH_REF" || exit 1
             fetch_seen=$((fetch_seen + 1))
-          fi
-          ;;
-      esac
+            ;;
+        esac
+      else
+        case "${trace_argv[0]-}" in
+          ls-remote)
+            test "${trace_argv[1]-}" = "$CANONICAL_REPO" || exit 1
+            test "${#trace_argv[@]}" -eq 2 || exit 1
+            ls_remote_seen=$((ls_remote_seen + 1))
+            ;;
+          init)
+            test "${trace_argv[1]-}" = "$chk_single" || exit 1
+            test "${#trace_argv[@]}" -eq 2 || exit 1
+            ;;
+          config)
+            test "${#trace_argv[@]}" -ge 2 || exit 1
+            ;;
+          *) exit 1 ;;
+        esac
+      fi
+      trace_env=""
     done < "$trace_log"
+    test -z "$trace_env" || exit 1
     test "$fetch_seen" -eq 1 || exit 1
+    test "$ls_remote_seen" -eq 1 || exit 1
     # Assert no refs/heads or refs/remotes created
     test -z "$(git -C "$chk_single" for-each-ref refs/heads/ refs/remotes/ 2>/dev/null)" || exit 1
 
@@ -3463,6 +3549,7 @@ config_lock_failure_suppresses_stderr_case() {
     out=$( ( initialize_repository "$chk_lock" ) 2>&1 )
     status=$?
     test "$status" -ne 0 || exit 1
+    test -e "$fail_marker" || exit 1
     assert_contains "$out" "Git operation failed (failed to set origin url)." || exit 1
     ! assert_contains "$out" "fake-git:" || exit 1
     ! assert_contains "$out" "fatal:" || exit 1
