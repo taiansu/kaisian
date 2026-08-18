@@ -3803,25 +3803,43 @@ task5_prefix_collision_case() {
   git -C "$t/checkout" init -q
   git -C "$t/checkout" -c commit.gpgSign=false config user.email test@example.invalid
   git -C "$t/checkout" -c commit.gpgSign=false config user.name test
-  git -C "$t/checkout" add . && git -C "$t/checkout" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm fixture
+  git -C "$t/checkout" add . && git -C "$t/checkout" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm fixture || { /bin/rm -rf "$t"; return 1; }
   printf 'pkg\tq\tq\nnormal\tn\tn\n' > "$t/sandbox/groups.tsv"; printf 'pkg\nnormal\n' > "$t/sandbox/selected.txt"
-  ( export KAISIAN_TESTING=1; . "$SCRIPT"; CHECKOUT_DIR="$t/checkout"; SANDBOX="$t/sandbox"; build_package_map && validate_typed_tree && grep -F -q -e $'file\tpkg\t-q/file' "$SANDBOX/mapping.tsv" )
+  (
+    export KAISIAN_TESTING=1; . "$SCRIPT"; CHECKOUT_DIR="$t/checkout"; SANDBOX="$t/sandbox"
+    build_package_map && validate_typed_tree && \
+      grep -F -q -e $'file\tpkg\t-q/file\t-q/file\t-q/file' "$SANDBOX/mapping.tsv" && \
+      grep -F -q -e $'file\tnormal\tfile\tfile\tfile' "$SANDBOX/mapping.tsv"
+  )
   status=$?; /bin/rm -rf "$t"; return "$status"
 }
-
-
 
 task5_unselected_declared_rejection_case() {
   t=$(mktemp -d "$ROOT/task5-declared.XXXXXX") || return 1
   /bin/mkdir -p "$t/checkout/good" "$t/checkout/bad/dot-config" "$t/sandbox"
+  printf g > "$t/checkout/good/file"; printf x > "$t/checkout/bad/dot-config/x"
   git -C "$t/checkout" init -q
   git -C "$t/checkout" -c commit.gpgSign=false config user.email test@example.invalid
   git -C "$t/checkout" -c commit.gpgSign=false config user.name test
-  git -C "$t/checkout" add . && git -C "$t/checkout" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm fixture
+  git -C "$t/checkout" add . && git -C "$t/checkout" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm baseline || { /bin/rm -rf "$t"; return 1; }
   printf 'good\tgood\tgood\nbad\tbad\tbad\n' > "$t/sandbox/groups.tsv"; printf 'good\n' > "$t/sandbox/selected.txt"
-  ( export KAISIAN_TESTING=1; . "$SCRIPT"; CHECKOUT_DIR="$t/checkout"; SANDBOX="$t/sandbox"; ! build_package_map )
+  (
+    export KAISIAN_TESTING=1; . "$SCRIPT"; CHECKOUT_DIR="$t/checkout"; SANDBOX="$t/sandbox"
+    build_package_map && validate_typed_tree || exit 1
+    test "$(wc -l < "$SANDBOX/mapping.tsv" | tr -d ' ')" = 3 || exit 1
+    test "$(sed -n '1p' "$SANDBOX/mapping.tsv")" = "$(printf 'file\tgood\tfile\tfile\tfile')" || exit 1
+    test "$(sed -n '2p' "$SANDBOX/mapping.tsv")" = "$(printf 'dir\tbad\tdot-config\t.config\t.config')" || exit 1
+    test "$(sed -n '3p' "$SANDBOX/mapping.tsv")" = "$(printf 'file\tbad\tdot-config/x\t.config/x\t.config/x')" || exit 1
+  ) || { /bin/rm -rf "$t"; return 1; }
+  printf h > "$t/checkout/bad/.hidden"
+  git -C "$t/checkout" add . && git -C "$t/checkout" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm invalid || { /bin/rm -rf "$t"; return 1; }
+  (
+    export KAISIAN_TESTING=1; . "$SCRIPT"; CHECKOUT_DIR="$t/checkout"; SANDBOX="$t/sandbox"
+    ! build_package_map && grep -F -q -e $'file\tgood\tfile\tfile\tfile' "$SANDBOX/mapping.tsv"
+  )
   status=$?; /bin/rm -rf "$t"; return "$status"
 }
+
 task5_nonascii_locale_rejection_case() {
   t=$(mktemp -d "$ROOT/task5-locale.XXXXXX") || return 1
   /bin/mkdir -p "$t/sandbox"
@@ -3843,22 +3861,62 @@ task5_all_node_boundary_rejection_case() {
     printf 'pkg\tpkg\tpkg\n' > "$t/sandbox/groups.tsv"; printf 'pkg\n' > "$t/sandbox/selected.txt"
     expect=0
     git -C "$t/checkout" add pkg/dot-config/x
-    git -C "$t/checkout" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm base
+    git -C "$t/checkout" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm base || { /bin/rm -rf "$t"; return 1; }
     case "$kind" in
+      clean) ;;
       empty) mkdir "$t/checkout/pkg/empty"; expect=1 ;;
-      hidden) printf h > "$t/checkout/pkg/.hidden"; expect=1 ;;
-      nonascii) printf n > "$t/checkout/pkg/dot-é"; expect=1 ;;
-      control) bad=$(printf 'bad\001'); printf c > "$t/checkout/pkg/$bad"; expect=1 ;;
-      symlink) ln -s dot-config/x "$t/checkout/pkg/link"; expect=1 ;;
-      nestedgit) mkdir -p "$t/checkout/pkg/nested/.git"; expect=1 ;;
-      gitlink) git -C "$t/checkout" add pkg/dot-config/x; git -C "$t/checkout" update-index --add --cacheinfo 160000,0123456789012345678901234567890123456789,pkg/gitlink; expect=1 ;;
-      untracked) printf u > "$t/checkout/pkg/untracked"; expect=1 ;;
-      ignored) printf 'pkg/ignored\n' > "$t/checkout/.gitignore"; git -C "$t/checkout" add .gitignore; git -C "$t/checkout" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm ignore; printf i > "$t/checkout/pkg/ignored"; expect=1 ;;
+      hidden)
+        printf h > "$t/checkout/pkg/.hidden"
+        git -C "$t/checkout" add -A && git -C "$t/checkout" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm hidden || { /bin/rm -rf "$t"; return 1; }
+        expect=1
+        ;;
+      nonascii)
+        printf n > "$t/checkout/pkg/dot-é"
+        git -C "$t/checkout" add -A && git -C "$t/checkout" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm nonascii || { /bin/rm -rf "$t"; return 1; }
+        expect=1
+        ;;
+      control)
+        bad=$(printf 'bad\001')
+        printf c > "$t/checkout/pkg/$bad"
+        git -C "$t/checkout" add -A && git -C "$t/checkout" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm control || { /bin/rm -rf "$t"; return 1; }
+        expect=1
+        ;;
+      symlink)
+        ln -s dot-config/x "$t/checkout/pkg/link"
+        git -C "$t/checkout" add -A && git -C "$t/checkout" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm symlink || { /bin/rm -rf "$t"; return 1; }
+        expect=1
+        ;;
+      nestedgit)
+        mkdir -p "$t/checkout/pkg/nested/.git"
+        expect=1
+        ;;
+      gitlink)
+        sha=$(git -C "$t/checkout" rev-parse HEAD)
+        mkdir "$t/checkout/pkg/gitlink"
+        git -C "$t/checkout" update-index --add --cacheinfo 160000,"$sha",pkg/gitlink
+        git -C "$t/checkout" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm gitlink || { /bin/rm -rf "$t"; return 1; }
+        expect=1
+        ;;
+      untracked)
+        printf u > "$t/checkout/pkg/untracked"
+        expect=1
+        ;;
+      ignored)
+        printf 'pkg/ignored\n' > "$t/checkout/.gitignore"
+        git -C "$t/checkout" add .gitignore && git -C "$t/checkout" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm ignore || { /bin/rm -rf "$t"; return 1; }
+        printf i > "$t/checkout/pkg/ignored"
+        expect=1
+        ;;
     esac
-    case "$kind" in untracked|ignored|gitlink) ;; *) git -C "$t/checkout" add -A ;; esac
+    case "$kind" in
+      clean|hidden|nonascii|control|symlink|gitlink)
+        test -z "$(git -C "$t/checkout" status --porcelain)" || { /bin/rm -rf "$t"; return 1; }
+        ;;
+    esac
     ( export KAISIAN_TESTING=1; . "$SCRIPT"; CHECKOUT_DIR="$t/checkout"; SANDBOX="$t/sandbox"; build_package_map )
     actual=$?
     test "$actual" -eq "$expect" || { /bin/rm -rf "$t"; return 1; }
+    /bin/rm -rf "$t"
   done
   return 0
 }
