@@ -3807,9 +3807,11 @@ task5_prefix_collision_case() {
   printf 'pkg\tq\tq\nnormal\tn\tn\n' > "$t/sandbox/groups.tsv"; printf 'pkg\nnormal\n' > "$t/sandbox/selected.txt"
   (
     export KAISIAN_TESTING=1; . "$SCRIPT"; CHECKOUT_DIR="$t/checkout"; SANDBOX="$t/sandbox"
-    build_package_map && validate_typed_tree && \
-      grep -F -q -e $'file\tpkg\t-q/file\t-q/file\t-q/file' "$SANDBOX/mapping.tsv" && \
-      grep -F -q -e $'file\tnormal\tfile\tfile\tfile' "$SANDBOX/mapping.tsv"
+    build_package_map && validate_typed_tree || exit 1
+    expected_files=$(printf 'file\tpkg\t-q/file\t-q/file\t-q/file\nfile\tnormal\tfile\tfile\tfile')
+    test "$(grep '^file	' "$SANDBOX/mapping.tsv")" = "$expected_files" || exit 1
+    expected_full=$(printf 'dir\tpkg\t-q\t-q\t-q\nfile\tpkg\t-q/file\t-q/file\t-q/file\nfile\tnormal\tfile\tfile\tfile')
+    test "$(cat "$SANDBOX/mapping.tsv")" = "$expected_full" || exit 1
   )
   status=$?; /bin/rm -rf "$t"; return "$status"
 }
@@ -3892,7 +3894,8 @@ task5_all_node_boundary_rejection_case() {
         ;;
       gitlink)
         sha=$(git -C "$t/checkout" rev-parse HEAD)
-        mkdir "$t/checkout/pkg/gitlink"
+        mkdir -p "$t/checkout/pkg/gitlink"
+        printf g > "$t/checkout/pkg/gitlink/file"
         git -C "$t/checkout" update-index --add --cacheinfo 160000,"$sha",pkg/gitlink
         git -C "$t/checkout" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm gitlink || { /bin/rm -rf "$t"; return 1; }
         expect=1
