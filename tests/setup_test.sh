@@ -4281,9 +4281,9 @@ task5_preflight_overlap_matrix_case() {
   t=$(mktemp -d "$ROOT/task5-preflight-overlap.XXXXXX") || return 1
   chk="$t/checkout/pkg"
   hm="$t/home"
-  sb="$t/sandbox"
-  lk="$t/lock"
-  mkdir -p "$chk/dot-config" "$hm/.config" "$sb" "$lk"
+  sb_base="$t/sandboxes"
+  lk_base="$t/locks"
+  mkdir -p "$chk/dot-config" "$hm/.config" "$sb_base" "$lk_base"
 
   printf 'file\n' > "$chk/dot-config/file"
   GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t/checkout" init -q || { /bin/rm -rf "$t"; return 1; }
@@ -4292,92 +4292,196 @@ task5_preflight_overlap_matrix_case() {
   GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t/checkout" add . || { /bin/rm -rf "$t"; return 1; }
   GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t/checkout" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm fixture || { /bin/rm -rf "$t"; return 1; }
 
-  printf 'pkg\tpkg\tpkg\n' > "$sb/groups.tsv"
-  printf 'pkg\n' > "$sb/selected.txt"
-
   (
     export KAISIAN_TESTING=1
     . "$SCRIPT"
-    CHECKOUT_DIR="$t/checkout"
-    SANDBOX="$sb"
-    LOCK_DIR="$lk"
-    PHYSICAL_HOME="$hm"
-    STATE_ROOT="$hm/.local/state/kaisian"
+    make_valid_sb() {
+      sb_dir=$1
+      mkdir -p "$sb_dir"
+      printf 'pkg\tpkg\tpkg\n' > "$sb_dir/groups.tsv"
+      printf 'file\tpkg\tdot-config/file\t.config/file\t.config/file\n' > "$sb_dir/mapping.tsv"
+      printf 'pkg\n' > "$sb_dir/selected.txt"
+    }
 
-    build_package_map || exit 1
-    validate_typed_tree || exit 1
+    # 1. Target vs Sandbox (equality, ancestor, descendant)
+    target_eq_sb="$hm/.config/file"
+    make_valid_sb "$target_eq_sb"
+    (
+      CHECKOUT_DIR="$t/checkout"
+      SANDBOX="$target_eq_sb"
+      LOCK_DIR="$lk_base/lock1"
+      mkdir -p "$LOCK_DIR"
+      PHYSICAL_HOME="$hm"
+      STATE_ROOT="$hm/.local/state/kaisian"
+      ! preflight_targets
+    ) || exit 1
+    rm -rf "$target_eq_sb"
 
-    # Target overlaps
-    ! ( CHECKOUT_DIR="$hm/.config/file" preflight_targets ) || exit 1
-    ! ( STATE_ROOT="$hm/.config/file" preflight_targets ) || exit 1
-    ! ( LOCK_DIR="$hm/.config/file" preflight_targets ) || exit 1
+    sb_ancestor="$hm/.config"
+    make_valid_sb "$sb_ancestor"
+    (
+      CHECKOUT_DIR="$t/checkout"
+      SANDBOX="$sb_ancestor"
+      LOCK_DIR="$lk_base/lock2"
+      mkdir -p "$LOCK_DIR"
+      PHYSICAL_HOME="$hm"
+      STATE_ROOT="$hm/.local/state/kaisian"
+      ! preflight_targets
+    ) || exit 1
+    rm -rf "$sb_ancestor"
+    mkdir -p "$hm/.config"
 
-    ! ( CHECKOUT_DIR="$hm/.config" preflight_targets ) || exit 1
-    ! ( STATE_ROOT="$hm/.config" preflight_targets ) || exit 1
-    ! ( LOCK_DIR="$hm/.config" preflight_targets ) || exit 1
+    sb_descendant="$hm/.config/file/sub_sb"
+    make_valid_sb "$sb_descendant"
+    (
+      CHECKOUT_DIR="$t/checkout"
+      SANDBOX="$sb_descendant"
+      LOCK_DIR="$lk_base/lock3"
+      mkdir -p "$LOCK_DIR"
+      PHYSICAL_HOME="$hm"
+      STATE_ROOT="$hm/.local/state/kaisian"
+      ! preflight_targets
+    ) || exit 1
+    rm -rf "$hm/.config/file"
 
-    ! ( CHECKOUT_DIR="$hm/.config/file/sub" preflight_targets ) || exit 1
-    ! ( STATE_ROOT="$hm/.config/file/sub" preflight_targets ) || exit 1
-    ! ( LOCK_DIR="$hm/.config/file/sub" preflight_targets ) || exit 1
+    # 2. Checkout vs Sandbox (equality, ancestor, descendant)
+    chk_sb_eq="$t/chk_sb_eq"
+    mkdir -p "$chk_sb_eq/pkg/dot-config"
+    printf 'file\n' > "$chk_sb_eq/pkg/dot-config/file"
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$chk_sb_eq" init -q || exit 1
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$chk_sb_eq" -c commit.gpgSign=false config user.email test@example.invalid || exit 1
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$chk_sb_eq" -c commit.gpgSign=false config user.name test || exit 1
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$chk_sb_eq" add . || exit 1
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$chk_sb_eq" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm fixture || exit 1
+    make_valid_sb "$chk_sb_eq"
+    (
+      CHECKOUT_DIR="$chk_sb_eq"
+      SANDBOX="$chk_sb_eq"
+      LOCK_DIR="$lk_base/lock4"
+      mkdir -p "$LOCK_DIR"
+      PHYSICAL_HOME="$hm"
+      STATE_ROOT="$hm/.local/state/kaisian"
+      ! preflight_targets
+    ) || exit 1
 
-    # Checkout vs State
-    ! ( CHECKOUT_DIR="$STATE_ROOT" preflight_targets ) || exit 1
-    ! ( CHECKOUT_DIR="$STATE_ROOT/sub" preflight_targets ) || exit 1
-    ! ( STATE_ROOT="$CHECKOUT_DIR/sub" preflight_targets ) || exit 1
+    sb_in_chk="$chk_sb_eq/sub_sb"
+    make_valid_sb "$sb_in_chk"
+    (
+      CHECKOUT_DIR="$chk_sb_eq"
+      SANDBOX="$sb_in_chk"
+      LOCK_DIR="$lk_base/lock5"
+      mkdir -p "$LOCK_DIR"
+      PHYSICAL_HOME="$hm"
+      STATE_ROOT="$hm/.local/state/kaisian"
+      ! preflight_targets
+    ) || exit 1
+    rm -rf "$chk_sb_eq"
 
-    # Checkout vs Lock
-    ! ( CHECKOUT_DIR="$LOCK_DIR" preflight_targets ) || exit 1
-    ! ( CHECKOUT_DIR="$LOCK_DIR/sub" preflight_targets ) || exit 1
-    ! ( LOCK_DIR="$CHECKOUT_DIR/sub" preflight_targets ) || exit 1
+    sb_parent="$t/sb_parent"
+    mkdir -p "$sb_parent/checkout_sub/pkg/dot-config"
+    printf 'file\n' > "$sb_parent/checkout_sub/pkg/dot-config/file"
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$sb_parent/checkout_sub" init -q || exit 1
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$sb_parent/checkout_sub" -c commit.gpgSign=false config user.email test@example.invalid || exit 1
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$sb_parent/checkout_sub" -c commit.gpgSign=false config user.name test || exit 1
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$sb_parent/checkout_sub" add . || exit 1
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$sb_parent/checkout_sub" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm fixture || exit 1
+    make_valid_sb "$sb_parent"
+    (
+      CHECKOUT_DIR="$sb_parent/checkout_sub"
+      SANDBOX="$sb_parent"
+      LOCK_DIR="$lk_base/lock6"
+      mkdir -p "$LOCK_DIR"
+      PHYSICAL_HOME="$hm"
+      STATE_ROOT="$hm/.local/state/kaisian"
+      ! preflight_targets
+    ) || exit 1
+    rm -rf "$sb_parent"
+    # 3. State vs Sandbox (equality, ancestor, descendant)
+    normal_sb="$sb_base/normal"
+    make_valid_sb "$normal_sb"
+    (
+      CHECKOUT_DIR="$t/checkout"
+      SANDBOX="$normal_sb"
+      STATE_ROOT="$normal_sb"
+      LOCK_DIR="$lk_base/lock7"
+      mkdir -p "$LOCK_DIR"
+      PHYSICAL_HOME="$hm"
+      ! preflight_targets
+    ) || exit 1
 
-    # State vs Lock
-    ! ( STATE_ROOT="$LOCK_DIR" preflight_targets ) || exit 1
-    ! ( STATE_ROOT="$LOCK_DIR/sub" preflight_targets ) || exit 1
-    ! ( LOCK_DIR="$STATE_ROOT/sub" preflight_targets ) || exit 1
+    sb_in_state="$hm/.local/state/kaisian/sub_sb"
+    make_valid_sb "$sb_in_state"
+    (
+      CHECKOUT_DIR="$t/checkout"
+      SANDBOX="$sb_in_state"
+      STATE_ROOT="$hm/.local/state/kaisian"
+      LOCK_DIR="$lk_base/lock8"
+      mkdir -p "$LOCK_DIR"
+      PHYSICAL_HOME="$hm"
+      ! preflight_targets
+    ) || exit 1
+    rm -rf "$hm/.local/state/kaisian/sub_sb"
 
-    # Root '/' ancestor overlap
-    ! ( CHECKOUT_DIR="/" preflight_targets ) || exit 1
-    ! ( STATE_ROOT="/" preflight_targets ) || exit 1
+    (
+      CHECKOUT_DIR="$t/checkout"
+      SANDBOX="$normal_sb"
+      STATE_ROOT="$normal_sb/sub_state"
+      LOCK_DIR="$lk_base/lock9"
+      mkdir -p "$LOCK_DIR"
+      PHYSICAL_HOME="$hm"
+      ! preflight_targets
+    ) || exit 1
 
-    # Sibling directories pass
-    preflight_targets || exit 1
-  ) || { /bin/rm -rf "$t"; return 1; }
+    # 4. Target vs Checkout/State/Lock and Checkout vs State/Lock and State vs Lock
+    (
+      CHECKOUT_DIR="$t/checkout"
+      SANDBOX="$normal_sb"
+      LOCK_DIR="$lk_base/lock_matrix"
+      mkdir -p "$LOCK_DIR"
+      PHYSICAL_HOME="$hm"
+      STATE_ROOT="$hm/.local/state/kaisian"
 
-  # Dedicated target/sandbox overlap fixture reaching guard while sandbox is an existing valid dir
-  t2=$(mktemp -d "$ROOT/task5-sboverlap.XXXXXX") || { /bin/rm -rf "$t"; return 1; }
-  chk2="$t2/checkout/pkg"
-  hm2="$t2/home"
-  sb2="$hm2/.config"
-  mkdir -p "$chk2/dot-config" "$sb2"
+      build_package_map || exit 1
+      validate_typed_tree || exit 1
 
-  printf 'file\n' > "$chk2/dot-config/file"
-  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t2/checkout" init -q || { /bin/rm -rf "$t" "$t2"; return 1; }
-  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t2/checkout" -c commit.gpgSign=false config user.email test@example.invalid || { /bin/rm -rf "$t" "$t2"; return 1; }
-  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t2/checkout" -c commit.gpgSign=false config user.name test || { /bin/rm -rf "$t" "$t2"; return 1; }
-  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t2/checkout" add . || { /bin/rm -rf "$t" "$t2"; return 1; }
-  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$t2/checkout" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm fixture || { /bin/rm -rf "$t" "$t2"; return 1; }
+      # Target overlaps
+      ! ( CHECKOUT_DIR="$hm/.config/file" preflight_targets ) || exit 1
+      ! ( STATE_ROOT="$hm/.config/file" preflight_targets ) || exit 1
+      ! ( LOCK_DIR="$hm/.config/file" preflight_targets ) || exit 1
 
-  printf 'pkg\tpkg\tpkg\n' > "$sb2/groups.tsv"
-  printf 'pkg\n' > "$sb2/selected.txt"
+      ! ( CHECKOUT_DIR="$hm/.config" preflight_targets ) || exit 1
+      ! ( STATE_ROOT="$hm/.config" preflight_targets ) || exit 1
+      ! ( LOCK_DIR="$hm/.config" preflight_targets ) || exit 1
 
-  (
-    export KAISIAN_TESTING=1
-    . "$SCRIPT"
-    CHECKOUT_DIR="$t2/checkout"
-    SANDBOX="$sb2"
-    PHYSICAL_HOME="$hm2"
-    STATE_ROOT="$hm2/.local/state/kaisian"
+      ! ( CHECKOUT_DIR="$hm/.config/file/sub" preflight_targets ) || exit 1
+      ! ( STATE_ROOT="$hm/.config/file/sub" preflight_targets ) || exit 1
+      ! ( LOCK_DIR="$hm/.config/file/sub" preflight_targets ) || exit 1
 
-    build_package_map || exit 1
-    validate_typed_tree || exit 1
+      # Checkout vs State
+      ! ( CHECKOUT_DIR="$STATE_ROOT" preflight_targets ) || exit 1
+      ! ( CHECKOUT_DIR="$STATE_ROOT/sub" preflight_targets ) || exit 1
+      ! ( STATE_ROOT="$CHECKOUT_DIR/sub" preflight_targets ) || exit 1
 
-    test -d "$SANDBOX" || exit 1
-    test -f "$SANDBOX/mapping.tsv" || exit 1
+      # Checkout vs Lock
+      ! ( CHECKOUT_DIR="$LOCK_DIR" preflight_targets ) || exit 1
+      ! ( CHECKOUT_DIR="$LOCK_DIR/sub" preflight_targets ) || exit 1
+      ! ( LOCK_DIR="$CHECKOUT_DIR/sub" preflight_targets ) || exit 1
 
-    ! preflight_targets
+      # State vs Lock
+      ! ( STATE_ROOT="$LOCK_DIR" preflight_targets ) || exit 1
+      ! ( STATE_ROOT="$LOCK_DIR/sub" preflight_targets ) || exit 1
+      ! ( LOCK_DIR="$STATE_ROOT/sub" preflight_targets ) || exit 1
+
+      # Root '/' ancestor overlap
+      ! ( CHECKOUT_DIR="/" preflight_targets ) || exit 1
+      ! ( STATE_ROOT="/" preflight_targets ) || exit 1
+
+      # Sibling directories pass
+      preflight_targets || exit 1
+    ) || exit 1
   )
   status=$?
-  /bin/rm -rf "$t" "$t2"
+  /bin/rm -rf "$t"
   return "$status"
 }
 
@@ -4428,20 +4532,23 @@ task5_preflight_cross_device_case() {
     test -s "$sb/conflicts.tsv" || exit 1
     test "$(wc -l < "$sb/conflicts.tsv" | tr -d ' ')" = 4 || exit 1
 
-    # 2. Mock stat: .zshrc, .gitconfig, and .broken match, but later conflict (.config/app/config) mismatches
+    # 2. Mock stat logs every stat_dev input and assigns mismatch specifically to the later conflict backup ancestor
     mock_bin="$t/mock_bin"
     mkdir -p "$mock_bin"
-    cat << 'MOCK' > "$mock_bin/stat"
+    stat_log="$t/stat_trace.log"
+    : > "$stat_log"
+    nearest_backup_ancestor="$hm/.local/state"
+
+    cat << MOCK > "$mock_bin/stat"
 #!/bin/bash
-target_path="${3:-}"
-case "$target_path" in
-  *app/config*)
-    printf '99999\n'
-    ;;
-  *)
-    /usr/bin/stat "$@"
-    ;;
-esac
+target_path="\${3:-}"
+printf '%s\n' "\$target_path" >> "$stat_log"
+
+if test "\$target_path" = "$nearest_backup_ancestor" && grep -Fxq "$hm/.config/app/config" "$stat_log"; then
+  printf '99999\n'
+else
+  /usr/bin/stat "\$@"
+fi
 MOCK
     chmod +x "$mock_bin/stat"
 
@@ -4449,6 +4556,14 @@ MOCK
       KAISIAN_STAT_EXEC="$mock_bin/stat"
       ! preflight_targets
     ) || exit 1
+
+    # Assert exact expected source and backup ancestor call sequence for all conflicts up to failure
+    expected_trace=$(printf '%s\n%s\n%s\n%s\n' \
+      "$hm/.broken" \
+      "$nearest_backup_ancestor" \
+      "$hm/.config/app/config" \
+      "$nearest_backup_ancestor")
+    test "$(cat "$stat_log")" = "$expected_trace" || exit 1
 
     # Assert non-mutation on all 4 target files
     test -f "$hm/.zshrc" || exit 1
