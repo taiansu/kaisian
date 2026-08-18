@@ -1,7 +1,7 @@
 #!/bin/bash
 set -u
 
-# Ensure trace log directory exists and log command
+# Ensure trace log directory exists and log command with environment
 trace_log="${KAISIAN_GIT_TRACE_LOG:-}"
 if test -z "$trace_log"; then
   if test -d "tests/tmp"; then
@@ -12,7 +12,7 @@ if test -z "$trace_log"; then
 fi
 
 if test -n "$trace_log"; then
-  /bin/mkdir -p "$(dirname "$trace_log")" 2>/dev/null || true
+  /bin/mkdir -p "$(/usr/bin/dirname "$trace_log")" 2>/dev/null || true
   printf 'git' >> "$trace_log"
   for arg in "$@"; do
     printf ' %s' "$arg" >> "$trace_log"
@@ -25,8 +25,9 @@ if test "${GIT_CONFIG_NOSYSTEM-}" != "1" || \
    test "${GIT_NO_REPLACE_OBJECTS-}" != "1" || \
    test "${GIT_ATTR_NOSYSTEM-}" != "1" || \
    test "${GIT_TERMINAL_PROMPT-}" != "0" || \
-   test "${GIT_ASKPASS-}" != "/usr/bin/false"; then
-  if test "${KAISIAN_TESTING_STRICT_ENV-0}" = "1"; then
+   test "${GIT_ASKPASS-}" != "/usr/bin/false" || \
+   test "${GIT_ALLOW_PROTOCOL-}" != "https"; then
+  if test "${KAISIAN_TESTING_STRICT_ENV-1}" = "1"; then
     printf 'fake-git: missing sanitized environment variables\n' >&2
     exit 1
   fi
@@ -39,6 +40,7 @@ dir_opt=""
 while test $# -gt 0; do
   case "$1" in
     -C)
+      test $# -ge 2 || { printf 'fake-git: -C requires argument\n' >&2; exit 1; }
       dir_opt="$2"
       shift 2
       ;;
@@ -77,6 +79,7 @@ case "$subcmd" in
     shift
     target_url=""
     ls_opts=()
+    extra_args=()
     while test $# -gt 0; do
       case "$1" in
         -*)
@@ -84,7 +87,11 @@ case "$subcmd" in
           shift
           ;;
         *)
-          target_url="$1"
+          if test -z "$target_url"; then
+            target_url="$1"
+          else
+            extra_args=("${extra_args[@]+"${extra_args[@]}"}" "$1")
+          fi
           shift
           ;;
       esac
@@ -96,18 +103,18 @@ case "$subcmd" in
     case "$target_url" in
       https://*)
         if local_target=$(lookup_remote "$target_url"); then
+          forward_args=()
+          if test "${#ls_opts[@]}" -gt 0; then
+            forward_args=("${forward_args[@]+"${forward_args[@]}"}" "${ls_opts[@]}")
+          fi
+          forward_args=("${forward_args[@]+"${forward_args[@]}"}" "$local_target")
+          if test "${#extra_args[@]}" -gt 0; then
+            forward_args=("${forward_args[@]+"${forward_args[@]}"}" "${extra_args[@]}")
+          fi
           if test -n "$dir_opt"; then
-            if test "${#ls_opts[@]}" -gt 0; then
-              exec env GIT_ALLOW_PROTOCOL=file "$REAL_GIT" -C "$dir_opt" ls-remote "${ls_opts[@]}" "$local_target"
-            else
-              exec env GIT_ALLOW_PROTOCOL=file "$REAL_GIT" -C "$dir_opt" ls-remote "$local_target"
-            fi
+            exec env GIT_ALLOW_PROTOCOL=file "$REAL_GIT" -C "$dir_opt" ls-remote "${forward_args[@]}"
           else
-            if test "${#ls_opts[@]}" -gt 0; then
-              exec env GIT_ALLOW_PROTOCOL=file "$REAL_GIT" ls-remote "${ls_opts[@]}" "$local_target"
-            else
-              exec env GIT_ALLOW_PROTOCOL=file "$REAL_GIT" ls-remote "$local_target"
-            fi
+            exec env GIT_ALLOW_PROTOCOL=file "$REAL_GIT" ls-remote "${forward_args[@]}"
           fi
         else
           printf 'fatal: unable to access '\''%s\'\'': Could not resolve host: %s\n' "$target_url" "${target_url#https://}" >&2
@@ -124,11 +131,12 @@ case "$subcmd" in
     shift
     fetch_opts=()
     target_url=""
-    target_ref=""
+    target_refs=()
     while test $# -gt 0; do
       case "$1" in
         --no-tags|--depth=*|--depth)
           if test "$1" = "--depth"; then
+            test $# -ge 2 || { printf 'fake-git: --depth requires argument\n' >&2; exit 1; }
             fetch_opts=("${fetch_opts[@]+"${fetch_opts[@]}"}" "$1" "$2")
             shift 2
           else
@@ -144,7 +152,7 @@ case "$subcmd" in
           if test -z "$target_url"; then
             target_url="$1"
           else
-            target_ref="$1"
+            target_refs=("${target_refs[@]+"${target_refs[@]}"}" "$1")
           fi
           shift
           ;;
@@ -157,18 +165,18 @@ case "$subcmd" in
     case "$target_url" in
       https://*)
         if local_target=$(lookup_remote "$target_url"); then
+          forward_args=()
+          if test "${#fetch_opts[@]}" -gt 0; then
+            forward_args=("${forward_args[@]+"${forward_args[@]}"}" "${fetch_opts[@]}")
+          fi
+          forward_args=("${forward_args[@]+"${forward_args[@]}"}" "$local_target")
+          if test "${#target_refs[@]}" -gt 0; then
+            forward_args=("${forward_args[@]+"${forward_args[@]}"}" "${target_refs[@]}")
+          fi
           if test -n "$dir_opt"; then
-            if test "${#fetch_opts[@]}" -gt 0; then
-              exec env GIT_ALLOW_PROTOCOL=file "$REAL_GIT" -C "$dir_opt" fetch "${fetch_opts[@]}" "$local_target" ${target_ref:+"$target_ref"}
-            else
-              exec env GIT_ALLOW_PROTOCOL=file "$REAL_GIT" -C "$dir_opt" fetch "$local_target" ${target_ref:+"$target_ref"}
-            fi
+            exec env GIT_ALLOW_PROTOCOL=file "$REAL_GIT" -C "$dir_opt" fetch "${forward_args[@]}"
           else
-            if test "${#fetch_opts[@]}" -gt 0; then
-              exec env GIT_ALLOW_PROTOCOL=file "$REAL_GIT" fetch "${fetch_opts[@]}" "$local_target" ${target_ref:+"$target_ref"}
-            else
-              exec env GIT_ALLOW_PROTOCOL=file "$REAL_GIT" fetch "$local_target" ${target_ref:+"$target_ref"}
-            fi
+            exec env GIT_ALLOW_PROTOCOL=file "$REAL_GIT" fetch "${forward_args[@]}"
           fi
         else
           printf 'fatal: unable to access '\''%s\'\'': Could not resolve host: %s\n' "$target_url" "${target_url#https://}" >&2

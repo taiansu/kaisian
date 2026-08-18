@@ -410,8 +410,8 @@ validate_home() {
 
   test -r "$raw_home" && test -w "$raw_home" && test -x "$raw_home" || die invalid_home "$raw_home"
 
-  owner_uid=$(/usr/bin/stat -f '%u' "$raw_home" 2>/dev/null || stat -f '%u' "$raw_home" 2>/dev/null) || die invalid_home "$raw_home"
-  curr_uid=$(/usr/bin/id -u 2>/dev/null || id -u) || die invalid_home "$raw_home"
+  owner_uid=$(/usr/bin/stat -f '%u' "$raw_home" 2>/dev/null) || die invalid_home "$raw_home"
+  curr_uid=$(/usr/bin/id -u 2>/dev/null) || die invalid_home "$raw_home"
   test "$owner_uid" = "$curr_uid" || die invalid_home "$raw_home"
 
   PHYSICAL_HOME="$physical"
@@ -537,7 +537,7 @@ on_signal() {
 }
 
 acquire_lock() {
-  curr_uid=$(/usr/bin/id -u 2>/dev/null || id -u)
+  curr_uid=$(/usr/bin/id -u 2>/dev/null) || die lock_failed "$LOCK_DIR"
   LOCK_DIR="/private/tmp/kaisian-$curr_uid.lock"
 
   test -d '/private/tmp' || die lock_failed "$LOCK_DIR"
@@ -1056,9 +1056,20 @@ EOF
   fi
 
   if test "$is_40_hex" -eq 1; then
-    RESOLVED_FETCH_REF="$REQUESTED_REF"
-    EXPECTED_COMMIT_SHA="$REQUESTED_REF"
-    return 0
+    advertised_sha=''
+    while IFS="$(printf '\t')" read -r sha refname || test -n "$sha"; do
+      if test "$sha" = "$REQUESTED_REF"; then
+        advertised_sha="$sha"
+        break
+      fi
+    done << EOF
+$ls_output
+EOF
+    if test -n "$advertised_sha"; then
+      RESOLVED_FETCH_REF="$REQUESTED_REF"
+      EXPECTED_COMMIT_SHA="$REQUESTED_REF"
+      return 0
+    fi
   fi
 
   die ref_not_found "$REQUESTED_REF"
@@ -1066,7 +1077,7 @@ EOF
 
 validate_git_admin() {
   local chk_dir=${1:-$CHECKOUT_DIR}
-  local is_bare git_dir canon_chk canon_git_dir common_dir canon_common p op replace_loose
+  local is_bare git_dir canon_chk canon_git_dir common_dir canon_common op replace_loose hook_f symlink_f
   test -n "$chk_dir" || die invalid_git_admin 'checkout directory path required'
   test -d "$chk_dir" || die invalid_git_admin "not a directory: $chk_dir"
   test ! -L "$chk_dir" || die invalid_git_admin "checkout directory is a symlink: $chk_dir"
@@ -1090,11 +1101,19 @@ validate_git_admin() {
   esac
   canon_common=$(canonicalize_path "$common_dir") || die invalid_git_admin "$chk_dir"
   test "$canon_common" = "$canon_chk/.git" || die invalid_git_admin "common dir mismatch: $canon_common"
-  for p in "$chk_dir/.git/objects" "$chk_dir/.git/refs" "$chk_dir/.git/refs/heads" "$chk_dir/.git/refs/tags" "$chk_dir/.git/refs/remotes" "$chk_dir/.git/logs" "$chk_dir/.git/config" "$chk_dir/.git/index" "$chk_dir/.git/HEAD" "$chk_dir/.git/hooks" "$chk_dir/.git/info"; do
-    if test -L "$p"; then
-      die invalid_git_admin "administrative symlink detected: $p"
-    fi
-  done
+
+  symlink_f=$(/usr/bin/find "$chk_dir/.git" -type l 2>/dev/null || true)
+  test -z "$symlink_f" || die invalid_git_admin "administrative symlink detected: $symlink_f"
+
+  if test -d "$chk_dir/.git/hooks"; then
+    for hook_f in "$chk_dir/.git/hooks"/*; do
+      test -e "$hook_f" || continue
+      case "$hook_f" in
+        *.sample) ;;
+        *) die invalid_git_admin "active git hook detected: $hook_f" ;;
+      esac
+    done
+  fi
 
   for op in MERGE_HEAD MERGE_MSG MERGE_MODE rebase-apply rebase-merge CHERRY_PICK_HEAD REVERT_HEAD BISECT_LOG sequencer AUTO_MERGE; do
     if test -e "$chk_dir/.git/$op"; then
@@ -1103,7 +1122,7 @@ validate_git_admin() {
   done
 
   if test -d "$chk_dir/.git/refs/replace"; then
-    replace_loose=$(ls -A "$chk_dir/.git/refs/replace" 2>/dev/null || true)
+    replace_loose=$(/bin/ls -A "$chk_dir/.git/refs/replace" 2>/dev/null || true)
     test -z "$replace_loose" || die invalid_git_admin 'refs/replace ref detected'
   fi
   if test -f "$chk_dir/.git/packed-refs"; then
@@ -1121,6 +1140,7 @@ validate_git_config() {
   local chk_dir=${1:-$CHECKOUT_DIR}
   local expected_url=${2:-$CANONICAL_REPO}
   local cfg_list key val norm_key canon_val
+  local origin_url_count=0 origin_fetch_count=0
   test -n "$chk_dir" || die invalid_git_config 'checkout directory required'
 
   cfg_list=$(run_git -C "$chk_dir" config --local --list 2>/dev/null) || die invalid_git_config 'failed to read local git config'
@@ -1145,14 +1165,22 @@ validate_git_config() {
           *) die invalid_git_config "$key=$val" ;;
         esac
         ;;
+      core.symlinks)
+        test "$val" = 'true' || die invalid_git_config "$key=$val"
+        ;;
+      core.protecthfs|core.protectntfs)
+        test "$val" = 'true' || die invalid_git_config "$key=$val"
+        ;;
       remote.origin.url)
         if test -n "$expected_url"; then
           canon_val=$(canonicalize_repository "$val" 2>/dev/null) || die invalid_git_config "$key=$val"
           test "$canon_val" = "$expected_url" || die invalid_git_config "$key=$val"
+          origin_url_count=$((origin_url_count + 1))
         fi
         ;;
       remote.origin.fetch)
         test "$val" = '+refs/heads/*:refs/remotes/origin/*' || die invalid_git_config "$key=$val"
+        origin_fetch_count=$((origin_fetch_count + 1))
         ;;
       branch.*.remote)
         test "$val" = 'origin' || die invalid_git_config "$key=$val"
@@ -1185,12 +1213,21 @@ validate_git_config() {
   done << EOF
 $cfg_list
 EOF
+
+  if test -n "$expected_url"; then
+    test "$origin_url_count" -eq 1 || die invalid_git_config "expected exactly one remote.origin.url entry (found $origin_url_count)"
+    test "$origin_fetch_count" -eq 1 || die invalid_git_config "expected exactly one remote.origin.fetch entry (found $origin_fetch_count)"
+  fi
+
   return 0
 }
+
 verify_clean_tree() {
   local chk_dir=${1:-$CHECKOUT_DIR}
   local fresh_idx porcelain_out
+  local meta filepath mode entry_type obj_sha actual_sha actual_link expected_link sub_dir sub_head
   test -n "$chk_dir" || die dirty_checkout
+
   run_git -C "$chk_dir" diff-index --quiet HEAD -- 2>/dev/null || die dirty_checkout
 
   test -n "$SANDBOX" || die lock_failed 'sandbox not initialized'
@@ -1208,22 +1245,62 @@ verify_clean_tree() {
   }
   /bin/rm -f "$fresh_idx" 2>/dev/null || true
 
+  while IFS="$(printf '\t')" read -r meta filepath || test -n "$meta"; do
+    test -n "$meta" || continue
+    mode=$(printf '%s' "$meta" | /usr/bin/awk '{print $1}')
+    entry_type=$(printf '%s' "$meta" | /usr/bin/awk '{print $2}')
+    obj_sha=$(printf '%s' "$meta" | /usr/bin/awk '{print $3}')
+
+    case "$entry_type" in
+      blob)
+        if test "$mode" = '120000'; then
+          test -L "$chk_dir/$filepath" || die dirty_checkout
+          actual_link=$(/usr/bin/readlink "$chk_dir/$filepath" 2>/dev/null || true)
+          expected_link=$(run_git -C "$chk_dir" cat-file blob "$obj_sha" 2>/dev/null || true)
+          test "$actual_link" = "$expected_link" || die dirty_checkout
+        else
+          test -f "$chk_dir/$filepath" && test ! -L "$chk_dir/$filepath" || die dirty_checkout
+          if test "$mode" = '100755'; then
+            test -x "$chk_dir/$filepath" || die dirty_checkout
+          fi
+          actual_sha=$(run_git -C "$chk_dir" hash-object "$chk_dir/$filepath" 2>/dev/null || true)
+          test "$actual_sha" = "$obj_sha" || die dirty_checkout
+        fi
+        ;;
+      commit)
+        sub_dir="$chk_dir/$filepath"
+        test -d "$sub_dir/.git" || die dirty_checkout
+        sub_head=$(run_git -C "$sub_dir" rev-parse HEAD 2>/dev/null || true)
+        test "$sub_head" = "$obj_sha" || die dirty_checkout
+        ;;
+    esac
+  done << EOF
+$(run_git -C "$chk_dir" ls-tree -r HEAD 2>/dev/null)
+EOF
+
   porcelain_out=$(run_git -C "$chk_dir" status --porcelain=v1 --untracked-files=all --ignored=matching --ignore-submodules=none 2>/dev/null) || die dirty_checkout
   test -z "$porcelain_out" || die dirty_checkout
 
   return 0
 }
-initialize_submodules() {
-  local chk_dir=${1:-$CHECKOUT_DIR}
-  local subm_file subm_list subm_names key val sname seen_paths spath surl supdate canon_surl tree_entry entry_mode entry_type entry_sha child_dir child_fetched_sha
+
+validate_submodules_spec() {
+  local chk_dir=$1
+  local commit_sha=$2
+  local subm_file subm_list subm_names sname key val
+  local spath surl supdate canon_surl tree_entry entry_mode entry_type entry_sha
+  local manifest_file manifest_groups g_count g_idx g_name first_comp seen_paths seen_p plutil_bin
+
   test -n "$chk_dir" || return 0
-  run_git -C "$chk_dir" cat-file -e "HEAD:.gitmodules" 2>/dev/null || return 0
+  test -n "$commit_sha" || return 0
+
+  run_git -C "$chk_dir" cat-file -e "${commit_sha}:.gitmodules" 2>/dev/null || return 0
 
   test -n "$SANDBOX" || die lock_failed 'sandbox not initialized'
-  subm_file="$SANDBOX/gitmodules-$$"
-  run_git -C "$chk_dir" cat-file blob "HEAD:.gitmodules" > "$subm_file" 2>/dev/null || {
+  subm_file="$SANDBOX/gitmodules-spec-$$"
+  run_git -C "$chk_dir" cat-file blob "${commit_sha}:.gitmodules" > "$subm_file" 2>/dev/null || {
     /bin/rm -f "$subm_file" 2>/dev/null || true
-    die invalid_submodule 'failed to extract .gitmodules'
+    die invalid_submodule 'failed to extract .gitmodules from commit'
   }
 
   subm_list=$(run_git config --file "$subm_file" --list 2>/dev/null) || {
@@ -1231,6 +1308,31 @@ initialize_submodules() {
     die invalid_submodule 'failed to parse .gitmodules'
   }
   /bin/rm -f "$subm_file" 2>/dev/null || true
+
+  manifest_groups=''
+  if run_git -C "$chk_dir" cat-file -e "${commit_sha}:.kaisian.json" 2>/dev/null; then
+    manifest_file="$SANDBOX/manifest-spec-$$"
+    run_git -C "$chk_dir" cat-file blob "${commit_sha}:.kaisian.json" > "$manifest_file" 2>/dev/null || true
+    if test -f "$manifest_file"; then
+      if test "${KAISIAN_TESTING-0}" = '1'; then
+        plutil_bin="${KAISIAN_PLUTIL_EXEC:-${PLUTIL_EXEC:-/usr/bin/plutil}}"
+      else
+        plutil_bin="${PLUTIL_EXEC:-/usr/bin/plutil}"
+      fi
+      if "$plutil_bin" -convert json -o /dev/null -- "$manifest_file" 2>/dev/null; then
+        g_count=$("$plutil_bin" -extract groups raw "$manifest_file" 2>/dev/null || echo 0)
+        g_idx=0
+        while test "$g_idx" -lt "$g_count"; do
+          g_name=$("$plutil_bin" -extract "groups.$g_idx.name" raw "$manifest_file" 2>/dev/null || true)
+          if test -n "$g_name"; then
+            manifest_groups="$manifest_groups $g_name "
+          fi
+          g_idx=$((g_idx + 1))
+        done
+      fi
+      /bin/rm -f "$manifest_file" 2>/dev/null || true
+    fi
+  fi
 
   subm_names=''
   while IFS='=' read -r key val || test -n "$key"; do
@@ -1280,59 +1382,136 @@ EOF
         ;;
     esac
 
-    case "$spath" in
-      .*) ;;
-      *)
-        die invalid_submodule "submodule root inside selectable package: $spath"
-        ;;
-    esac
+    first_comp=${spath%%/*}
+    if test -n "$manifest_groups"; then
+      case "$manifest_groups" in
+        *" $first_comp "*)
+          die invalid_submodule "submodule root inside selectable package: $spath"
+          ;;
+      esac
+    fi
 
-    case "$seen_paths" in
-      *" $spath "*) die invalid_submodule "duplicate submodule path: $spath" ;;
-    esac
-    seen_paths="$seen_paths $spath "
+    for seen_p in $seen_paths; do
+      if test "$seen_p" = "$spath"; then
+        die invalid_submodule "duplicate submodule path: $spath"
+      fi
+      case "$spath" in
+        "$seen_p"/*) die invalid_submodule "overlapping submodule paths: '$seen_p' and '$spath'" ;;
+      esac
+      case "$seen_p" in
+        "$spath"/*) die invalid_submodule "overlapping submodule paths: '$seen_p' and '$spath'" ;;
+      esac
+    done
+    seen_paths="$seen_paths $spath"
 
     canon_surl=$(canonicalize_repository "$surl") || die invalid_submodule "invalid submodule url: $surl"
 
-    tree_entry=$(run_git -C "$chk_dir" ls-tree HEAD "$spath" 2>/dev/null)
-    test -n "$tree_entry" || die invalid_submodule "submodule path not found in HEAD tree: $spath"
+    tree_entry=$(run_git -C "$chk_dir" ls-tree "$commit_sha" "$spath" 2>/dev/null || true)
+    test -n "$tree_entry" || die invalid_submodule "submodule path not found in commit tree: $spath"
 
-    entry_mode=$(printf '%s' "$tree_entry" | awk '{print $1}')
-    entry_type=$(printf '%s' "$tree_entry" | awk '{print $2}')
-    entry_sha=$(printf '%s' "$tree_entry" | awk '{print $3}')
+    entry_mode=$(printf '%s' "$tree_entry" | /usr/bin/awk '{print $1}')
+    entry_type=$(printf '%s' "$tree_entry" | /usr/bin/awk '{print $2}')
+    entry_sha=$(printf '%s' "$tree_entry" | /usr/bin/awk '{print $3}')
 
     test "$entry_mode" = '160000' || die invalid_submodule "not a gitlink: $spath ($entry_mode)"
     test "$entry_type" = 'commit' || die invalid_submodule "not a commit object: $spath ($entry_type)"
     test -n "$entry_sha" || die invalid_submodule "missing commit SHA for gitlink: $spath"
-
-    child_dir="$chk_dir/$spath"
-    if test ! -d "$child_dir/.git"; then
-      /bin/mkdir -p "$child_dir" 2>/dev/null || true
-      run_git init "$child_dir" 2>/dev/null || die submodule_failed "$sname"
-    fi
-
-    validate_git_admin "$child_dir" || die submodule_failed "$sname"
-    run_git -C "$child_dir" config --local remote.origin.url "$canon_surl" || die submodule_failed "$sname"
-    run_git -C "$child_dir" config --local remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*" || die submodule_failed "$sname"
-
-    run_git -C "$child_dir" fetch --no-tags --depth=1 "$canon_surl" "$entry_sha" 2>/dev/null || die submodule_failed "$sname"
-    child_fetched_sha=$(run_git -C "$child_dir" rev-parse --verify "FETCH_HEAD^{commit}" 2>/dev/null) || die submodule_failed "$sname"
-    test "$child_fetched_sha" = "$entry_sha" || die submodule_failed "$sname"
-
-    run_git -C "$child_dir" checkout --detach "$entry_sha" -- 2>/dev/null || die submodule_failed "$sname"
-
-    validate_git_config "$child_dir" "$canon_surl" || die submodule_failed "$sname"
-    validate_git_admin "$child_dir" || die submodule_failed "$sname"
-    verify_clean_tree "$child_dir" || die submodule_failed "$sname"
-
-    initialize_submodules "$child_dir" || die submodule_failed "$sname"
   done
   return 0
 }
+
+initialize_submodules() {
+  local chk_dir=${1:-$CHECKOUT_DIR}
+  local subm_file subm_list subm_names key val sname spath surl supdate canon_surl
+  local tree_entry entry_sha child_dir child_head child_fetched_sha
+  test -n "$chk_dir" || return 0
+
+  run_git -C "$chk_dir" cat-file -e "HEAD:.gitmodules" 2>/dev/null || return 0
+
+  test -n "$SANDBOX" || die lock_failed 'sandbox not initialized'
+  subm_file="$SANDBOX/gitmodules-$$"
+  run_git -C "$chk_dir" cat-file blob "HEAD:.gitmodules" > "$subm_file" 2>/dev/null || {
+    /bin/rm -f "$subm_file" 2>/dev/null || true
+    die invalid_submodule 'failed to extract .gitmodules'
+  }
+
+  subm_list=$(run_git config --file "$subm_file" --list 2>/dev/null) || {
+    /bin/rm -f "$subm_file" 2>/dev/null || true
+    die invalid_submodule 'failed to parse .gitmodules'
+  }
+  /bin/rm -f "$subm_file" 2>/dev/null || true
+
+  subm_names=''
+  while IFS='=' read -r key val || test -n "$key"; do
+    case "$key" in
+      submodule.*.path)
+        sname=${key#submodule.}
+        sname=${sname%.path}
+        subm_names="$subm_names $sname"
+        ;;
+    esac
+  done << EOF
+$subm_list
+EOF
+
+  for sname in $subm_names; do
+    test -n "$sname" || continue
+
+    spath=''
+    surl=''
+    while IFS='=' read -r key val || test -n "$key"; do
+      case "$key" in
+        submodule."$sname".path) spath="$val" ;;
+        submodule."$sname".url) surl="$val" ;;
+      esac
+    done << EOF
+$subm_list
+EOF
+
+    canon_surl=$(canonicalize_repository "$surl") || die invalid_submodule "invalid submodule url: $surl"
+
+    tree_entry=$(run_git -C "$chk_dir" ls-tree HEAD "$spath" 2>/dev/null || true)
+    entry_sha=$(printf '%s' "$tree_entry" | /usr/bin/awk '{print $3}')
+
+    child_dir="$chk_dir/$spath"
+    if test -d "$child_dir/.git"; then
+      validate_git_admin "$child_dir" || die submodule_failed "$sname"
+      validate_git_config "$child_dir" "$canon_surl" || die submodule_failed "$sname"
+
+      child_head=$(run_git -C "$child_dir" rev-parse HEAD 2>/dev/null || true)
+      if test "$child_head" != "$entry_sha"; then
+        run_git -C "$child_dir" fetch --no-tags --depth=1 "$canon_surl" "$entry_sha" 2>/dev/null || die submodule_failed "$sname"
+        run_git -C "$child_dir" checkout --detach "$entry_sha" -- 2>/dev/null || die submodule_failed "$sname"
+        validate_git_admin "$child_dir" || die submodule_failed "$sname"
+        validate_git_config "$child_dir" "$canon_surl" || die submodule_failed "$sname"
+      fi
+    else
+      /bin/mkdir -p "$child_dir" 2>/dev/null || true
+      run_git init "$child_dir" >/dev/null 2>&1 || die submodule_failed "$sname"
+      validate_git_admin "$child_dir" || die submodule_failed "$sname"
+      run_git -C "$child_dir" config --local remote.origin.url "$canon_surl" || die submodule_failed "$sname"
+      run_git -C "$child_dir" config --local remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*" || die submodule_failed "$sname"
+
+      run_git -C "$child_dir" fetch --no-tags --depth=1 "$canon_surl" "$entry_sha" >/dev/null 2>&1 || die submodule_failed "$sname"
+      child_fetched_sha=$(run_git -C "$child_dir" rev-parse --verify "FETCH_HEAD^{commit}" 2>/dev/null) || die submodule_failed "$sname"
+      test "$child_fetched_sha" = "$entry_sha" || die submodule_failed "$sname"
+
+      run_git -C "$child_dir" checkout --detach "$entry_sha" -- >/dev/null 2>&1 || die submodule_failed "$sname"
+      validate_git_config "$child_dir" "$canon_surl" || die submodule_failed "$sname"
+      validate_git_admin "$child_dir" || die submodule_failed "$sname"
+    fi
+
+    initialize_submodules "$child_dir" || die submodule_failed "$sname"
+    verify_clean_tree "$child_dir" || die submodule_failed "$sname"
+  done
+  return 0
+}
+
 initialize_repository() {
   local chk_dir=${1:-$CHECKOUT_DIR}
   local chk_parent
   test -n "$chk_dir" || die git_operation_failed 'checkout directory required'
+
   case "$chk_dir" in
     /*) ;;
     *) die git_operation_failed "checkout directory must be absolute: $chk_dir" ;;
@@ -1343,14 +1522,14 @@ initialize_repository() {
   test -n "$CANONICAL_REPO" || die invalid_repository 'canonical repository not set'
   test -n "$RESOLVED_FETCH_REF" || die invalid_ref 'fetch ref not resolved'
 
-  chk_parent=$(dirname "$chk_dir")
+  chk_parent=$(/usr/bin/dirname "$chk_dir")
   test -d "$chk_parent" || /bin/mkdir -p "$chk_parent" 2>/dev/null || die git_operation_failed "failed to create $chk_parent"
 
-  run_git init "$chk_dir" 2>/dev/null || die git_operation_failed 'git init failed'
+  run_git init "$chk_dir" >/dev/null 2>&1 || die git_operation_failed 'git init failed'
   run_git -C "$chk_dir" config --local remote.origin.url "$CANONICAL_REPO" || die git_operation_failed 'failed to set origin url'
   run_git -C "$chk_dir" config --local remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*" || die git_operation_failed 'failed to set origin fetch'
 
-  run_git -C "$chk_dir" fetch --no-tags --depth=1 "$CANONICAL_REPO" "$RESOLVED_FETCH_REF" 2>/dev/null || die git_operation_failed 'git fetch failed'
+  run_git -C "$chk_dir" fetch --no-tags --depth=1 "$CANONICAL_REPO" "$RESOLVED_FETCH_REF" >/dev/null 2>&1 || die git_operation_failed 'git fetch failed'
 
   RESOLVED_COMMIT=$(run_git -C "$chk_dir" rev-parse --verify "FETCH_HEAD^{commit}" 2>/dev/null) || die git_operation_failed 'failed to peel FETCH_HEAD'
 
@@ -1360,10 +1539,12 @@ initialize_repository() {
     fi
   fi
 
+  validate_submodules_spec "$chk_dir" "$RESOLVED_COMMIT"
+
   validate_git_admin "$chk_dir"
   validate_git_config "$chk_dir"
 
-  run_git -C "$chk_dir" checkout --detach "$RESOLVED_COMMIT" -- 2>/dev/null || die git_operation_failed 'git checkout failed'
+  run_git -C "$chk_dir" checkout --detach "$RESOLVED_COMMIT" -- >/dev/null 2>&1 || die git_operation_failed 'git checkout failed'
 
   initialize_submodules "$chk_dir"
 
@@ -1373,9 +1554,16 @@ initialize_repository() {
 
   return 0
 }
+
 update_repository() {
   local chk_dir=${1:-$CHECKOUT_DIR}
   test -n "$chk_dir" || die git_operation_failed 'checkout directory required'
+
+  case "$chk_dir" in
+    /*) ;;
+    *) die git_operation_failed "checkout directory must be absolute: $chk_dir" ;;
+  esac
+
   check_path_overlap_with_lock "$chk_dir"
 
   validate_git_admin "$chk_dir"
@@ -1385,7 +1573,7 @@ update_repository() {
   test -n "$CANONICAL_REPO" || die invalid_repository 'canonical repository not set'
   test -n "$RESOLVED_FETCH_REF" || die invalid_ref 'fetch ref not resolved'
 
-  run_git -C "$chk_dir" fetch --no-tags --depth=1 "$CANONICAL_REPO" "$RESOLVED_FETCH_REF" 2>/dev/null || die git_operation_failed 'git fetch failed'
+  run_git -C "$chk_dir" fetch --no-tags --depth=1 "$CANONICAL_REPO" "$RESOLVED_FETCH_REF" >/dev/null 2>&1 || die git_operation_failed 'git fetch failed'
 
   RESOLVED_COMMIT=$(run_git -C "$chk_dir" rev-parse --verify "FETCH_HEAD^{commit}" 2>/dev/null) || die git_operation_failed 'failed to peel FETCH_HEAD'
 
@@ -1395,8 +1583,8 @@ update_repository() {
     fi
   fi
 
-  run_git -C "$chk_dir" checkout --detach "$RESOLVED_COMMIT" -- 2>/dev/null || die git_operation_failed 'git checkout failed'
-
+  validate_submodules_spec "$chk_dir" "$RESOLVED_COMMIT"
+  run_git -C "$chk_dir" checkout --detach "$RESOLVED_COMMIT" -- >/dev/null 2>&1 || die git_operation_failed 'git checkout failed'
   initialize_submodules "$chk_dir"
 
   validate_git_admin "$chk_dir"
@@ -1462,7 +1650,7 @@ parse_manifest() {
 
   wrapper_xml="$SANDBOX/manifest_wrapper.xml"
   "$plutil_bin" -create xml1 "$wrapper_xml" 2>/dev/null || die invalid_manifest malformed_syntax
-  "$plutil_bin" -insert root -xml "$(cat "$manifest_xml")" "$wrapper_xml" 2>/dev/null || die invalid_manifest malformed_syntax
+  "$plutil_bin" -insert root -xml "$(/bin/cat "$manifest_xml")" "$wrapper_xml" 2>/dev/null || die invalid_manifest malformed_syntax
 
   root_type=$("$plutil_bin" -type root "$wrapper_xml" 2>/dev/null || true)
   test "$root_type" = 'dictionary' || die invalid_manifest root_not_object
@@ -1482,7 +1670,7 @@ parse_manifest() {
 
   # Unknown top-level key check via plutil residual validation
   root_check_xml="$SANDBOX/manifest_root_check.xml"
-  cp "$wrapper_xml" "$root_check_xml"
+  /bin/cp "$wrapper_xml" "$root_check_xml"
   "$plutil_bin" -remove root.schema "$root_check_xml" 2>/dev/null || true
   "$plutil_bin" -remove root.groups "$root_check_xml" 2>/dev/null || true
   if test "$has_profiles" -eq 1; then
@@ -1526,7 +1714,7 @@ parse_manifest() {
 
     # Residual unknown-key check on group
     group_check_xml="$SANDBOX/group_check_$i.xml"
-    cp "$manifest_xml" "$group_check_xml"
+    /bin/cp "$manifest_xml" "$group_check_xml"
     "$plutil_bin" -remove "groups.$i.name" "$group_check_xml" 2>/dev/null || true
     "$plutil_bin" -remove "groups.$i.description" "$group_check_xml" 2>/dev/null || true
     residual_group=$("$plutil_bin" -extract "groups.$i" json -o - "$group_check_xml" 2>/dev/null || true)
@@ -1558,7 +1746,7 @@ parse_manifest() {
 
     # Residual unknown-key check on description
     desc_check_xml="$SANDBOX/desc_check_$i.xml"
-    cp "$manifest_xml" "$desc_check_xml"
+    /bin/cp "$manifest_xml" "$desc_check_xml"
     "$plutil_bin" -remove "groups.$i.description.en" "$desc_check_xml" 2>/dev/null || true
     "$plutil_bin" -remove "groups.$i.description.zh-TW" "$desc_check_xml" 2>/dev/null || true
     residual_desc=$("$plutil_bin" -extract "groups.$i.description" json -o - "$desc_check_xml" 2>/dev/null || true)
@@ -1607,7 +1795,7 @@ parse_manifest() {
     test "$profiles_type" = 'dictionary' || die invalid_manifest profiles_not_object
 
     prof_check_xml="$SANDBOX/prof_check.xml"
-    cp "$manifest_xml" "$prof_check_xml"
+    /bin/cp "$manifest_xml" "$prof_check_xml"
 
     pnames=$("$plutil_bin" -extract profiles raw "$manifest" 2>/dev/null || true)
     old_ifs=$IFS
@@ -1885,6 +2073,24 @@ main() {
   validate_home
   acquire_lock
   require_prerequisites
+
+  if test -z "$CHECKOUT_DIR"; then
+    CHECKOUT_DIR="$PHYSICAL_HOME/.dotfiles"
+  fi
+
+  CANONICAL_REPO=$(canonicalize_repository "$REPOSITORY") || exit 1
+  resolve_remote_ref
+
+  if test -e "$CHECKOUT_DIR" || test -L "$CHECKOUT_DIR"; then
+    test -d "$CHECKOUT_DIR" && test ! -L "$CHECKOUT_DIR" || die invalid_git_admin "checkout directory is not a real directory: $CHECKOUT_DIR"
+    test -d "$CHECKOUT_DIR/.git" && test ! -L "$CHECKOUT_DIR/.git" || die invalid_git_admin "existing checkout directory is not a git repository: $CHECKOUT_DIR"
+    update_repository "$CHECKOUT_DIR"
+  else
+    initialize_repository "$CHECKOUT_DIR"
+  fi
+
+  parse_manifest "$CHECKOUT_DIR/.kaisian.json" "$CHECKOUT_DIR"
+  resolve_selection
   return 0
 }
 

@@ -64,6 +64,160 @@ EOF
   chmod +x "$dir/uname"
   printf '%s\n' "$dir"
 }
+make_behavioral_mock_stow() {
+  local mock_bin="$1"
+  /bin/mkdir -p "$mock_bin"
+  cat << 'EOF' > "$mock_bin/stow"
+#!/bin/bash
+set -u
+dir=""
+target=""
+simulate=0
+compat=0
+dotfiles=0
+no_folding=0
+ignore_regex=""
+restow_pkgs=""
+delete_pkgs=""
+
+while test $# -gt 0; do
+  case "$1" in
+    -d) dir=$2; shift 2 ;;
+    -t) target=$2; shift 2 ;;
+    --dotfiles) dotfiles=1; shift ;;
+    --no-folding) no_folding=1; shift ;;
+    --simulate) simulate=1; shift ;;
+    --compat) compat=1; shift ;;
+    --ignore=*) ignore_regex=${1#--ignore=}; shift ;;
+    -R) restow_pkgs="$restow_pkgs $2"; shift 2 ;;
+    -D) delete_pkgs="$delete_pkgs $2"; shift 2 ;;
+    *) restow_pkgs="$restow_pkgs $1"; shift ;;
+  esac
+done
+
+if test "$simulate" -eq 1; then
+  exit 0
+fi
+
+ignore_file="${HOME-}/.stow-global-ignore"
+builtin_ignore=0
+if test -z "${HOME-}" || test ! -f "$ignore_file"; then
+  builtin_ignore=1
+elif test -s "$ignore_file"; then
+  printf 'Non-empty .stow-global-ignore is unsupported in fake stow\n' >&2
+  exit 1
+fi
+
+for pkg in $restow_pkgs; do
+  pkg_dir="$dir/$pkg"
+  test -d "$pkg_dir" || continue
+
+  if test "$no_folding" -eq 0; then
+    for item in "$pkg_dir"/*; do
+      test -e "$item" || continue
+      iname=${item##*/}
+      if test "$builtin_ignore" -eq 1; then
+        case "$iname" in
+          README*|LICENSE*|COPYING*|'*~'|'#*#') continue ;;
+        esac
+      fi
+      tname="$iname"
+      if test "$dotfiles" -eq 1; then
+        case "$iname" in
+          dot-*) tname=".${iname#dot-}" ;;
+        esac
+      fi
+      ln -sf "$item" "$target/$tname"
+    done
+  else
+    (
+      cd "$pkg_dir"
+      find . -type f | while read -r file; do
+        rel="${file#./}"
+        fname=${rel##*/}
+        if test "$builtin_ignore" -eq 1; then
+          case "$fname" in
+            README*|LICENSE*|COPYING*|'*~'|'#*#') continue ;;
+          esac
+        fi
+        if test -n "$ignore_regex"; then
+          if printf '%s\n' "$rel" | grep -Eq "$ignore_regex"; then
+            continue
+          fi
+        fi
+        old_ifs=$IFS
+        IFS='/'
+        set -f
+        set -- $rel
+        set +f
+        IFS=$old_ifs
+        transformed=""
+        for comp in "$@"; do
+          c="$comp"
+          if test "$dotfiles" -eq 1; then
+            case "$comp" in
+              dot-*) c=".${comp#dot-}" ;;
+            esac
+          fi
+          transformed="$transformed/$c"
+        done
+        tgt_file="$target$transformed"
+        mkdir -p "$(dirname "$tgt_file")"
+        ln -sf "$pkg_dir/$rel" "$tgt_file"
+      done
+    )
+  fi
+done
+
+for pkg in $delete_pkgs; do
+  pkg_dir="$dir/$pkg"
+  if test "$compat" -eq 1; then
+    if test -d "$target"; then
+      (
+        cd "$target"
+        find . -type l | while read -r link; do
+          dest=$(readlink "$link" 2>/dev/null || true)
+          case "$dest" in
+            "$pkg_dir"/*|"$pkg_dir")
+              rm -f "$link"
+              ;;
+          esac
+        done
+      )
+    fi
+  else
+    if test -d "$pkg_dir"; then
+      (
+        cd "$pkg_dir"
+        find . -type f | while read -r file; do
+          rel="${file#./}"
+          old_ifs=$IFS
+          IFS='/'
+          set -f
+          set -- $rel
+          set +f
+          IFS=$old_ifs
+          transformed=""
+          for comp in "$@"; do
+            c="$comp"
+            if test "$dotfiles" -eq 1; then
+              case "$comp" in
+                dot-*) c=".${comp#dot-}" ;;
+              esac
+            fi
+            transformed="$transformed/$c"
+          done
+          tgt_file="$target$transformed"
+          rm -f "$tgt_file"
+        done
+      )
+    fi
+  fi
+done
+exit 0
+EOF
+  chmod +x "$mock_bin/stow"
+}
 
 # 1. --help succeeds when git/stow/fzf are absent
 help_without_tools_case() {
@@ -2552,26 +2706,474 @@ staged_submodules_validation_and_containment_case() {
 }
 
 command_trace_forbidden_operations_case() {
-  trace_log="tests/tmp/last-command-trace.log"
-  if test -f "$trace_log"; then
-    if /usr/bin/grep -Eq -- 'reset --hard|clean -f|stash|submodule update --recursive' "$trace_log"; then
-      printf 'Forbidden destructive command found in trace log!\n' >&2
-      return 1
-    fi
+  local trace_log="tests/tmp/last-command-trace.log"
+  test -f "$trace_log" || return 1
+  test -s "$trace_log" || return 1
+  if /usr/bin/grep -Eq -- 'reset --hard|clean -f|stash|submodule update --recursive' "$trace_log"; then
+    printf 'Forbidden destructive command found in trace log!\n' >&2
+    return 1
   fi
+  return 0
+}
+
+unadvertised_40_hex_sha_rejection_case() {
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+
+    remote_repo=$(make_remote_repo)
+    trace_log="$TRACE_LOG"
+    map_file="$ROOT/fake-map.txt"
+    printf 'https://github.com/taiansu/dotfiles=%s\n' "$remote_repo" > "$map_file"
+
+    CANONICAL_REPO="https://github.com/taiansu/dotfiles"
+    REPOSITORY="taiansu/dotfiles"
+    export KAISIAN_GIT_EXEC="$FAKE_GIT"
+    export KAISIAN_GIT_TRACE_LOG="$trace_log"
+    export KAISIAN_FAKE_GIT_MAP="$map_file"
+
+    acquire_lock
+    # Unadvertised valid 40-hex SHA must be rejected before fetch
+    REQUESTED_REF="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    if ( resolve_remote_ref ) >/dev/null 2>&1; then
+      printf 'Expected unadvertised 40-hex SHA to be rejected\n' >&2
+      exit 1
+    fi
+
+    cleanup
+    exit 0
+  ) || return 1
+  return 0
+}
+
+existing_non_repo_and_origin_fetch_counts_case() {
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+
+    remote_repo=$(make_remote_repo)
+    map_file="$ROOT/fake-map.txt"
+    printf 'https://github.com/taiansu/dotfiles=%s\n' "$remote_repo" > "$map_file"
+
+    CANONICAL_REPO="https://github.com/taiansu/dotfiles"
+    REPOSITORY="taiansu/dotfiles"
+    REQUESTED_REF="main"
+    export KAISIAN_GIT_EXEC="$FAKE_GIT"
+    export KAISIAN_FAKE_GIT_MAP="$map_file"
+
+    acquire_lock
+    resolve_remote_ref
+
+    # 1. Existing non-repo directory (no .git)
+    chk_nonrepo=$(mktemp -d "$ROOT/chk-nonrepo.XXXXXX")
+    if ( validate_git_admin "$chk_nonrepo" ) >/dev/null 2>&1; then
+      printf 'Expected existing non-repo directory to fail admin validation\n' >&2
+      exit 1
+    fi
+
+    # 2. Missing remote.origin.fetch
+    chk_nofetch=$(mktemp -d "$ROOT/chk-nofetch.XXXXXX")
+    initialize_repository "$chk_nofetch" || exit 1
+    git -C "$chk_nofetch" config --local --unset remote.origin.fetch
+    if ( validate_git_config "$chk_nofetch" ) >/dev/null 2>&1; then
+      printf 'Expected missing remote.origin.fetch to fail\n' >&2
+      exit 1
+    fi
+
+    # 3. Duplicate remote.origin.url
+    chk_dupurl=$(mktemp -d "$ROOT/chk-dupurl.XXXXXX")
+    initialize_repository "$chk_dupurl" || exit 1
+    git -C "$chk_dupurl" config --local --add remote.origin.url "https://github.com/taiansu/dotfiles"
+    if ( validate_git_config "$chk_dupurl" ) >/dev/null 2>&1; then
+      printf 'Expected duplicate remote.origin.url to fail\n' >&2
+      exit 1
+    fi
+
+    # 4. Duplicate remote.origin.fetch
+    chk_dupfetch=$(mktemp -d "$ROOT/chk-dupfetch.XXXXXX")
+    initialize_repository "$chk_dupfetch" || exit 1
+    git -C "$chk_dupfetch" config --local --add remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
+    if ( validate_git_config "$chk_dupfetch" ) >/dev/null 2>&1; then
+      printf 'Expected duplicate remote.origin.fetch to fail\n' >&2
+      exit 1
+    fi
+
+    cleanup
+    exit 0
+  ) || return 1
+  return 0
+}
+
+admin_nested_symlinks_and_active_hooks_case() {
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+
+    remote_repo=$(make_remote_repo)
+    map_file="$ROOT/fake-map.txt"
+    printf 'https://github.com/taiansu/dotfiles=%s\n' "$remote_repo" > "$map_file"
+
+    CANONICAL_REPO="https://github.com/taiansu/dotfiles"
+    REPOSITORY="taiansu/dotfiles"
+    REQUESTED_REF="main"
+    export KAISIAN_GIT_EXEC="$FAKE_GIT"
+    export KAISIAN_FAKE_GIT_MAP="$map_file"
+
+    acquire_lock
+    resolve_remote_ref
+
+    # 1. Nested symlink in .git/objects/pack
+    chk_sym_obj=$(mktemp -d "$ROOT/chk-symobj.XXXXXX")
+    initialize_repository "$chk_sym_obj" || exit 1
+    mkdir -p "$chk_sym_obj/.git/objects/pack"
+    ln -s "/tmp" "$chk_sym_obj/.git/objects/pack/evil_link"
+    if ( validate_git_admin "$chk_sym_obj" ) >/dev/null 2>&1; then
+      printf 'Expected nested symlink in objects/pack to fail admin validation\n' >&2
+      exit 1
+    fi
+
+    # 2. Nested symlink in .git/refs/heads/foo
+    chk_sym_ref=$(mktemp -d "$ROOT/chk-symref.XXXXXX")
+    initialize_repository "$chk_sym_ref" || exit 1
+    mkdir -p "$chk_sym_ref/.git/refs/heads"
+    ln -s "/tmp" "$chk_sym_ref/.git/refs/heads/evil_ref"
+    if ( validate_git_admin "$chk_sym_ref" ) >/dev/null 2>&1; then
+      printf 'Expected nested symlink in refs/heads to fail admin validation\n' >&2
+      exit 1
+    fi
+
+    # 3. Active non-sample hook in .git/hooks/pre-commit
+    chk_hook=$(mktemp -d "$ROOT/chk-hook.XXXXXX")
+    initialize_repository "$chk_hook" || exit 1
+    mkdir -p "$chk_hook/.git/hooks"
+    printf '#!/bin/sh\nexit 0\n' > "$chk_hook/.git/hooks/pre-commit"
+    chmod +x "$chk_hook/.git/hooks/pre-commit"
+    if ( validate_git_admin "$chk_hook" ) >/dev/null 2>&1; then
+      printf 'Expected active git hook to fail admin validation\n' >&2
+      exit 1
+    fi
+
+    # 4. Sample hook passes
+    rm -f "$chk_hook/.git/hooks/pre-commit"
+    printf '#!/bin/sh\nexit 0\n' > "$chk_hook/.git/hooks/pre-commit.sample"
+    validate_git_admin "$chk_hook" || exit 1
+
+    cleanup
+    exit 0
+  ) || return 1
+  return 0
+}
+
+worktree_leaf_hash_and_crlf_attribute_hiding_case() {
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+
+    remote_repo=$(make_remote_repo)
+    map_file="$ROOT/fake-map.txt"
+    printf 'https://github.com/taiansu/dotfiles=%s\n' "$remote_repo" > "$map_file"
+
+    CANONICAL_REPO="https://github.com/taiansu/dotfiles"
+    REPOSITORY="taiansu/dotfiles"
+    REQUESTED_REF="main"
+    export KAISIAN_GIT_EXEC="$FAKE_GIT"
+    export KAISIAN_FAKE_GIT_MAP="$map_file"
+
+    acquire_lock
+    resolve_remote_ref
+
+    # 1. Attribute hiding CRLF tampering
+    chk_crlf=$(mktemp -d "$ROOT/chk-crlf.XXXXXX")
+    initialize_repository "$chk_crlf" || exit 1
+    # Add .gitattributes text=auto and rewrite shell/dot-zshrc with CRLF
+    printf '* text=auto\n' > "$chk_crlf/.gitattributes"
+    (cd "$chk_crlf" && git add .gitattributes && git -c user.email="t@e.com" -c user.name="T" commit -q -m "attrs")
+    printf 'zshrc\r\n' > "$chk_crlf/shell/dot-zshrc"
+    if ( verify_clean_tree "$chk_crlf" ) >/dev/null 2>&1; then
+      printf 'Expected CRLF modified leaf to be caught by direct blob hash comparison\n' >&2
+      exit 1
+    fi
+
+    cleanup
+    exit 0
+  ) || return 1
+  return 0
+}
+
+submodule_matrix_and_nested_levels_case() {
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+
+    subm_lvl2=$(make_remote_repo)
+    subm_lvl2_sha=$(git -C "$subm_lvl2" rev-parse HEAD)
+
+    subm_lvl1=$(make_remote_repo)
+    (
+      cd "$subm_lvl1" || exit 1
+      git config -f .gitmodules submodule.nested.path ".vendor/nested"
+      git config -f .gitmodules submodule.nested.url "https://github.com/taiansu/nested"
+      git update-index --add --cacheinfo 160000,"$subm_lvl2_sha",.vendor/nested
+      git add .gitmodules && git -c user.email="t@e.com" -c user.name="T" commit -q -m "nested subm"
+    )
+    subm_lvl1_sha=$(git -C "$subm_lvl1" rev-parse HEAD)
+
+    remote_repo=$(make_remote_repo)
+    (
+      cd "$remote_repo" || exit 1
+      git config -f .gitmodules submodule.helper.path ".vendor/helper"
+      git config -f .gitmodules submodule.helper.url "https://github.com/taiansu/helper"
+      git update-index --add --cacheinfo 160000,"$subm_lvl1_sha",.vendor/helper
+      git add .gitmodules && git -c user.email="t@e.com" -c user.name="T" commit -q -m "subm lvl1"
+    )
+
+    map_file="$ROOT/fake-map.txt"
+    printf 'https://github.com/taiansu/dotfiles=%s\n' "$remote_repo" > "$map_file"
+    printf 'https://github.com/taiansu/helper=%s\n' "$subm_lvl1" >> "$map_file"
+    printf 'https://github.com/taiansu/nested=%s\n' "$subm_lvl2" >> "$map_file"
+
+    CANONICAL_REPO="https://github.com/taiansu/dotfiles"
+    REPOSITORY="taiansu/dotfiles"
+    REQUESTED_REF="main"
+    export KAISIAN_GIT_EXEC="$FAKE_GIT"
+    export KAISIAN_FAKE_GIT_MAP="$map_file"
+
+    acquire_lock
+    resolve_remote_ref
+
+    # 1. Multi-level nested submodule initialization
+    chk_nested=$(mktemp -d "$ROOT/chk-nested.XXXXXX")
+    initialize_repository "$chk_nested" || exit 1
+
+    test -d "$chk_nested/.vendor/helper/.git" || exit 1
+    test -d "$chk_nested/.vendor/helper/.vendor/nested/.git" || exit 1
+    lvl2_head=$(git -C "$chk_nested/.vendor/helper/.vendor/nested" rev-parse HEAD)
+    test "$lvl2_head" = "$subm_lvl2_sha" || exit 1
+
+    # 2. Hostile submodule definitions:
+    # 2a. SSH URL
+    repo_ssh=$(make_remote_repo)
+    (
+      cd "$repo_ssh" || exit 1
+      git config -f .gitmodules submodule.bad.path ".vendor/bad"
+      git config -f .gitmodules submodule.bad.url "git@github.com:bad/bad.git"
+      git update-index --add --cacheinfo 160000,"$subm_lvl2_sha",.vendor/bad
+      git add .gitmodules && git -c user.email="t@e.com" -c user.name="T" commit -q -m "bad ssh"
+    )
+    printf 'https://github.com/taiansu/ssh=%s\n' "$repo_ssh" >> "$map_file"
+    REPOSITORY="https://github.com/taiansu/ssh"
+    resolve_remote_ref
+    chk_bad=$(mktemp -d "$ROOT/chk-bad-ssh.XXXXXX")
+    if ( initialize_repository "$chk_bad" ) >/dev/null 2>&1; then
+      printf 'Expected SSH submodule URL to fail\n' >&2
+      exit 1
+    fi
+
+    # 2b. Overlapping submodule paths (.vendor/a and .vendor/a/b)
+    repo_overlap=$(make_remote_repo)
+    (
+      cd "$repo_overlap" || exit 1
+      git config -f .gitmodules submodule.a.path ".vendor/a"
+      git config -f .gitmodules submodule.a.url "https://github.com/taiansu/nested"
+      git config -f .gitmodules submodule.ab.path ".vendor/a/b"
+      git config -f .gitmodules submodule.ab.url "https://github.com/taiansu/nested"
+      git update-index --add --cacheinfo 160000,"$subm_lvl2_sha",.vendor/a
+      git add .gitmodules && git -c user.email="t@e.com" -c user.name="T" commit -q -m "bad overlap"
+    )
+    printf 'https://github.com/taiansu/overlap=%s\n' "$repo_overlap" >> "$map_file"
+    REPOSITORY="https://github.com/taiansu/overlap"
+    resolve_remote_ref
+    chk_bad_ov=$(mktemp -d "$ROOT/chk-bad-ov.XXXXXX")
+    if ( initialize_repository "$chk_bad_ov" ) >/dev/null 2>&1; then
+      printf 'Expected overlapping submodule paths to fail\n' >&2
+      exit 1
+    fi
+
+    # 2c. Command update mode
+    repo_cmd=$(make_remote_repo)
+    (
+      cd "$repo_cmd" || exit 1
+      git config -f .gitmodules submodule.cmd.path ".vendor/cmd"
+      git config -f .gitmodules submodule.cmd.url "https://github.com/taiansu/nested"
+      git config -f .gitmodules submodule.cmd.update "!calc"
+      git update-index --add --cacheinfo 160000,"$subm_lvl2_sha",.vendor/cmd
+      git add .gitmodules && git -c user.email="t@e.com" -c user.name="T" commit -q -m "bad cmd"
+    )
+    printf 'https://github.com/taiansu/cmd=%s\n' "$repo_cmd" >> "$map_file"
+    REPOSITORY="https://github.com/taiansu/cmd"
+    resolve_remote_ref
+    chk_bad_cmd=$(mktemp -d "$ROOT/chk-bad-cmd.XXXXXX")
+    if ( initialize_repository "$chk_bad_cmd" ) >/dev/null 2>&1; then
+      printf 'Expected command update mode to fail\n' >&2
+      exit 1
+    fi
+
+    # 2d. Non-checkout update mode (e.g. merge)
+    repo_merge=$(make_remote_repo)
+    (
+      cd "$repo_merge" || exit 1
+      git config -f .gitmodules submodule.merge.path ".vendor/merge"
+      git config -f .gitmodules submodule.merge.url "https://github.com/taiansu/nested"
+      git config -f .gitmodules submodule.merge.update "merge"
+      git update-index --add --cacheinfo 160000,"$subm_lvl2_sha",.vendor/merge
+      git add .gitmodules && git -c user.email="t@e.com" -c user.name="T" commit -q -m "bad update merge"
+    )
+    printf 'https://github.com/taiansu/merge=%s\n' "$repo_merge" >> "$map_file"
+    REPOSITORY="https://github.com/taiansu/merge"
+    resolve_remote_ref
+    chk_bad_merge=$(mktemp -d "$ROOT/chk-bad-merge.XXXXXX")
+    if ( initialize_repository "$chk_bad_merge" ) >/dev/null 2>&1; then
+      printf 'Expected non-checkout update mode to fail\n' >&2
+      exit 1
+    fi
+
+    # 2e. Duplicate submodule paths
+    repo_dup=$(make_remote_repo)
+    (
+      cd "$repo_dup" || exit 1
+      git config -f .gitmodules submodule.sub1.path ".vendor/dup"
+      git config -f .gitmodules submodule.sub1.url "https://github.com/taiansu/nested"
+      git config -f .gitmodules submodule.sub2.path ".vendor/dup"
+      git config -f .gitmodules submodule.sub2.url "https://github.com/taiansu/nested"
+      git update-index --add --cacheinfo 160000,"$subm_lvl2_sha",.vendor/dup
+      git add .gitmodules && git -c user.email="t@e.com" -c user.name="T" commit -q -m "bad duplicate path"
+    )
+    printf 'https://github.com/taiansu/dup=%s\n' "$repo_dup" >> "$map_file"
+    REPOSITORY="https://github.com/taiansu/dup"
+    resolve_remote_ref
+    chk_bad_dup=$(mktemp -d "$ROOT/chk-bad-dup.XXXXXX")
+    if ( initialize_repository "$chk_bad_dup" ) >/dev/null 2>&1; then
+      printf 'Expected duplicate submodule path to fail\n' >&2
+      exit 1
+    fi
+
+    cleanup
+    exit 0
+  ) || return 1
+  return 0
+}
+
+core_config_pairs_matrix_case() {
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+
+    remote_repo=$(make_remote_repo)
+    map_file="$ROOT/fake-map.txt"
+    printf 'https://github.com/taiansu/dotfiles=%s\n' "$remote_repo" > "$map_file"
+
+    CANONICAL_REPO="https://github.com/taiansu/dotfiles"
+    REPOSITORY="taiansu/dotfiles"
+    REQUESTED_REF="main"
+    export KAISIAN_GIT_EXEC="$FAKE_GIT"
+    export KAISIAN_FAKE_GIT_MAP="$map_file"
+
+    acquire_lock
+    resolve_remote_ref
+
+    # Valid core pairs pass
+    chk=$(mktemp -d "$ROOT/chk-core.XXXXXX")
+    initialize_repository "$chk" || exit 1
+    git -C "$chk" config --local core.symlinks true
+    git -C "$chk" config --local core.protectHFS true
+    git -C "$chk" config --local core.protectNTFS true
+    validate_git_config "$chk" || exit 1
+
+    # Invalid core.symlinks false fails
+    git -C "$chk" config --local core.symlinks false
+    if ( validate_git_config "$chk" ) >/dev/null 2>&1; then
+      printf 'Expected core.symlinks=false to fail\n' >&2
+      exit 1
+    fi
+
+    # Invalid core.symlinks 1 fails
+    git -C "$chk" config --local core.symlinks 1
+    if ( validate_git_config "$chk" ) >/dev/null 2>&1; then
+      printf 'Expected core.symlinks=1 to fail\n' >&2
+      exit 1
+    fi
+
+    cleanup
+    exit 0
+  ) || return 1
+  return 0
+}
+
+production_main_integration_case() {
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+
+    test_home=$(make_home)
+    fake_tools=$(make_fake_bin)
+    make_behavioral_mock_stow "$fake_tools"
+    cat << 'EOF' > "$fake_tools/fzf"
+#!/bin/bash
+exit 0
+EOF
+    chmod +x "$fake_tools/fzf"
+
+    remote_repo=$(make_remote_repo)
+    origin_commit=$(git -C "$remote_repo" rev-parse HEAD)
+
+    chk_dir="$test_home/.dotfiles"
+    map_file="$ROOT/fake-map.txt"
+    printf 'https://github.com/taiansu/dotfiles=%s\n' "$remote_repo" > "$map_file"
+
+    export KAISIAN_GIT_EXEC="$FAKE_GIT"
+    export KAISIAN_FAKE_GIT_MAP="$map_file"
+    export KAISIAN_GIT_TRACE_LOG="$TRACE_LOG"
+    export KAISIAN_STOW_EXEC="$fake_tools/stow"
+    export KAISIAN_FZF_EXEC="$fake_tools/fzf"
+
+    # 1. First run on absent checkout -> acquires checkout and resolves selection
+    (
+      HOME="$test_home"
+      PATH="$fake_tools:/usr/bin:/bin"
+      main --repo taiansu/dotfiles --ref main
+    ) || exit 1
+
+    # Assert checkout directory created, detached HEAD at origin_commit
+    test -d "$chk_dir/.git" || exit 1
+    head_sha=$(git -C "$chk_dir" rev-parse HEAD)
+    test "$head_sha" = "$origin_commit" || exit 1
+
+    # Assert no target HOME mutation (no links created in HOME root)
+    test ! -L "$test_home/.zshrc" || exit 1
+    test ! -L "$test_home/.gitconfig" || exit 1
+
+    # 2. Second run on existing checkout -> updates cleanly
+    (
+      HOME="$test_home"
+      PATH="$fake_tools:/usr/bin:/bin"
+      main --repo taiansu/dotfiles --ref main
+    ) || exit 1
+
+    head_sha2=$(git -C "$chk_dir" rev-parse HEAD)
+    test "$head_sha2" = "$origin_commit" || exit 1
+
+    exit 0
+  ) || return 1
   return 0
 }
 
 run_case 'source repository URL and slug canonicalization matrix' source_canonicalization_matrix_case
 run_case 'custom --repo requires explicit --ref' custom_repo_requires_ref_case
 run_case 'origin ref resolution and branch/tag ambiguity' origin_ref_resolution_and_ambiguity_case
+run_case 'unadvertised 40-hex SHA is rejected before fetch' unadvertised_40_hex_sha_rejection_case
 run_case 'fetched object pinning beats same-named malicious local refs' fetched_object_pinning_beats_malicious_local_refs_case
 run_case 'new checkout uses git init and single fetch without local/tracking branches' new_checkout_uses_init_and_single_fetch_case
 run_case 'existing checkout cleanliness, untracked/ignored files, and origin mismatch' existing_checkout_cleanliness_and_origin_mismatch_case
+run_case 'existing non-repo directory and exact origin/fetch counts' existing_non_repo_and_origin_fetch_counts_case
 run_case 'git config strict allowlist and hostile config rejection' git_config_allowlist_and_hostile_configs_case
+run_case 'core config allowed pairs and symlinks boolean validation' core_config_pairs_matrix_case
 run_case 'git admin boundaries, replacements, grafts, and linked worktrees' git_admin_boundaries_and_replacements_case
+run_case 'git admin nested symlinks and active hook rejection' admin_nested_symlinks_and_active_hooks_case
 run_case 'fresh index verification defeats assume-unchanged and skip-worktree' fresh_index_defeats_hidden_worktree_modifications_case
+run_case 'direct worktree leaf hash comparison catches attribute CRLF hiding' worktree_leaf_hash_and_crlf_attribute_hiding_case
 run_case 'staged submodules validation, containment, and non-package isolation' staged_submodules_validation_and_containment_case
+run_case 'submodule matrix, nested levels, and hostile definition rejection' submodule_matrix_and_nested_levels_case
+run_case 'production main wiring through acquisition and manifest selection' production_main_integration_case
 run_case 'executed command trace contains no forbidden destructive operations' command_trace_forbidden_operations_case
 
 run_case 'valid manifest parsing produces exact groups.tsv and profiles.tsv' manifest_valid_and_tsv_output_case
