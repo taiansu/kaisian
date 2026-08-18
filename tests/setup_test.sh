@@ -3778,10 +3778,63 @@ task5_mapping_fixture_case() {
     test "$(sed -n '2p' "$SANDBOX/mapping.tsv")" = "$(printf 'dir\tshell\tdot-config/zsh\t.config/zsh\t.config/zsh')" || exit 1
     test "$(sed -n '3p' "$SANDBOX/mapping.tsv")" = "$(printf 'file\tshell\tdot-config/zsh/aliasrc\t.config/zsh/aliasrc\t.config/zsh/aliasrc')" || exit 1
   )
+task5_shared_directory_coalescing_case() {
+  t=$(mktemp -d "$ROOT/task5-shared.XXXXXX") || return 1
+  /bin/mkdir -p "$t/sandbox"
+  printf 'dir\tpkg1\tdot-config\t.config\t.config\nfile\tpkg1\tdot-config/a\t.config/a\t.config/a\ndir\tpkg2\tdot-config\t.config\t.config\nfile\tpkg2\tdot-config/b\t.config/b\t.config/b\n' > "$t/sandbox/mapping.tsv"
+  ( . "$SCRIPT"; SANDBOX="$t/sandbox"; MAPPING_FILE="$t/sandbox/mapping.tsv"; validate_typed_tree )
   status=$?
   /bin/rm -rf "$t"
   return "$status"
 }
+
+task5_prefix_collision_case() {
+  t=$(mktemp -d "$ROOT/task5-prefix.XXXXXX") || return 1
+  printf 'file\tpkg\tfoo\tfoo\tfoo\nfile\tpkg\tfoo/bar\tfoo/bar\tfoo/bar\n' > "$t/sandbox/mapping.tsv"
+  ( . "$SCRIPT"; SANDBOX="$t/sandbox"; MAPPING_FILE="$t/sandbox/mapping.tsv"; ! validate_typed_tree )
+  status=$?
+  /bin/rm -rf "$t"
+  return "$status"
+}
+
+task5_unselected_declared_rejection_case() {
+  t=$(mktemp -d "$ROOT/task5-declared.XXXXXX") || return 1
+  /bin/mkdir -p "$t/sandbox"
+  printf 'file\tbad\tdot-config/x\t.config/x\t.config/x\nfile\tbad\tdot-config/y\t.config/x\t.config/x\n' > "$t/sandbox/mapping.tsv"
+  ( . "$SCRIPT"; SANDBOX="$t/sandbox"; MAPPING_FILE="$t/sandbox/mapping.tsv"; ! validate_typed_tree </dev/null )
+  status=$?
+  /bin/rm -rf "$t"
+  return "$status"
+}
+task5_nonascii_locale_rejection_case() {
+  t=$(mktemp -d "$ROOT/task5-locale.XXXXXX") || return 1
+  /bin/mkdir -p "$t/sandbox"
+  printf 'file\tpkg\tbad-é\tbad-é\tbad-é\n' > "$t/sandbox/mapping.tsv"
+  ( export LC_ALL=en_US.UTF-8; . "$SCRIPT"; SANDBOX="$t/sandbox"; MAPPING_FILE="$t/sandbox/mapping.tsv"; ! validate_typed_tree )
+  status=$?
+  /bin/rm -rf "$t"
+  return "$status"
+}
+
+task5_all_node_boundary_rejection_case() {
+  t=$(mktemp -d "$ROOT/task5-nodes.XXXXXX") || return 1
+  /bin/mkdir -p "$t/sandbox"
+  printf 'file\tpkg\tdot-config/x\t.config/x\t.config/x\nfile\tpkg\tdot-config/x\t.config/x\t.config/x\n' > "$t/sandbox/mapping.tsv"
+  ( . "$SCRIPT"; SANDBOX="$t/sandbox"; MAPPING_FILE="$t/sandbox/mapping.tsv"; ! validate_typed_tree )
+  status=$?
+  /bin/rm -rf "$t"
+  return "$status"
+}
+
+  status=$?
+  /bin/rm -rf "$t"
+  return "$status"
+}
+run_case 'Task 5 shared directory coalescing' task5_shared_directory_coalescing_case
+run_case 'Task 5 prefix collision rejection' task5_prefix_collision_case
+run_case 'Task 5 declared unselected rejection' task5_unselected_declared_rejection_case
+run_case 'Task 5 non-C locale non-ASCII rejection' task5_nonascii_locale_rejection_case
+run_case 'Task 5 all-node boundary rejection' task5_all_node_boundary_rejection_case
 
 run_case 'existing checkout cleanliness, untracked/ignored files, and origin mismatch' existing_checkout_cleanliness_and_origin_mismatch_case
 run_case 'existing non-repo directory and exact origin/fetch counts' existing_non_repo_and_origin_fetch_counts_case
