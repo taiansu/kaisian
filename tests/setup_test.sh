@@ -3124,13 +3124,25 @@ submodule_matrix_and_nested_levels_case() {
       git -c user.email="t@e.com" -c user.name="T" commit -q -m "wrong commit"
     )
     tampered_child_sha=$(git -C "$chk_wrong_child/.vendor/helper" rev-parse HEAD)
+    root_head_before=$(git -C "$chk_wrong_child" rev-parse HEAD)
+    root_status_before=$(git -C "$chk_wrong_child" status --porcelain=v1)
+    child_status_before=$(git -C "$chk_wrong_child/.vendor/helper" status --porcelain=v1)
+    root_files_before=$(cd "$chk_wrong_child" && /usr/bin/find . -path './.git' -prune -o -type f -print | /usr/bin/sort)
+    child_files_before=$(cd "$chk_wrong_child/.vendor/helper" && /usr/bin/find . -path './.git' -prune -o -type f -print | /usr/bin/sort)
+    wrong_trace="$ROOT/wrong-child.trace"
+    : > "$wrong_trace"
+    export KAISIAN_GIT_TRACE_LOG="$wrong_trace"
     if ( update_repository "$chk_wrong_child" ) >/dev/null 2>&1; then
       printf 'Expected wrong child commit to fail update\n' >&2
       exit 1
     fi
-    # Assert child HEAD and files are unchanged
+    test "$(git -C "$chk_wrong_child" rev-parse HEAD)" = "$root_head_before" || exit 1
+    test "$(git -C "$chk_wrong_child" status --porcelain=v1)" = "$root_status_before" || exit 1
     test "$(git -C "$chk_wrong_child/.vendor/helper" rev-parse HEAD)" = "$tampered_child_sha" || exit 1
-    test -f "$chk_wrong_child/.vendor/helper/wrong.txt" || exit 1
+    test "$(git -C "$chk_wrong_child/.vendor/helper" status --porcelain=v1)" = "$child_status_before" || exit 1
+    test "$(cd "$chk_wrong_child" && /usr/bin/find . -path './.git' -prune -o -type f -print | /usr/bin/sort)" = "$root_files_before" || exit 1
+    test "$(cd "$chk_wrong_child/.vendor/helper" && /usr/bin/find . -path './.git' -prune -o -type f -print | /usr/bin/sort)" = "$child_files_before" || exit 1
+    ! /usr/bin/grep -Eq ' (fetch|checkout) ' "$wrong_trace" || exit 1
 
     # 2k. Gitlink in tree without .gitmodules
     repo_nogm=$(make_remote_repo)
@@ -3313,28 +3325,41 @@ single_fetch_and_trace_assertions_case() {
     chk_single=$(mktemp -d "$ROOT/chk-single.XXXXXX")
     initialize_repository "$chk_single" || exit 1
 
-    # Assert trace log is non-empty
+    # Trace must be non-empty and every boundary must decode to the complete expected environment.
     test -s "$trace_log" || exit 1
+    expected_env=$(printf 'ENV: HOME=%q PATH=%q LC_ALL=%q GIT_CONFIG_NOSYSTEM=%q GIT_CONFIG_GLOBAL=%q GIT_ATTR_NOSYSTEM=%q GIT_TERMINAL_PROMPT=%q GIT_ASKPASS=%q GIT_NO_REPLACE_OBJECTS=%q GIT_ALLOW_PROTOCOL=%q' \
+      "$SANDBOX/git-home" "/usr/bin:/bin:/usr/sbin:/sbin" "C" "1" "/dev/null" "1" "0" "/usr/bin/false" "1" "https")
+    while IFS= read -r trace_line; do
+      case "$trace_line" in
+        ENV:*)
+          case "$trace_line" in
+            "$expected_env"|"$expected_env GIT_INDEX_FILE="*) ;;
+            *) exit 1 ;;
+          esac
+          ;;
+      esac
+    done < "$trace_log"
 
-    # Assert trace log contains complete escaped environment boundary
-    /usr/bin/grep -Fq 'ENV: HOME=' "$trace_log" || exit 1
-    /usr/bin/grep -Fq 'GIT_CONFIG_NOSYSTEM=1' "$trace_log" || exit 1
-    /usr/bin/grep -Fq 'GIT_CONFIG_GLOBAL=' "$trace_log" || exit 1
-    /usr/bin/grep -Fq 'GIT_ATTR_NOSYSTEM=1' "$trace_log" || exit 1
-    /usr/bin/grep -Fq 'GIT_TERMINAL_PROMPT=0' "$trace_log" || exit 1
-    /usr/bin/grep -Fq 'GIT_ASKPASS=' "$trace_log" || exit 1
-    /usr/bin/grep -Fq 'GIT_NO_REPLACE_OBJECTS=1' "$trace_log" || exit 1
-    /usr/bin/grep -Fq 'GIT_ALLOW_PROTOCOL=https' "$trace_log" || exit 1
-
-    # Assert exactly ONE fetch command was executed
-    fetch_lines=$(/usr/bin/grep -E '^git (-C [^ ]+ )?fetch ' "$trace_log" || true)
-    fetch_count=$(printf '%s\n' "$fetch_lines" | /usr/bin/grep -c '^git ' || true)
-    test "$fetch_count" -eq 1 || exit 1
-
-    # Assert fetch line has exact canonical URL and resolved ref
-    assert_contains "$fetch_lines" "$CANONICAL_REPO" || exit 1
-    assert_contains "$fetch_lines" "$RESOLVED_FETCH_REF" || exit 1
-
+    # Decode every escaped command line and compare the complete fetch argv exactly.
+    fetch_seen=0
+    while IFS= read -r trace_line; do
+      case "$trace_line" in
+        git\ *)
+          trace_cmd=${trace_line#git }
+          eval "trace_argv=( $trace_cmd )"
+          if test "${trace_argv[0]-}" = "-C" && test "${trace_argv[2]-}" = "fetch"; then
+            test "${trace_argv[1]}" = "$chk_single" || exit 1
+            test "${#trace_argv[@]}" -eq 7 || exit 1
+            test "${trace_argv[3]}" = "--no-tags" || exit 1
+            test "${trace_argv[4]}" = "--depth=1" || exit 1
+            test "${trace_argv[5]}" = "$CANONICAL_REPO" || exit 1
+            test "${trace_argv[6]}" = "$RESOLVED_FETCH_REF" || exit 1
+            fetch_seen=$((fetch_seen + 1))
+          fi
+          ;;
+      esac
+    done < "$trace_log"
+    test "$fetch_seen" -eq 1 || exit 1
     # Assert no refs/heads or refs/remotes created
     test -z "$(git -C "$chk_single" for-each-ref refs/heads/ refs/remotes/ 2>/dev/null)" || exit 1
 
@@ -3419,26 +3444,34 @@ config_lock_failure_suppresses_stderr_case() {
     remote_repo=$(make_remote_repo)
     map_file="$ROOT/fake-map.txt"
     printf 'https://github.com/taiansu/dotfiles=%s\n' "$remote_repo" > "$map_file"
+    fail_marker="$ROOT/fake-config-failed"
+    trace_log="$ROOT/config-failure.trace"
+    : > "$trace_log"
+    export KAISIAN_GIT_EXEC="$FAKE_GIT"
+    export KAISIAN_FAKE_GIT_MAP="$map_file"
+    export KAISIAN_GIT_TRACE_LOG="$trace_log"
+    export KAISIAN_FAKE_GIT_FAIL_ON_CONFIG_ORIGIN=1
+    export KAISIAN_FAKE_GIT_FAIL_MARKER="$fail_marker"
 
     CANONICAL_REPO="https://github.com/taiansu/dotfiles"
     REPOSITORY="taiansu/dotfiles"
     REQUESTED_REF="main"
-    export KAISIAN_GIT_EXEC="$FAKE_GIT"
-    export KAISIAN_FAKE_GIT_MAP="$map_file"
-
     acquire_lock
-    resolve_remote_ref
-
+    EXPECTED_COMMIT_SHA=$(git -C "$remote_repo" rev-parse HEAD)
+    RESOLVED_FETCH_REF="refs/heads/main"
     chk_lock=$(mktemp -d "$ROOT/chk-cfglock.XXXXXX")
-    mkdir -p "$chk_lock/.git"
-    touch "$chk_lock/.git/config.lock"
     out=$( ( initialize_repository "$chk_lock" ) 2>&1 )
     status=$?
     test "$status" -ne 0 || exit 1
-    assert_contains "$out" "Git operation failed" || exit 1
-    # Raw stderr from git should be suppressed
+    assert_contains "$out" "Git operation failed (failed to set origin url)." || exit 1
+    ! assert_contains "$out" "fake-git:" || exit 1
     ! assert_contains "$out" "fatal:" || exit 1
 
+    # The hook fails exactly once at origin.url; init succeeds and later calls never run.
+    test "$(/usr/bin/grep -c '^git init ' "$trace_log")" -eq 1 || exit 1
+    test "$(/usr/bin/grep -c ' config --local remote.origin.url ' "$trace_log")" -eq 1 || exit 1
+    test "$(/usr/bin/grep -c ' config --local remote.origin.fetch ' "$trace_log")" -eq 0 || exit 1
+    test "$(/usr/bin/grep -c ' fetch ' "$trace_log")" -eq 0 || exit 1
     cleanup
     exit 0
   ) || return 1
@@ -3464,14 +3497,23 @@ EOF
     map_file="$ROOT/fake-map.txt"
     printf 'https://github.com/taiansu/dotfiles=%s\n' "$remote_repo" > "$map_file"
 
+    poison_marker="$ROOT/poison_triggered"
     poison_bin=$(mktemp -d "$ROOT/poison.XXXXXX")
     for tool in stat uname id find readlink awk tr cp rm dirname basename which plutil git stow fzf; do
       cat << EOF > "$poison_bin/$tool"
 #!/bin/sh
-touch "$ROOT/poison_triggered_$tool"
+: > "$ROOT/poison_triggered_$tool"
 exit 99
 EOF
       chmod +x "$poison_bin/$tool"
+    done
+    # Prove the poison fixture itself is live under the restricted PATH.
+    if ( PATH="$poison_bin" "$poison_bin/stat" ) >/dev/null 2>&1; then
+      exit 1
+    fi
+    test -e "$ROOT/poison_triggered_stat" || exit 1
+    for tool in stat uname id find readlink awk tr cp rm dirname basename which plutil git stow fzf; do
+      /bin/rm -f "$ROOT/poison_triggered_$tool"
     done
 
     export KAISIAN_GIT_EXEC="$FAKE_GIT"

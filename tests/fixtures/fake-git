@@ -67,6 +67,16 @@ if test $# -eq 0; then
 fi
 
 subcmd="$1"
+if test "${KAISIAN_FAKE_GIT_FAIL_ON_CONFIG_ORIGIN-}" = "1" &&
+   test "$subcmd" = "config" &&
+   test "${2-}" = "--local" &&
+   test "${3-}" = "remote.origin.url" &&
+   test -n "${KAISIAN_FAKE_GIT_FAIL_MARKER-}" &&
+   test ! -e "$KAISIAN_FAKE_GIT_FAIL_MARKER"; then
+  : > "$KAISIAN_FAKE_GIT_FAIL_MARKER"
+  printf 'fake-git: targeted config failure\n' >&2
+  exit 1
+fi
 
 lookup_remote() {
   url="$1"
