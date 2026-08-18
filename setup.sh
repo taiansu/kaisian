@@ -461,11 +461,47 @@ cleanup() {
   /bin/rmdir -- "$LOCK_DIR" 2>/dev/null || true
 }
 
+discover_executable() {
+  name=$1
+  raw_path=$(which "$name" 2>/dev/null || type -p "$name" 2>/dev/null || command -v "$name" 2>/dev/null || true)
+  test -n "$raw_path" || return 1
+  case "$raw_path" in
+    /*) abs_path="$raw_path" ;;
+    */*)
+      abs_dir=$(cd -P -- "$(dirname "$raw_path")" 2>/dev/null && pwd -P) || return 1
+      abs_path="$abs_dir/$(basename "$raw_path")"
+      ;;
+    *)
+      abs_path=''
+      old_ifs=$IFS
+      IFS=':'
+      set -f
+      # shellcheck disable=SC2086
+      set -- ${PATH-}
+      set +f
+      IFS=$old_ifs
+      for pdir in "$@"; do
+        test -n "$pdir" || pdir='.'
+        candidate="$pdir/$name"
+        if test -f "$candidate" && test -x "$candidate"; then
+          abs_dir=$(cd -P -- "$pdir" 2>/dev/null && pwd -P) || abs_dir="$pdir"
+          abs_path="$abs_dir/$name"
+          break
+        fi
+      done
+      ;;
+  esac
+  test -n "$abs_path" || return 1
+  test -f "$abs_path" || return 1
+  test -x "$abs_path" || return 1
+  printf '%s\n' "$abs_path"
+}
+
 run_git() {
   test -n "$SANDBOX" || die lock_failed 'sandbox not initialized'
   /bin/mkdir -p "$SANDBOX/git-home" 2>/dev/null || true
   if test "${KAISIAN_TESTING-0}" = '1'; then
-    git_bin="${KAISIAN_GIT_EXEC:-${GIT_EXEC:-git}}"
+    git_bin="${KAISIAN_GIT_EXEC:-${GIT_EXEC:-/usr/bin/git}}"
     runner_path="${KAISIAN_RUNNER_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"
   else
     git_bin="${GIT_EXEC:-/usr/bin/git}"
@@ -509,21 +545,19 @@ require_prerequisites() {
   os_name=$(/usr/bin/uname -s 2>/dev/null || uname -s)
   test "$os_name" = 'Darwin' || die unsupported_os
 
-  GIT_EXEC=$(command -v git 2>/dev/null || which git 2>/dev/null || true)
-  STOW_EXEC=$(command -v stow 2>/dev/null || which stow 2>/dev/null || true)
-  FZF_EXEC=$(command -v fzf 2>/dev/null || which fzf 2>/dev/null || true)
-  PLUTIL_EXEC=$(command -v plutil 2>/dev/null || which plutil 2>/dev/null || true)
-
   missing=''
-  for cmd in git stow fzf plutil; do
-    if ! command -v "$cmd" >/dev/null 2>&1; then
-      if test -z "$missing"; then
-        missing="$cmd"
-      else
-        missing="$missing, $cmd"
-      fi
-    fi
-  done
+  if ! GIT_EXEC=$(discover_executable git); then
+    missing='git'
+  fi
+  if ! STOW_EXEC=$(discover_executable stow); then
+    if test -z "$missing"; then missing='stow'; else missing="$missing, stow"; fi
+  fi
+  if ! FZF_EXEC=$(discover_executable fzf); then
+    if test -z "$missing"; then missing='fzf'; else missing="$missing, fzf"; fi
+  fi
+  if ! PLUTIL_EXEC=$(discover_executable plutil); then
+    if test -z "$missing"; then missing='plutil'; else missing="$missing, plutil"; fi
+  fi
   if test -n "$missing"; then
     die missing_tools "$missing"
   fi

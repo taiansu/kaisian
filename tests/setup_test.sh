@@ -585,7 +585,7 @@ EOF
   return 0
 }
 
-# 16. behavioral stow probes in require_prerequisites and compat enforcement
+# 16. behavioral stow probes in require_prerequisites and flag enforcement
 stow_behavioral_probes_case() {
   uid=$(/usr/bin/id -u)
   lock_dir="/private/tmp/kaisian-$uid.lock"
@@ -605,7 +605,7 @@ stow_behavioral_probes_case() {
     mock_bin="$ROOT/mock-probe-bin"
     mkdir -p "$mock_bin"
 
-    # Create a behavioral fake stow enforcing --compat, --ignore, --no-folding, --simulate
+    # Create a behavioral fake stow enforcing --dotfiles, --no-folding, --compat, --ignore, --simulate
     cat << 'EOF' > "$mock_bin/stow"
 #!/bin/bash
 set -u
@@ -613,6 +613,8 @@ dir=""
 target=""
 simulate=0
 compat=0
+dotfiles=0
+no_folding=0
 ignore_regex=""
 restow_pkgs=""
 delete_pkgs=""
@@ -621,7 +623,8 @@ while test $# -gt 0; do
   case "$1" in
     -d) dir=$2; shift 2 ;;
     -t) target=$2; shift 2 ;;
-    --dotfiles|--no-folding) shift ;;
+    --dotfiles) dotfiles=1; shift ;;
+    --no-folding) no_folding=1; shift ;;
     --simulate) simulate=1; shift ;;
     --compat) compat=1; shift ;;
     --ignore=*) ignore_regex=${1#--ignore=}; shift ;;
@@ -638,7 +641,23 @@ fi
 # Link creation
 for pkg in $restow_pkgs; do
   pkg_dir="$dir/$pkg"
-  if test -d "$pkg_dir"; then
+  test -d "$pkg_dir" || continue
+
+  # Folding behavior (when no_folding=0)
+  if test "$no_folding" -eq 0; then
+    for item in "$pkg_dir"/*; do
+      test -e "$item" || continue
+      iname=$(basename "$item")
+      tname="$iname"
+      if test "$dotfiles" -eq 1; then
+        case "$iname" in
+          dot-*) tname=".${iname#dot-}" ;;
+        esac
+      fi
+      ln -sf "$item" "$target/$tname"
+    done
+  else
+    # Non-folding: create directory hierarchy and symlink leaf files
     (
       cd "$pkg_dir"
       find . -type f | while read -r file; do
@@ -656,10 +675,12 @@ for pkg in $restow_pkgs; do
         IFS=$old_ifs
         transformed=""
         for comp in "$@"; do
-          case "$comp" in
-            dot-*) c=".${comp#dot-}" ;;
-            *) c="$comp" ;;
-          esac
+          c="$comp"
+          if test "$dotfiles" -eq 1; then
+            case "$comp" in
+              dot-*) c=".${comp#dot-}" ;;
+            esac
+          fi
           transformed="$transformed/$c"
         done
         tgt_file="$target$transformed"
@@ -674,14 +695,14 @@ done
 for pkg in $delete_pkgs; do
   pkg_dir="$dir/$pkg"
   if test "$compat" -eq 1; then
-    # Compat mode: remove all links in target that point to pkg_dir, even if source was deleted
+    # Compat deletion: remove all links in target that point to pkg_dir
     if test -d "$target"; then
       (
         cd "$target"
         find . -type l | while read -r link; do
           dest=$(readlink "$link" 2>/dev/null || true)
           case "$dest" in
-            "$pkg_dir"/*)
+            "$pkg_dir"/*|"$pkg_dir")
               rm -f "$link"
               ;;
           esac
@@ -703,10 +724,12 @@ for pkg in $delete_pkgs; do
           IFS=$old_ifs
           transformed=""
           for comp in "$@"; do
-            case "$comp" in
-              dot-*) c=".${comp#dot-}" ;;
-              *) c="$comp" ;;
-            esac
+            c="$comp"
+            if test "$dotfiles" -eq 1; then
+              case "$comp" in
+                dot-*) c=".${comp#dot-}" ;;
+              esac
+            fi
             transformed="$transformed/$c"
           done
           tgt_file="$target$transformed"
@@ -746,26 +769,72 @@ EOF
   return 0
 }
 
-# 17. production hook immunity: KAISIAN_* variables are ignored when KAISIAN_TESTING is unset/0
+# 17. production hook immunity: KAISIAN_* variables and bare env shadowing are ignored in production mode
 production_hook_immunity_case() {
-  test_home=$(make_home)
-  fake_bin=$(make_fake_bin)
-  mock_bin="$ROOT/mock-evil-bin"
-  mkdir -p "$mock_bin"
-  cat << 'EOF' > "$mock_bin/evil_git"
+  uid=$(/usr/bin/id -u)
+  lock_dir="/private/tmp/kaisian-$uid.lock"
+  if test -e "$lock_dir"; then
+    printf 'FAIL: Pre-existing external lock at %s\n' "$lock_dir" >&2
+    return 1
+  fi
+
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+
+    acquire_lock
+    test_ino="$RECORDED_LOCK_DEV_INO"
+    trap 'curr=$(/usr/bin/stat -f "%d %i" "'"$lock_dir"'" 2>/dev/null || true); if test "$curr" = "'"$test_ino"'"; then rm -rf "'"$lock_dir"'"; fi' EXIT
+
+    mock_bin="$ROOT/mock-evil-bin"
+    mkdir -p "$mock_bin"
+
+    # Malicious git and stow
+    cat << 'EOF' > "$mock_bin/evil_git"
 #!/bin/bash
 printf 'EVIL_GIT_RAN\n'
 exit 1
 EOF
-  chmod +x "$mock_bin/evil_git"
+    cat << 'EOF' > "$mock_bin/evil_stow"
+#!/bin/bash
+printf 'EVIL_STOW_RAN\n'
+exit 1
+EOF
+    # Malicious bare env
+    cat << 'EOF' > "$mock_bin/env"
+#!/bin/bash
+printf 'HOSTILE_ENV_EXECUTED\n'
+exit 1
+EOF
+    chmod +x "$mock_bin/evil_git" "$mock_bin/evil_stow" "$mock_bin/env"
 
-  out=$(env -i HOME="$test_home" KAISIAN_TESTING=0 KAISIAN_GIT_EXEC="$mock_bin/evil_git" PATH="$fake_bin" /bin/bash "$SCRIPT" 2>&1)
-  case "$out" in
-    *"EVIL_GIT_RAN"*)
-      printf 'Production invocation executed KAISIAN_GIT_EXEC override!\n' >&2
-      return 1
-      ;;
-  esac
+    safe_bin="$ROOT/mock-safe-bin"
+    mkdir -p "$safe_bin"
+    cat << 'EOF' > "$safe_bin/safe_git"
+#!/bin/bash
+printf 'SAFE_GIT_EXECUTED: %s\n' "$*"
+exit 0
+EOF
+    chmod +x "$safe_bin/safe_git"
+    GIT_EXEC="$safe_bin/safe_git"
+
+    # Set KAISIAN_TESTING=0 inline to exercise the production branch of run_git
+    out=$(KAISIAN_TESTING=0 KAISIAN_GIT_EXEC="$mock_bin/evil_git" KAISIAN_RUNNER_PATH="$mock_bin" PATH="$mock_bin:$PATH" run_git status --short)
+    cleanup
+
+    assert_contains "$out" "SAFE_GIT_EXECUTED: status --short" || exit 1
+    case "$out" in
+      *"EVIL_GIT_RAN"*)
+        printf 'Production run_git executed KAISIAN_GIT_EXEC override!\n' >&2
+        exit 1
+        ;;
+      *"HOSTILE_ENV_EXECUTED"*)
+        printf 'Production run_git invoked shadowed bare env!\n' >&2
+        exit 1
+        ;;
+    esac
+    exit 0
+  ) || return 1
   return 0
 }
 
@@ -796,6 +865,8 @@ set -u
 dir=""
 target=""
 simulate=0
+dotfiles=0
+no_folding=0
 restow_pkgs=""
 delete_pkgs=""
 
@@ -803,7 +874,9 @@ while test $# -gt 0; do
   case "$1" in
     -d) dir=$2; shift 2 ;;
     -t) target=$2; shift 2 ;;
-    --dotfiles|--no-folding|--compat) shift ;;
+    --dotfiles) dotfiles=1; shift ;;
+    --no-folding) no_folding=1; shift ;;
+    --compat) shift ;;
     --simulate) simulate=1; shift ;;
     --ignore=*) shift ;;
     -R) restow_pkgs="$restow_pkgs $2"; shift 2 ;;
@@ -818,31 +891,32 @@ fi
 
 for pkg in $restow_pkgs; do
   pkg_dir="$dir/$pkg"
-  if test -d "$pkg_dir"; then
-    (
-      cd "$pkg_dir"
-      find . -type f | while read -r file; do
-        rel="${file#./}"
-        old_ifs=$IFS
-        IFS='/'
-        set -f
-        set -- $rel
-        set +f
-        IFS=$old_ifs
-        transformed=""
-        for comp in "$@"; do
+  test -d "$pkg_dir" || continue
+  (
+    cd "$pkg_dir"
+    find . -type f | while read -r file; do
+      rel="${file#./}"
+      old_ifs=$IFS
+      IFS='/'
+      set -f
+      set -- $rel
+      set +f
+      IFS=$old_ifs
+      transformed=""
+      for comp in "$@"; do
+        c="$comp"
+        if test "$dotfiles" -eq 1; then
           case "$comp" in
             dot-*) c=".${comp#dot-}" ;;
-            *) c="$comp" ;;
           esac
-          transformed="$transformed/$c"
-        done
-        tgt_file="$target$transformed"
-        mkdir -p "$(dirname "$tgt_file")"
-        ln -sf "$pkg_dir/$rel" "$tgt_file"
+        fi
+        transformed="$transformed/$c"
       done
-    )
-  fi
+      tgt_file="$target$transformed"
+      mkdir -p "$(dirname "$tgt_file")"
+      ln -sf "$pkg_dir/$rel" "$tgt_file"
+    done
+  )
 done
 
 # Non-compat deletion: leaves deleted files in target untouched
@@ -861,10 +935,12 @@ for pkg in $delete_pkgs; do
         IFS=$old_ifs
         transformed=""
         for comp in "$@"; do
-          case "$comp" in
-            dot-*) c=".${comp#dot-}" ;;
-            *) c="$comp" ;;
-          esac
+          c="$comp"
+          if test "$dotfiles" -eq 1; then
+            case "$comp" in
+              dot-*) c=".${comp#dot-}" ;;
+            esac
+          fi
           transformed="$transformed/$c"
         done
         tgt_file="$target$transformed"
@@ -911,7 +987,6 @@ lock_cleanup_on_subshell_failure_case() {
     return 1
   fi
 
-  # Run a subshell that acquires lock and then exits with failure (simulating test assertion failure)
   (
     export KAISIAN_TESTING=1
     . "$SCRIPT"
