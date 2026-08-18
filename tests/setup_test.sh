@@ -472,7 +472,7 @@ message_key_parity_case() {
   return 0
 }
 
-# 14. run_git environment sanitization and production hook immunity
+# 14. run_git environment sanitization
 run_git_sanitization_case() {
   uid=$(/usr/bin/id -u)
   lock_dir="/private/tmp/kaisian-$uid.lock"
@@ -605,7 +605,7 @@ stow_behavioral_probes_case() {
     mock_bin="$ROOT/mock-probe-bin"
     mkdir -p "$mock_bin"
 
-    # Create a behavioral fake stow enforcing --dotfiles, --no-folding, --compat, --ignore, --simulate
+    # Create a behavioral fake stow enforcing --dotfiles, --no-folding, --compat, built-in ignores, --simulate
     cat << 'EOF' > "$mock_bin/stow"
 #!/bin/bash
 set -u
@@ -638,6 +638,11 @@ if test "$simulate" -eq 1; then
   exit 0
 fi
 
+builtin_ignore=0
+if test -z "${HOME-}" || test ! -f "${HOME-}/.stow-global-ignore"; then
+  builtin_ignore=1
+fi
+
 # Link creation
 for pkg in $restow_pkgs; do
   pkg_dir="$dir/$pkg"
@@ -647,7 +652,12 @@ for pkg in $restow_pkgs; do
   if test "$no_folding" -eq 0; then
     for item in "$pkg_dir"/*; do
       test -e "$item" || continue
-      iname=$(basename "$item")
+      iname=${item##*/}
+      if test "$builtin_ignore" -eq 1; then
+        case "$iname" in
+          README*|LICENSE*|COPYING*|'*~'|'#*#') continue ;;
+        esac
+      fi
       tname="$iname"
       if test "$dotfiles" -eq 1; then
         case "$iname" in
@@ -662,6 +672,12 @@ for pkg in $restow_pkgs; do
       cd "$pkg_dir"
       find . -type f | while read -r file; do
         rel="${file#./}"
+        fname=${rel##*/}
+        if test "$builtin_ignore" -eq 1; then
+          case "$fname" in
+            README*|LICENSE*|COPYING*|'*~'|'#*#') continue ;;
+          esac
+        fi
         if test -n "$ignore_regex"; then
           if printf '%s\n' "$rel" | grep -Eq "$ignore_regex"; then
             continue
@@ -789,7 +805,7 @@ production_hook_immunity_case() {
     mock_bin="$ROOT/mock-evil-bin"
     mkdir -p "$mock_bin"
 
-    # Malicious git and stow
+    # Malicious git, stow, and bare env
     cat << 'EOF' > "$mock_bin/evil_git"
 #!/bin/bash
 printf 'EVIL_GIT_RAN\n'
@@ -815,15 +831,19 @@ EOF
 printf 'SAFE_GIT_EXECUTED: %s\n' "$*"
 exit 0
 EOF
-    chmod +x "$safe_bin/safe_git"
+    cat << 'EOF' > "$safe_bin/safe_stow"
+#!/bin/bash
+printf 'SAFE_STOW_EXECUTED: %s\n' "$*"
+exit 0
+EOF
+    chmod +x "$safe_bin/safe_git" "$safe_bin/safe_stow"
     GIT_EXEC="$safe_bin/safe_git"
+    STOW_EXEC="$safe_bin/safe_stow"
 
-    # Set KAISIAN_TESTING=0 inline to exercise the production branch of run_git
-    out=$(KAISIAN_TESTING=0 KAISIAN_GIT_EXEC="$mock_bin/evil_git" KAISIAN_RUNNER_PATH="$mock_bin" PATH="$mock_bin:$PATH" run_git status --short)
-    cleanup
-
-    assert_contains "$out" "SAFE_GIT_EXECUTED: status --short" || exit 1
-    case "$out" in
+    # Invoke run_git with KAISIAN_TESTING=0 inline
+    out_git=$(KAISIAN_TESTING=0 KAISIAN_GIT_EXEC="$mock_bin/evil_git" KAISIAN_RUNNER_PATH="$mock_bin" PATH="$mock_bin:$PATH" run_git status --short)
+    assert_contains "$out_git" "SAFE_GIT_EXECUTED: status --short" || exit 1
+    case "$out_git" in
       *"EVIL_GIT_RAN"*)
         printf 'Production run_git executed KAISIAN_GIT_EXEC override!\n' >&2
         exit 1
@@ -833,6 +853,22 @@ EOF
         exit 1
         ;;
     esac
+
+    # Invoke run_stow with KAISIAN_TESTING=0 inline
+    out_stow=$(KAISIAN_TESTING=0 KAISIAN_STOW_EXEC="$mock_bin/evil_stow" KAISIAN_RUNNER_PATH="$mock_bin" PATH="$mock_bin:$PATH" run_stow --version)
+    assert_contains "$out_stow" "SAFE_STOW_EXECUTED: --version" || exit 1
+    case "$out_stow" in
+      *"EVIL_STOW_RAN"*)
+        printf 'Production run_stow executed KAISIAN_STOW_EXEC override!\n' >&2
+        exit 1
+        ;;
+      *"HOSTILE_ENV_EXECUTED"*)
+        printf 'Production run_stow invoked shadowed bare env!\n' >&2
+        exit 1
+        ;;
+    esac
+
+    cleanup
     exit 0
   ) || return 1
   return 0
@@ -1004,6 +1040,40 @@ lock_cleanup_on_subshell_failure_case() {
   return 0
 }
 
+# 20. discover_executable does not execute external which, dirname, or basename from PATH
+discover_executable_purity_case() {
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+
+    mock_evil="$ROOT/mock-evil-path-tools"
+    mkdir -p "$mock_evil"
+    for tool in which dirname basename; do
+      cat << EOF > "$mock_evil/$tool"
+#!/bin/bash
+printf "HOSTILE_${tool}_EXECUTED\n" >&2
+exit 1
+EOF
+      chmod +x "$mock_evil/$tool"
+    done
+
+    # Run discover_executable with hostile PATH
+    out=$(PATH="$mock_evil:$PATH" discover_executable git 2>&1) || exit 1
+    test -n "$out" || exit 1
+    test -f "$out" || exit 1
+    test -x "$out" || exit 1
+
+    case "$out" in
+      *"HOSTILE_"*)
+        printf 'discover_executable executed hostile PATH tool!\n' >&2
+        exit 1
+        ;;
+    esac
+    exit 0
+  ) || return 1
+  return 0
+}
+
 run_case '--help succeeds when git/stow/fzf are absent' help_without_tools_case
 run_case '--profile/--groups/--interactive/--all reject every pair' selection_mutual_exclusion_case
 run_case 'unknown arguments and missing values fail' unknown_and_missing_values_case
@@ -1023,6 +1093,7 @@ run_case 'behavioral stow probes in require_prerequisites' stow_behavioral_probe
 run_case 'production runner hook immunity' production_hook_immunity_case
 run_case 'compat probe failure on ignored compat behavior' compat_probe_failure_on_ignored_compat_case
 run_case 'subshell lock cleanup safety on assertion failure' lock_cleanup_on_subshell_failure_case
+run_case 'discover_executable does not execute external which, dirname, or basename from PATH' discover_executable_purity_case
 
 printf '%s passed; %s failed\n' "$PASS" "$FAIL"
 test "$FAIL" -eq 0

@@ -330,8 +330,8 @@ canonicalize_path() {
             if test -d "$next_path"; then
               curr_dir=$(cd -P -- "$next_path" 2>/dev/null && pwd -P) || curr_dir="$next_path"
             else
-              phys_parent=$(cd -P -- "$(dirname "$next_path")" 2>/dev/null && pwd -P) || phys_parent=$(dirname "$next_path")
-              base=$(basename "$next_path")
+              phys_parent=$(cd -P -- "${next_path%/*}" 2>/dev/null && pwd -P) || phys_parent=${next_path%/*}
+              base=${next_path##*/}
               suffix="/$base"
               curr_dir="$phys_parent"
             fi
@@ -463,34 +463,60 @@ cleanup() {
 
 discover_executable() {
   name=$1
-  raw_path=$(which "$name" 2>/dev/null || type -p "$name" 2>/dev/null || command -v "$name" 2>/dev/null || true)
+  test -n "$name" || return 1
+  raw_path=$(type -P -- "$name" 2>/dev/null || true)
+  if test -z "$raw_path"; then
+    old_ifs=$IFS
+    IFS=':'
+    set -f
+    # shellcheck disable=SC2086
+    set -- ${PATH-}
+    set +f
+    IFS=$old_ifs
+    for pdir in "$@"; do
+      test -n "$pdir" || pdir='.'
+      candidate="$pdir/$name"
+      if test -f "$candidate" && test -x "$candidate"; then
+        raw_path="$candidate"
+        break
+      fi
+    done
+  fi
   test -n "$raw_path" || return 1
+
   case "$raw_path" in
-    /*) abs_path="$raw_path" ;;
+    /*)
+      dir_part="${raw_path%/*}"
+      file_part="${raw_path##*/}"
+      test -n "$dir_part" || dir_part='/'
+      abs_dir=$(cd -P -- "$dir_part" 2>/dev/null && pwd -P) || return 1
+      if test "$abs_dir" = '/'; then
+        abs_path="/$file_part"
+      else
+        abs_path="$abs_dir/$file_part"
+      fi
+      ;;
     */*)
-      abs_dir=$(cd -P -- "$(dirname "$raw_path")" 2>/dev/null && pwd -P) || return 1
-      abs_path="$abs_dir/$(basename "$raw_path")"
+      dir_part="${raw_path%/*}"
+      file_part="${raw_path##*/}"
+      test -n "$dir_part" || dir_part='.'
+      abs_dir=$(cd -P -- "$dir_part" 2>/dev/null && pwd -P) || return 1
+      if test "$abs_dir" = '/'; then
+        abs_path="/$file_part"
+      else
+        abs_path="$abs_dir/$file_part"
+      fi
       ;;
     *)
-      abs_path=''
-      old_ifs=$IFS
-      IFS=':'
-      set -f
-      # shellcheck disable=SC2086
-      set -- ${PATH-}
-      set +f
-      IFS=$old_ifs
-      for pdir in "$@"; do
-        test -n "$pdir" || pdir='.'
-        candidate="$pdir/$name"
-        if test -f "$candidate" && test -x "$candidate"; then
-          abs_dir=$(cd -P -- "$pdir" 2>/dev/null && pwd -P) || abs_dir="$pdir"
-          abs_path="$abs_dir/$name"
-          break
-        fi
-      done
+      abs_dir=$(cd -P -- '.' 2>/dev/null && pwd -P) || return 1
+      if test "$abs_dir" = '/'; then
+        abs_path="/$raw_path"
+      else
+        abs_path="$abs_dir/$raw_path"
+      fi
       ;;
   esac
+
   test -n "$abs_path" || return 1
   test -f "$abs_path" || return 1
   test -x "$abs_path" || return 1
