@@ -1243,6 +1243,13 @@ manifest_valid_and_tsv_output_case() {
     test -f "$SANDBOX/groups.tsv" || exit 1
     test -f "$SANDBOX/profiles.tsv" || exit 1
 
+    # Test one-argument interface where checkout directory is inferred as '.'
+    (
+      cd "$checkout" || exit 1
+      parse_manifest .kaisian.json || exit 1
+      test -f "$SANDBOX/groups.tsv" || exit 1
+    ) || exit 1
+
     expected_groups=$(printf 'shell\tShell configuration\tShell 設定\ngit\tGit configuration\tGit 設定\nmise\tRuntime and tool version management\t執行環境與工具版本管理\nterminal\tTerminal emulator configuration\t終端機模擬器設定\n')
     actual_groups=$(cat "$SANDBOX/groups.tsv")
     test "$actual_groups" = "$expected_groups" || exit 1
@@ -1383,6 +1390,27 @@ manifest_invalid_syntax_and_types_case() {
     # 32. Profile contains duplicate group
     assert_manifest_fails '{"schema": 1, "groups": [{"name": "shell", "description": {"en": "e", "zh-TW": "z"}}], "profiles": {"minimal": ["shell", "shell"]}}' 'profile duplicate group' || exit 1
 
+    # 33. Trailing newline in description
+    assert_manifest_fails "{\"schema\": 1, \"groups\": [{\"name\": \"shell\", \"description\": {\"en\": \"trailing\\n\", \"zh-TW\": \"z\"}}]}" 'trailing newline in description' || exit 1
+
+    # 34. Delimiter-bearing top key
+    assert_manifest_fails "{\"schema\": 1, \"groups\": [{\"name\": \"shell\", \"description\": {\"en\": \"e\", \"zh-TW\": \"z\"}}], \"schema\\ngroups\": true}" 'newline in top key' || exit 1
+
+    # 35. Delimiter-bearing group key
+    assert_manifest_fails "{\"schema\": 1, \"groups\": [{\"name\": \"shell\", \"description\": {\"en\": \"e\", \"zh-TW\": \"z\"}, \"name\\ndescription\": true}]}" 'newline in group key' || exit 1
+
+    # 36. Delimiter-bearing description key
+    assert_manifest_fails "{\"schema\": 1, \"groups\": [{\"name\": \"shell\", \"description\": {\"en\": \"e\", \"zh-TW\": \"z\", \"en\\nzh-TW\": true}}]}" 'newline in desc key' || exit 1
+
+    # 37. Delimiter-bearing profile key
+    assert_manifest_fails "{\"schema\": 1, \"groups\": [{\"name\": \"shell\", \"description\": {\"en\": \"e\", \"zh-TW\": \"z\"}}], \"profiles\": {\"minimal\\ndefault\": [\"shell\"]}}" 'newline in profile key' || exit 1
+
+    # 38. Localized zh-TW failure reason contains no hardcoded English reason
+    printf '{"schema": 1, "groups": {}}\n' > "$SANDBOX/test_manifest_zh.json"
+    out_zh=$(LANGUAGE='zh-TW' parse_manifest "$SANDBOX/test_manifest_zh.json" "$checkout" 2>&1)
+    assert_contains "$out_zh" "無效的 manifest：「groups」必須是陣列。" || exit 1
+    ! assert_contains "$out_zh" "array" || exit 1
+    ! assert_contains "$out_zh" "Invalid" || exit 1
     cleanup
     trap - EXIT
     exit 0
@@ -1695,16 +1723,19 @@ EOF
     exit 0
   ) || return 1
 
-  # 3. fzf Esc / Ctrl-C (exit 130) => clean zero exit before target mutation
+  # 3. fzf Esc / Ctrl-C (exit 130) => clean zero exit before target mutation in nested subshell
   (
     export KAISIAN_TESTING=1
     . "$SCRIPT"
     test_home=$(make_home)
     HOME="$test_home"
     acquire_lock || exit 1
-    trap 'cleanup' EXIT
-
     parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+
+    # Preseed sentinels outside sandbox in test root / home
+    echo 'sentinel_selected' > "$test_home/sentinel_selected.txt"
+    echo 'sentinel_unselected' > "$test_home/sentinel_unselected.txt"
+    echo 'sentinel_target' > "$test_home/target_leaf"
 
     cat << 'EOF' > "$fzf_mock_dir/fzf_130"
 #!/bin/bash
@@ -1712,17 +1743,26 @@ exit 130
 EOF
     chmod +x "$fzf_mock_dir/fzf_130"
 
-    SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_130" resolve_selection
-    status=$?
-    test "$status" -eq 0 || exit 1
+    # Invoke in nested subshell
+    (
+      SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_130" resolve_selection
+    )
+    cancellation_status=$?
 
-    # Note: select_interactively calls cleanup on 130 before exiting
+    # Assert status is 0 from enclosing test process
+    test "$cancellation_status" -eq 0 || exit 1
+
+    # Assert lock cleanup ran
     test ! -d "$LOCK_DIR" || exit 1
-    trap - EXIT
+
+    # Assert sentinels outside sandbox are intact and unchanged
+    test "$(cat "$test_home/sentinel_selected.txt")" = 'sentinel_selected' || exit 1
+    test "$(cat "$test_home/sentinel_unselected.txt")" = 'sentinel_unselected' || exit 1
+    test "$(cat "$test_home/target_leaf")" = 'sentinel_target' || exit 1
     exit 0
   ) || return 1
 
-  # 4, 5, 6. Empty selection, error status, and non-TTY error checks
+  # 4, 5, 6, 7, 8. Empty selection, error status, bogus records, and non-TTY error checks
   (
     export KAISIAN_TESTING=1
     . "$SCRIPT"
@@ -1757,7 +1797,33 @@ EOF
     test "$status" -ne 0 || exit 1
     assert_contains "$out" "fzf interactive selection failed" || exit 1
 
-    # 6. Non-TTY interactive => localized nonzero
+    # 6. Bogus unknown record in fzf output => nonzero
+    cat << 'EOF' > "$fzf_mock_dir/fzf_bogus"
+#!/bin/bash
+printf 'nonexistent_package\tSome desc\n'
+exit 0
+EOF
+    chmod +x "$fzf_mock_dir/fzf_bogus"
+
+    out=$(SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_bogus" resolve_selection 2>&1)
+    status=$?
+    test "$status" -ne 0 || exit 1
+    assert_contains "$out" "fzf interactive selection failed" || exit 1
+
+    # 7. Mixed valid + bogus record in fzf output => nonzero
+    cat << 'EOF' > "$fzf_mock_dir/fzf_mixed"
+#!/bin/bash
+printf 'shell\tShell config\nunknown_pkg\tUnknown\n'
+exit 0
+EOF
+    chmod +x "$fzf_mock_dir/fzf_mixed"
+
+    out=$(SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_mixed" resolve_selection 2>&1)
+    status=$?
+    test "$status" -ne 0 || exit 1
+    assert_contains "$out" "fzf interactive selection failed" || exit 1
+
+    # 8. Non-TTY interactive => localized nonzero
     out=$(LANGUAGE='en' SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=0 resolve_selection 2>&1)
     test $? -ne 0 || exit 1
     assert_contains "$out" "A controlling terminal is required" || exit 1

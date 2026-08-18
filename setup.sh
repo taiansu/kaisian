@@ -85,12 +85,48 @@ message_en() {
     lock_failed) printf 'Failed to acquire lock at %s. Another instance may be running, or a stale lock directory exists.' "${1-}" ;;
     unsafe_path_overlap) printf "Path '%s' overlaps with lock or sandbox directory '%s'." "${1-}" "${2-}" ;;
     unsupported_stow) printf 'GNU Stow does not support required behavior (%s).' "${1-}" ;;
-    invalid_manifest) printf 'Invalid manifest: %s' "${1-}" ;;
+    invalid_manifest)
+      reason_key=${1-}
+      case "$reason_key" in
+        malformed_syntax) printf 'Invalid manifest: malformed JSON syntax.' ;;
+        root_not_object) printf 'Invalid manifest: root must be a JSON object.' ;;
+        unknown_top_key) printf "Invalid manifest: unknown top-level key '%s'." "${2-}" ;;
+        missing_schema) printf "Invalid manifest: missing 'schema' key." ;;
+        missing_groups) printf "Invalid manifest: missing 'groups' key." ;;
+        schema_not_integer) printf "Invalid manifest: 'schema' must be an integer." ;;
+        unsupported_schema) printf "Invalid manifest: unsupported schema version '%s'." "${2-}" ;;
+        groups_not_array) printf "Invalid manifest: 'groups' must be an array." ;;
+        empty_groups) printf "Invalid manifest: 'groups' cannot be empty." ;;
+        group_not_object) printf "Invalid manifest: group item %s must be an object." "${2-}" ;;
+        group_missing_name) printf "Invalid manifest: group %s missing 'name'." "${2-}" ;;
+        group_missing_description) printf "Invalid manifest: group %s missing 'description'." "${2-}" ;;
+        group_invalid_name) printf "Invalid manifest: invalid group name '%s'." "${2-}" ;;
+        group_duplicate_name) printf "Invalid manifest: duplicate group name '%s'." "${2-}" ;;
+        group_unknown_key) printf "Invalid manifest: unknown key in group %s." "${2-}" ;;
+        description_not_object) printf "Invalid manifest: group %s 'description' must be an object." "${2-}" ;;
+        description_missing_en) printf "Invalid manifest: group %s description missing 'en'." "${2-}" ;;
+        description_missing_zhtw) printf "Invalid manifest: group %s description missing 'zh-TW'." "${2-}" ;;
+        description_unknown_key) printf "Invalid manifest: unknown key in group %s description." "${2-}" ;;
+        description_empty_en) printf "Invalid manifest: group %s description.en cannot be empty." "${2-}" ;;
+        description_empty_zhtw) printf "Invalid manifest: group %s description.zh-TW cannot be empty." "${2-}" ;;
+        description_control_char) printf "Invalid manifest: group %s description contains control/tab/newline characters." "${2-}" ;;
+        missing_package_dir) printf "Invalid manifest: missing package directory '%s'." "${2-}" ;;
+        undeclared_package_dir) printf "Invalid manifest: undeclared package directory '%s'." "${2-}" ;;
+        profiles_not_object) printf "Invalid manifest: 'profiles' must be an object." ;;
+        profile_invalid_name) printf "Invalid manifest: invalid profile name '%s'." "${2-}" ;;
+        profile_not_array) printf "Invalid manifest: profile '%s' must be an array." "${2-}" ;;
+        profile_empty) printf "Invalid manifest: profile '%s' cannot be empty." "${2-}" ;;
+        profile_unknown_group) printf "Invalid manifest: profile '%s' references unknown group '%s'." "${2-}" "${3-}" ;;
+        profile_duplicate_group) printf "Invalid manifest: profile '%s' contains duplicate group '%s'." "${2-}" "${3-}" ;;
+        profile_unknown_key) printf "Invalid manifest: unknown key in 'profiles'." ;;
+        *) printf 'Invalid manifest: %s' "${1-}" ;;
+      esac
+      ;;
     unknown_profile) printf "Unknown profile '%s'." "${1-}" ;;
     unknown_group) printf "Unknown group '%s'." "${1-}" ;;
     empty_group_selection) printf 'Group selection cannot be empty.' ;;
     empty_selection) printf 'No packages selected.' ;;
-    fzf_failed) printf 'fzf interactive selection failed (status %s).' "${1-}" ;;
+    fzf_failed) printf 'fzf interactive selection failed (%s).' "${1-}" ;;
     *) return 64 ;;
   esac
 }
@@ -111,12 +147,48 @@ message_zh_tw() {
     lock_failed) printf '無法取得鎖定：%s。可能有其他執行個體正在執行，或存在殘留的鎖定目錄。' "${1-}" ;;
     unsafe_path_overlap) printf '路徑「%s」與鎖定或沙盒目錄「%s」重疊。' "${1-}" "${2-}" ;;
     unsupported_stow) printf 'GNU Stow 不支援必要功能（%s）。' "${1-}" ;;
-    invalid_manifest) printf '無效的 manifest：%s' "${1-}" ;;
+    invalid_manifest)
+      reason_key=${1-}
+      case "$reason_key" in
+        malformed_syntax) printf '無效的 manifest：JSON 語法錯誤。' ;;
+        root_not_object) printf '無效的 manifest：根節點必須是 JSON 物件。' ;;
+        unknown_top_key) printf '無效的 manifest：未知的頂層鍵值「%s」。' "${2-}" ;;
+        missing_schema) printf '無效的 manifest：缺少「schema」鍵值。' ;;
+        missing_groups) printf '無效的 manifest：缺少「groups」鍵值。' ;;
+        schema_not_integer) printf '無效的 manifest：「schema」必須是整數。' ;;
+        unsupported_schema) printf '無效的 manifest：不支援的 schema 版本「%s」。' "${2-}" ;;
+        groups_not_array) printf '無效的 manifest：「groups」必須是陣列。' ;;
+        empty_groups) printf '無效的 manifest：「groups」不能為空。' ;;
+        group_not_object) printf '無效的 manifest：群組項目 %s 必須是物件。' "${2-}" ;;
+        group_missing_name) printf '無效的 manifest：群組 %s 缺少「name」。' "${2-}" ;;
+        group_missing_description) printf '無效的 manifest：群組 %s 缺少「description」。' "${2-}" ;;
+        group_invalid_name) printf '無效的 manifest：無效的群組名稱「%s」。' "${2-}" ;;
+        group_duplicate_name) printf '無效的 manifest：重複的群組名稱「%s」。' "${2-}" ;;
+        group_unknown_key) printf '無效的 manifest：群組 %s 包含未知鍵值。' "${2-}" ;;
+        description_not_object) printf '無效的 manifest：群組 %s 的「description」必須是物件。' "${2-}" ;;
+        description_missing_en) printf '無效的 manifest：群組 %s 的 description 缺少「en」。' "${2-}" ;;
+        description_missing_zhtw) printf '無效的 manifest：群組 %s 的 description 缺少「zh-TW」。' "${2-}" ;;
+        description_unknown_key) printf '無效的 manifest：群組 %s 的 description 包含未知鍵值。' "${2-}" ;;
+        description_empty_en) printf '無效的 manifest：群組 %s 的 description.en 不能為空。' "${2-}" ;;
+        description_empty_zhtw) printf '無效的 manifest：群組 %s 的 description.zh-TW 不能為空。' "${2-}" ;;
+        description_control_char) printf '無效的 manifest：群組 %s 的說明包含控制字元、Tab 或換行。' "${2-}" ;;
+        missing_package_dir) printf '無效的 manifest：缺少套件目錄「%s」。' "${2-}" ;;
+        undeclared_package_dir) printf '無效的 manifest：未宣告的套件目錄「%s」。' "${2-}" ;;
+        profiles_not_object) printf '無效的 manifest：「profiles」必須是物件。' ;;
+        profile_invalid_name) printf '無效的 manifest：無效的設定檔名稱「%s」。' "${2-}" ;;
+        profile_not_array) printf '無效的 manifest：設定檔「%s」必須是陣列。' "${2-}" ;;
+        profile_empty) printf '無效的 manifest：設定檔「%s」不能為空。' "${2-}" ;;
+        profile_unknown_group) printf '無效的 manifest：設定檔「%s」引用了未知的群組「%s」。' "${2-}" "${3-}" ;;
+        profile_duplicate_group) printf '無效的 manifest：設定檔「%s」包含重複的群組「%s」。' "${2-}" "${3-}" ;;
+        profile_unknown_key) printf '無效的 manifest：「profiles」包含未知鍵值。' ;;
+        *) printf '無效的 manifest：%s' "${1-}" ;;
+      esac
+      ;;
     unknown_profile) printf '未知的設定檔「%s」。' "${1-}" ;;
     unknown_group) printf '未知的群組「%s」。' "${1-}" ;;
     empty_group_selection) printf '群組選取不能為空。' ;;
     empty_selection) printf '未選取任何套件。' ;;
-    fzf_failed) printf 'fzf 互動選取失敗（狀態碼 %s）。' "${1-}" ;;
+    fzf_failed) printf 'fzf 互動選取失敗（%s）。' "${1-}" ;;
     *) return 64 ;;
   esac
 }
@@ -670,7 +742,11 @@ parse_manifest() {
   test -n "$manifest" || die invalid_manifest 'manifest path is required'
   test -f "$manifest" && test -r "$manifest" || die invalid_manifest "$manifest"
 
-  checkout_dir="${2:-${CHECKOUT_DIR:-${manifest%/*}}}"
+  case "$manifest" in
+    */*) manifest_dir="${manifest%/*}" ;;
+    *) manifest_dir='.' ;;
+  esac
+  checkout_dir="${2:-${CHECKOUT_DIR:-$manifest_dir}}"
   test -n "$checkout_dir" || checkout_dir='.'
   test -d "$checkout_dir" || die invalid_manifest "checkout directory '$checkout_dir' not found"
 
@@ -679,92 +755,96 @@ parse_manifest() {
   if test "${KAISIAN_TESTING-0}" = '1'; then
     plutil_bin="${KAISIAN_PLUTIL_EXEC:-${PLUTIL_EXEC:-/usr/bin/plutil}}"
   else
-    plutil_bin="${PLUTIL_EXEC:-/usr/bin/plutil}"
+    plutil_bin='/usr/bin/plutil'
   fi
 
   # 1. Syntax check
-  "$plutil_bin" -convert json -o /dev/null -- "$manifest" 2>/dev/null || die invalid_manifest 'malformed JSON syntax'
+  "$plutil_bin" -convert json -o /dev/null -- "$manifest" 2>/dev/null || die invalid_manifest malformed_syntax
 
   # 2. Convert to XML in sandbox and wrap to inspect root dictionary keys
   manifest_xml="$SANDBOX/manifest.xml"
-  "$plutil_bin" -convert xml1 -o "$manifest_xml" -- "$manifest" 2>/dev/null || die invalid_manifest 'XML conversion failed'
+  "$plutil_bin" -convert xml1 -o "$manifest_xml" -- "$manifest" 2>/dev/null || die invalid_manifest malformed_syntax
 
   wrapper_xml="$SANDBOX/manifest_wrapper.xml"
-  "$plutil_bin" -create xml1 "$wrapper_xml" 2>/dev/null || die invalid_manifest 'plist wrapper creation failed'
-  "$plutil_bin" -insert root -xml "$(cat "$manifest_xml")" "$wrapper_xml" 2>/dev/null || die invalid_manifest 'plist wrapper insertion failed'
+  "$plutil_bin" -create xml1 "$wrapper_xml" 2>/dev/null || die invalid_manifest malformed_syntax
+  "$plutil_bin" -insert root -xml "$(cat "$manifest_xml")" "$wrapper_xml" 2>/dev/null || die invalid_manifest malformed_syntax
 
   root_type=$("$plutil_bin" -type root "$wrapper_xml" 2>/dev/null || true)
-  test "$root_type" = 'dictionary' || die invalid_manifest 'root must be a JSON object'
+  test "$root_type" = 'dictionary' || die invalid_manifest root_not_object
 
-  root_keys=$("$plutil_bin" -extract root raw "$wrapper_xml" 2>/dev/null || true)
-  has_schema=0
-  has_groups=0
+  # Top-level keys: verify schema and groups exist
+  schema_type=$("$plutil_bin" -type root.schema "$wrapper_xml" 2>/dev/null || true)
+  test -n "$schema_type" || die invalid_manifest missing_schema
+
+  groups_type=$("$plutil_bin" -type root.groups "$wrapper_xml" 2>/dev/null || true)
+  test -n "$groups_type" || die invalid_manifest missing_groups
+
   has_profiles=0
-  old_ifs=$IFS
-  IFS='
-'
-  for k in $root_keys; do
-    case "$k" in
-      schema) has_schema=1 ;;
-      groups) has_groups=1 ;;
-      profiles) has_profiles=1 ;;
-      *) IFS=$old_ifs; die invalid_manifest "unknown top-level key '$k'" ;;
-    esac
-  done
-  IFS=$old_ifs
+  profiles_type=$("$plutil_bin" -type root.profiles "$wrapper_xml" 2>/dev/null || true)
+  if test -n "$profiles_type"; then
+    has_profiles=1
+  fi
 
-  test "$has_schema" -eq 1 || die invalid_manifest "missing 'schema' key"
-  test "$has_groups" -eq 1 || die invalid_manifest "missing 'groups' key"
+  # Unknown top-level key check via plutil residual validation
+  root_check_xml="$SANDBOX/manifest_root_check.xml"
+  cp "$wrapper_xml" "$root_check_xml"
+  "$plutil_bin" -remove root.schema "$root_check_xml" 2>/dev/null || true
+  "$plutil_bin" -remove root.groups "$root_check_xml" 2>/dev/null || true
+  if test "$has_profiles" -eq 1; then
+    "$plutil_bin" -remove root.profiles "$root_check_xml" 2>/dev/null || true
+  fi
+  residual_root=$("$plutil_bin" -extract root json -o - "$root_check_xml" 2>/dev/null || true)
+  test "$residual_root" = '{}' || die invalid_manifest unknown_top_key "$residual_root"
+  /bin/rm -f "$root_check_xml" 2>/dev/null || true
 
   # 3. Schema validation
-  schema_type=$("$plutil_bin" -type schema "$manifest" 2>/dev/null || true)
-  test "$schema_type" = 'integer' || die invalid_manifest "'schema' must be an integer"
+  test "$schema_type" = 'integer' || die invalid_manifest schema_not_integer
   schema_val=$("$plutil_bin" -extract schema raw "$manifest" 2>/dev/null || true)
-  test "$schema_val" = '1' || die invalid_manifest "unsupported schema version '$schema_val'"
+  test "$schema_val" = '1' || die invalid_manifest unsupported_schema "$schema_val"
 
   # 4. Groups validation
-  groups_type=$("$plutil_bin" -type groups "$manifest" 2>/dev/null || true)
-  test "$groups_type" = 'array' || die invalid_manifest "'groups' must be an array"
+  test "$groups_type" = 'array' || die invalid_manifest groups_not_array
   group_count=$("$plutil_bin" -extract groups raw "$manifest" 2>/dev/null || true)
   case "$group_count" in
     [0-9]*) ;;
-    *) die invalid_manifest "invalid group count" ;;
+    *) die invalid_manifest groups_not_array ;;
   esac
-  test "$group_count" -gt 0 || die invalid_manifest "'groups' cannot be empty"
+  test "$group_count" -gt 0 || die invalid_manifest empty_groups
 
   groups_tsv="$SANDBOX/groups.tsv"
   : > "$groups_tsv"
   seen_group_names=''
 
   i=0
+  nl='
+'
   while test "$i" -lt "$group_count"; do
     gtype=$("$plutil_bin" -type "groups.$i" "$manifest" 2>/dev/null || true)
-    test "$gtype" = 'dictionary' || die invalid_manifest "group $i must be an object"
+    test "$gtype" = 'dictionary' || die invalid_manifest group_not_object "$i"
 
-    gkeys=$("$plutil_bin" -extract "groups.$i" raw "$manifest" 2>/dev/null || true)
-    has_name=0
-    has_desc=0
-    old_ifs=$IFS
-    IFS='
-'
-    for gk in $gkeys; do
-      case "$gk" in
-        name) has_name=1 ;;
-        description) has_desc=1 ;;
-        *) IFS=$old_ifs; die invalid_manifest "unknown key '$gk' in group $i" ;;
-      esac
-    done
-    IFS=$old_ifs
-    test "$has_name" -eq 1 || die invalid_manifest "group $i missing 'name'"
-    test "$has_desc" -eq 1 || die invalid_manifest "group $i missing 'description'"
+    # Verify required keys in group
+    gname_type=$("$plutil_bin" -type "groups.$i.name" "$manifest" 2>/dev/null || true)
+    test -n "$gname_type" || die invalid_manifest group_missing_name "$i"
 
-    name_type=$("$plutil_bin" -type "groups.$i.name" "$manifest" 2>/dev/null || true)
-    test "$name_type" = 'string' || die invalid_manifest "group $i 'name' must be a string"
+    gdesc_type=$("$plutil_bin" -type "groups.$i.description" "$manifest" 2>/dev/null || true)
+    test -n "$gdesc_type" || die invalid_manifest group_missing_description "$i"
+
+    # Residual unknown-key check on group
+    group_check_xml="$SANDBOX/group_check_$i.xml"
+    cp "$manifest_xml" "$group_check_xml"
+    "$plutil_bin" -remove "groups.$i.name" "$group_check_xml" 2>/dev/null || true
+    "$plutil_bin" -remove "groups.$i.description" "$group_check_xml" 2>/dev/null || true
+    residual_group=$("$plutil_bin" -extract "groups.$i" json -o - "$group_check_xml" 2>/dev/null || true)
+    test "$residual_group" = '{}' || die invalid_manifest group_unknown_key "$i"
+    /bin/rm -f "$group_check_xml" 2>/dev/null || true
+
+    # Name validation
+    test "$gname_type" = 'string' || die invalid_manifest group_invalid_name "$i"
     gname=$("$plutil_bin" -extract "groups.$i.name" raw "$manifest" 2>/dev/null || true)
-    is_valid_name "$gname" || die invalid_manifest "invalid group name '$gname'"
+    is_valid_name "$gname" || die invalid_manifest group_invalid_name "$gname"
 
     case " $seen_group_names " in
-      *" $gname "*) die invalid_manifest "duplicate group name '$gname'" ;;
+      *" $gname "*) die invalid_manifest group_duplicate_name "$gname" ;;
     esac
     if test -z "$seen_group_names"; then
       seen_group_names="$gname"
@@ -772,45 +852,45 @@ parse_manifest() {
       seen_group_names="$seen_group_names $gname"
     fi
 
-    desc_type=$("$plutil_bin" -type "groups.$i.description" "$manifest" 2>/dev/null || true)
-    test "$desc_type" = 'dictionary' || die invalid_manifest "group $i 'description' must be an object"
-
-    dkeys=$("$plutil_bin" -extract "groups.$i.description" raw "$manifest" 2>/dev/null || true)
-    has_en=0
-    has_zhtw=0
-    old_ifs=$IFS
-    IFS='
-'
-    for dk in $dkeys; do
-      case "$dk" in
-        en) has_en=1 ;;
-        zh-TW) has_zhtw=1 ;;
-        *) IFS=$old_ifs; die invalid_manifest "unknown key '$dk' in group $i description" ;;
-      esac
-    done
-    IFS=$old_ifs
-    test "$has_en" -eq 1 || die invalid_manifest "group $i description missing 'en'"
-    test "$has_zhtw" -eq 1 || die invalid_manifest "group $i description missing 'zh-TW'"
+    # Description validation
+    test "$gdesc_type" = 'dictionary' || die invalid_manifest description_not_object "$i"
 
     en_type=$("$plutil_bin" -type "groups.$i.description.en" "$manifest" 2>/dev/null || true)
-    test "$en_type" = 'string' || die invalid_manifest "group $i description.en must be a string"
-    desc_en=$("$plutil_bin" -extract "groups.$i.description.en" raw "$manifest" 2>/dev/null || true)
-    test -n "$desc_en" || die invalid_manifest "group $i description.en cannot be empty"
-    has_control_char "$desc_en" && die invalid_manifest "group $i description.en contains control/tab/newline characters"
+    test -n "$en_type" || die invalid_manifest description_missing_en "$i"
 
     zhtw_type=$("$plutil_bin" -type "groups.$i.description.zh-TW" "$manifest" 2>/dev/null || true)
-    test "$zhtw_type" = 'string' || die invalid_manifest "group $i description.zh-TW must be a string"
-    desc_zh=$("$plutil_bin" -extract "groups.$i.description.zh-TW" raw "$manifest" 2>/dev/null || true)
-    test -n "$desc_zh" || die invalid_manifest "group $i description.zh-TW cannot be empty"
-    has_control_char "$desc_zh" && die invalid_manifest "group $i description.zh-TW contains control/tab/newline characters"
+    test -n "$zhtw_type" || die invalid_manifest description_missing_zhtw "$i"
 
-    printf '%s\t%s\t%s\n' "$gname" "$desc_en" "$desc_zh" >> "$groups_tsv"
+    # Residual unknown-key check on description
+    desc_check_xml="$SANDBOX/desc_check_$i.xml"
+    cp "$manifest_xml" "$desc_check_xml"
+    "$plutil_bin" -remove "groups.$i.description.en" "$desc_check_xml" 2>/dev/null || true
+    "$plutil_bin" -remove "groups.$i.description.zh-TW" "$desc_check_xml" 2>/dev/null || true
+    residual_desc=$("$plutil_bin" -extract "groups.$i.description" json -o - "$desc_check_xml" 2>/dev/null || true)
+    test "$residual_desc" = '{}' || die invalid_manifest description_unknown_key "$i"
+    /bin/rm -f "$desc_check_xml" 2>/dev/null || true
+
+    test "$en_type" = 'string' || die invalid_manifest description_empty_en "$i"
+    raw_desc_en=$("$plutil_bin" -extract "groups.$i.description.en" raw "$manifest" 2>/dev/null; printf 'x')
+    raw_desc_en=${raw_desc_en%x}
+    raw_desc_en=${raw_desc_en%"$nl"}
+    test -n "$raw_desc_en" || die invalid_manifest description_empty_en "$i"
+    has_control_char "$raw_desc_en" && die invalid_manifest description_control_char "$i"
+
+    test "$zhtw_type" = 'string' || die invalid_manifest description_empty_zhtw "$i"
+    raw_desc_zh=$("$plutil_bin" -extract "groups.$i.description.zh-TW" raw "$manifest" 2>/dev/null; printf 'x')
+    raw_desc_zh=${raw_desc_zh%x}
+    raw_desc_zh=${raw_desc_zh%"$nl"}
+    test -n "$raw_desc_zh" || die invalid_manifest description_empty_zhtw "$i"
+    has_control_char "$raw_desc_zh" && die invalid_manifest description_control_char "$i"
+
+    printf '%s\t%s\t%s\n' "$gname" "$raw_desc_en" "$raw_desc_zh" >> "$groups_tsv"
     i=$((i + 1))
   done
 
   # 5. Package directory alignment
   for g in $seen_group_names; do
-    test -d "$checkout_dir/$g" && test ! -L "$checkout_dir/$g" || die invalid_manifest "missing package directory '$g'"
+    test -d "$checkout_dir/$g" && test ! -L "$checkout_dir/$g" || die invalid_manifest missing_package_dir "$g"
   done
 
   for entry in "$checkout_dir"/*; do
@@ -819,7 +899,7 @@ parse_manifest() {
       entry_name="${entry##*/}"
       case " $seen_group_names " in
         *" $entry_name "*) ;;
-        *) die invalid_manifest "undeclared package directory '$entry_name'" ;;
+        *) die invalid_manifest undeclared_package_dir "$entry_name" ;;
       esac
     fi
   done
@@ -829,8 +909,10 @@ parse_manifest() {
   : > "$profiles_tsv"
 
   if test "$has_profiles" -eq 1; then
-    ptype=$("$plutil_bin" -type profiles "$manifest" 2>/dev/null || true)
-    test "$ptype" = 'dictionary' || die invalid_manifest "'profiles' must be an object"
+    test "$profiles_type" = 'dictionary' || die invalid_manifest profiles_not_object
+
+    prof_check_xml="$SANDBOX/prof_check.xml"
+    cp "$manifest_xml" "$prof_check_xml"
 
     pnames=$("$plutil_bin" -extract profiles raw "$manifest" 2>/dev/null || true)
     old_ifs=$IFS
@@ -838,32 +920,32 @@ parse_manifest() {
 '
     for pname in $pnames; do
       IFS=$old_ifs
-      is_valid_name "$pname" || die invalid_manifest "invalid profile name '$pname'"
+      is_valid_name "$pname" || die invalid_manifest profile_invalid_name "$pname"
 
       prof_type=$("$plutil_bin" -type "profiles.$pname" "$manifest" 2>/dev/null || true)
-      test "$prof_type" = 'array' || die invalid_manifest "profile '$pname' must be an array"
+      test "$prof_type" = 'array' || die invalid_manifest profile_not_array "$pname"
 
       pcount=$("$plutil_bin" -extract "profiles.$pname" raw "$manifest" 2>/dev/null || true)
       case "$pcount" in
         [0-9]*) ;;
-        *) die invalid_manifest "invalid count for profile '$pname'" ;;
+        *) die invalid_manifest profile_not_array "$pname" ;;
       esac
-      test "$pcount" -gt 0 || die invalid_manifest "profile '$pname' cannot be empty"
+      test "$pcount" -gt 0 || die invalid_manifest profile_empty "$pname"
 
       seen_prof_groups=''
       j=0
       while test "$j" -lt "$pcount"; do
         entry_type=$("$plutil_bin" -type "profiles.$pname.$j" "$manifest" 2>/dev/null || true)
-        test "$entry_type" = 'string' || die invalid_manifest "profile '$pname' entry $j must be a string"
+        test "$entry_type" = 'string' || die invalid_manifest profile_unknown_group "$pname" "$j"
         entry_name=$("$plutil_bin" -extract "profiles.$pname.$j" raw "$manifest" 2>/dev/null || true)
 
         case " $seen_group_names " in
           *" $entry_name "*) ;;
-          *) die invalid_manifest "profile '$pname' references unknown group '$entry_name'" ;;
+          *) die invalid_manifest profile_unknown_group "$pname" "$entry_name" ;;
         esac
 
         case " $seen_prof_groups " in
-          *" $entry_name "*) die invalid_manifest "profile '$pname' contains duplicate group '$entry_name'" ;;
+          *" $entry_name "*) die invalid_manifest profile_duplicate_group "$pname" "$entry_name" ;;
         esac
 
         if test -z "$seen_prof_groups"; then
@@ -875,10 +957,15 @@ parse_manifest() {
       done
 
       printf '%s\t%s\n' "$pname" "$seen_prof_groups" >> "$profiles_tsv"
+      "$plutil_bin" -remove "profiles.$pname" "$prof_check_xml" 2>/dev/null || true
       IFS='
 '
     done
     IFS=$old_ifs
+
+    residual_prof=$("$plutil_bin" -extract profiles json -o - "$prof_check_xml" 2>/dev/null || true)
+    test "$residual_prof" = '{}' || die invalid_manifest profile_unknown_key
+    /bin/rm -f "$prof_check_xml" 2>/dev/null || true
   fi
 }
 
@@ -890,12 +977,18 @@ select_interactively() {
   fi
 
   test -n "$SANDBOX" || die lock_failed 'sandbox not initialized'
-  test -f "$SANDBOX/groups.tsv" || die invalid_manifest 'groups table not found'
+  test -f "$SANDBOX/groups.tsv" || die invalid_manifest missing_groups
 
   fzf_candidates="$SANDBOX/fzf_candidates.txt"
   : > "$fzf_candidates"
+  all_groups=''
   while IFS='	' read -r gname desc_en desc_zh || test -n "$gname"; do
     test -n "$gname" || continue
+    if test -z "$all_groups"; then
+      all_groups="$gname"
+    else
+      all_groups="$all_groups $gname"
+    fi
     case "$LANGUAGE" in
       zh-TW|zh_TW) desc="$desc_zh" ;;
       *) desc="$desc_en" ;;
@@ -933,7 +1026,13 @@ select_interactively() {
       *) item="$line" ;;
     esac
     item=$(trim_whitespace "$item")
-    test -n "$item" || continue
+    test -n "$item" || die fzf_failed 'empty record'
+
+    case " $all_groups " in
+      *" $item "*) ;;
+      *) die fzf_failed "unknown record '$item'" ;;
+    esac
+
     case " $selected_set " in
       *" $item "*) ;;
       *)
