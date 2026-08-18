@@ -28,8 +28,328 @@ STOW_EXEC=''
 FZF_EXEC=''
 PLUTIL_EXEC=''
 
+MAPPING_FILE=''
+CONFLICTS_FILE=''
+STOW_IGNORE_FILE=''
+BACKUP_ROOT=''
+
+has_control_char() {
+  case "${1-}" in
+    *[[:cntrl:]]*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+append_directory_rows() {
+  dir_rel=$1
+  dir_seen=$2
+  old_ifs=$IFS
+  IFS='/'
+  set -f
+  set -- $dir_rel
+  set +f
+  IFS=$old_ifs
+  prefix=''
+  for component in "$@"; do
+    test -n "$component" || continue
+    if test -n "$prefix"; then prefix="$prefix/$component"; else prefix="$component"; fi
+    target=$(normalized_relpath "$prefix") || return 1
+    key=$(ascii_fold "$target")
+    if ! /usr/bin/grep -F -x -q "$prefix" "$dir_seen" 2>/dev/null; then
+      printf '%s\n' "$prefix" >> "$dir_seen" || return 1
+      printf 'dir\t%s\t%s\t%s\t%s\n' "$CURRENT_PACKAGE" "$prefix" "$target" "$key" >> "$MAPPING_FILE" || return 1
+    fi
+  done
+}
+
+ascii_fold() {
+  printf '%s' "$1" | /usr/bin/tr '[:upper:]' '[:lower:]'
+}
+
+normalized_relpath() {
+  rel=$1
+  old_ifs=$IFS
+  IFS='/'
+  set -f
+  set -- $rel
+  set +f
+  IFS=$old_ifs
+  out=''
+  for comp in "$@"; do
+    test -n "$comp" || continue
+    case "$comp" in
+      .|..) return 1 ;;
+    esac
+    has_control_char "$comp" && return 1
+    case "$comp" in
+      dot-*) comp=".${comp#dot-}" ;;
+    esac
+    case "$comp" in
+      .|..) return 1 ;;
+    esac
+    if test -n "$out"; then out="$out/$comp"; else out="$comp"; fi
+  done
+  test -n "$out" || return 1
+  printf '%s\n' "$out"
+}
+
+build_package_map() {
+  test -n "$SANDBOX" && test -d "$SANDBOX" || return 1
+  test -n "$CHECKOUT_DIR" && test -d "$CHECKOUT_DIR" || return 1
+  MAPPING_FILE="$SANDBOX/mapping.tsv"
+  STOW_IGNORE_FILE="$SANDBOX/stow-ignore.txt"
+  : > "$MAPPING_FILE" || return 1
+  : > "$STOW_IGNORE_FILE" || return 1
+  test -f "$SANDBOX/selected.txt" || return 1
+
+  while IFS= read -r package || test -n "$package"; do
+    test -n "$package" || continue
+    is_pure_ascii "$package" || return 1
+    case "$package" in */*|.|..) return 1 ;; esac
+    pkg="$CHECKOUT_DIR/$package"
+    test -d "$pkg" && test ! -L "$pkg" || return 1
+    dir_seen="$SANDBOX/package-dirs-$$"
+    : > "$dir_seen" || return 1
+    CURRENT_PACKAGE=$package
+
+    # A package may not contain another repository, including a nested
+    # repository hidden below an otherwise empty directory.
+    nested_git="$SANDBOX/nested-git-$$"
+    : > "$nested_git" || return 1
+    /usr/bin/find -P "$pkg" -mindepth 1 -name .git -print0 > "$nested_git" || {
+      /bin/rm -f "$nested_git"
+      return 1
+    }
+    test ! -s "$nested_git" || {
+      /bin/rm -f "$nested_git"
+      return 1
+    }
+    /bin/rm -f "$nested_git"
+
+    # Git's NUL-delimited status is the authoritative check for untracked,
+    # ignored, modified, deleted, and renamed payload entries.
+    status_file="$SANDBOX/package-status-$$"
+    run_git -C "$CHECKOUT_DIR" status --porcelain=v1 --untracked-files=all \
+      --ignored=matching --ignore-submodules=none -z -- "$package" > "$status_file" 2>/dev/null || {
+      /bin/rm -f "$status_file"
+      return 1
+    }
+    test ! -s "$status_file" || {
+      /bin/rm -f "$status_file"
+      return 1
+    }
+    /bin/rm -f "$status_file"
+
+    entries="$SANDBOX/package-index-$$"
+    : > "$entries" || return 1
+    run_git -C "$CHECKOUT_DIR" ls-files --stage -z -- "$package" > "$entries" 2>/dev/null || {
+      /bin/rm -f "$entries"
+      return 1
+    }
+    package_count=0
+    while IFS= read -r -d '' entry; do
+      meta=${entry%%	*}
+      rel=${entry#*	}
+      mode=${meta%% *}
+      case "$mode" in
+        100644|100755) ;;
+        120000|160000) /bin/rm -f "$entries"; return 1 ;;
+        *) /bin/rm -f "$entries"; return 1 ;;
+      esac
+      test -n "$rel" || { /bin/rm -f "$entries"; return 1; }
+      case "$rel" in
+        "$package"/*) rel=${rel#"$package"/} ;;
+        *) /bin/rm -f "$entries"; return 1 ;;
+      esac
+      target=$(normalized_relpath "$rel") || { /bin/rm -f "$entries"; return 1; }
+      file_target=$target
+      is_pure_ascii "$rel" || { /bin/rm -f "$entries"; return 1; }
+      # Dotfiles must use the explicit dot- encoding; a decoded traversal
+      # component (dot-. or dot-..) is never accepted.
+      old_ifs=$IFS
+      IFS='/'
+      set -f
+      set -- $rel
+      set +f
+      IFS=$old_ifs
+      for comp in "$@"; do
+        test -n "$comp" || continue
+        case "$comp" in
+          .*) /bin/rm -f "$entries"; return 1 ;;
+          dot-.) /bin/rm -f "$entries"; return 1 ;;
+          dot-..) /bin/rm -f "$entries"; return 1 ;;
+        esac
+      done
+      source="$CHECKOUT_DIR/$package/$rel"
+      test -f "$source" && test ! -L "$source" || {
+        /bin/rm -f "$entries"
+        return 1
+      }
+      case "$rel" in
+        */*) append_directory_rows "${rel%/*}" "$dir_seen" || {
+          /bin/rm -f "$entries" "$dir_seen"
+          return 1
+        } ;;
+      esac
+      target=$file_target
+      key=$(ascii_fold "$target")
+      printf 'file\t%s\t%s\t%s\t%s\n' "$package" "$rel" "$target" "$key" >> "$MAPPING_FILE" || {
+        /bin/rm -f "$entries" "$dir_seen"
+        return 1
+      }
+      package_count=$((package_count + 1))
+    done < "$entries"
+    /bin/rm -f "$entries" "$dir_seen"
+    test "$package_count" -gt 0 || return 1
+  done < "$SANDBOX/selected.txt"
+  return 0
+}
+
+validate_typed_tree() {
+  test -f "$MAPPING_FILE" || return 1
+  rows="$SANDBOX/typed-tree-$$"
+  : > "$rows" || return 1
+  while IFS='	' read -r typ pkg src target folded extra || test -n "$typ"; do
+    case "$typ" in dir|file) ;; *) /bin/rm -f "$rows"; return 1 ;; esac
+    test -n "$pkg" && test -n "$src" && test -n "$target" && test -n "$folded" || {
+      /bin/rm -f "$rows"
+      return 1
+    }
+    test -z "$extra" || { /bin/rm -f "$rows"; return 1; }
+    is_pure_ascii "$pkg" && is_pure_ascii "$src" && is_pure_ascii "$target" || {
+      /bin/rm -f "$rows"
+      return 1
+    }
+    expected_target=$(normalized_relpath "$src") || { /bin/rm -f "$rows"; return 1; }
+    test "$target" = "$expected_target" || { /bin/rm -f "$rows"; return 1; }
+    expected_folded=$(ascii_fold "$target")
+    test "$folded" = "$expected_folded" || { /bin/rm -f "$rows"; return 1; }
+    while IFS='	' read -r oldtyp oldtarget oldfolded || test -n "$oldtarget"; do
+      test -n "$oldtarget" || continue
+      test "$folded" != "$oldfolded" || { /bin/rm -f "$rows"; return 1; }
+      if test "$typ" = file && test "$oldtyp" = file; then
+        case "$folded/" in "$oldfolded/"*) /bin/rm -f "$rows"; return 1 ;; esac
+        case "$oldfolded/" in "$folded/"*) /bin/rm -f "$rows"; return 1 ;; esac
+      fi
+    done < "$rows"
+    printf '%s\t%s\t%s\n' "$typ" "$target" "$folded" >> "$rows" || {
+      /bin/rm -f "$rows"
+      return 1
+    }
+  done < "$MAPPING_FILE"
+  test -s "$rows"
+  result=$?
+  /bin/rm -f "$rows"
+  return "$result"
+}
+
+physical_parent_safe() {
+  path=$1
+  parent=${path%/*}
+  test "$parent" != "$PHYSICAL_HOME" || return 0
+  while test "$parent" != '/'; do
+    test ! -L "$parent" || return 1
+    if test -e "$parent" && test ! -d "$parent"; then return 1; fi
+    parent=${parent%/*}
+    test -n "$parent" || parent='/'
+    test "$parent" != "$PHYSICAL_HOME" || return 0
+  done
+  return 0
+}
+
+nearest_existing() {
+  p=$1
+  while test ! -e "$p" && test ! -L "$p"; do
+    p=${p%/*}
+    test -n "$p" || p='/'
+  done
+  printf '%s\n' "$p"
+}
+
+preflight_targets() {
+  if test -z "$STATE_ROOT"; then
+    STATE_ROOT=${XDG_STATE_HOME:-"$PHYSICAL_HOME/.local/state/kaisian"}
+  fi
+  : "${PHYSICAL_HOME:=${HOME-}}"
+  test -n "$PHYSICAL_HOME" && test "${PHYSICAL_HOME#/}" != "$PHYSICAL_HOME" || return 1
+  STATE_ROOT=${XDG_STATE_HOME:-"$PHYSICAL_HOME/.local/state"}
+  test "${STATE_ROOT#/}" != "$STATE_ROOT" || return 1
+  STATE_ROOT=$(canonicalize_path "$STATE_ROOT") || return 1
+  backup_base="$STATE_ROOT/backups"
+  CONFLICTS_FILE="$SANDBOX/conflicts.tsv"
+  : > "$CONFLICTS_FILE" || return 1
+  # State and checkout/lock paths must not overlap the physical target tree.
+  for guard in "$CHECKOUT_DIR" "$STATE_ROOT" "$LOCK_DIR" "$SANDBOX"; do
+    test -n "$guard" || continue
+    guard=$(canonicalize_path "$guard") || return 1
+    while IFS='	' read -r typ pkg src target folded || test -n "$typ"; do
+      dst="$PHYSICAL_HOME/$target"
+      case "$dst/" in "$guard/"*) return 1 ;; esac
+      case "$guard/" in "$dst/"*) return 1 ;; esac
+    done < "$MAPPING_FILE"
+  done
+  while IFS='	' read -r typ pkg src target folded || test -n "$typ"; do
+    test "$typ" = file || continue
+    source="$CHECKOUT_DIR/$pkg/$src"
+    dst="$PHYSICAL_HOME/$target"
+    physical_parent_safe "$dst" || return 1
+    test -e "$dst" || test -L "$dst" || continue
+    if test -L "$dst"; then
+      expected="$source"
+      actual=$(/usr/bin/readlink "$dst" 2>/dev/null || true)
+      test "$actual" = "$expected" && continue
+    fi
+    source_dev=$(/usr/bin/stat -f '%d' "$source" 2>/dev/null) || return 1
+    ancestor=$(nearest_existing "$dst") || return 1
+    dest_dev=$(/usr/bin/stat -f '%d' "$ancestor" 2>/dev/null) || return 1
+    test "$source_dev" = "$dest_dev" || return 1
+    backup="$backup_base/files/$target"
+    printf '%s\t%s\n' "$dst" "$backup" >> "$CONFLICTS_FILE" || return 1
+  done < "$MAPPING_FILE"
+  return 0
+}
+
+confirm_conflicts() {
+  test -f "$CONFLICTS_FILE" || return 1
+  test ! -s "$CONFLICTS_FILE" && return 0
+  while IFS='	' read -r source backup || test -n "$source"; do
+    printf '%s\n' "Move $source to $backup"
+  done < "$CONFLICTS_FILE"
+  test "$DRY_RUN" -eq 1 && return 0
+  test "$ASSUME_YES" -eq 1 && return 0
+  test -r /dev/tty || { message no_tty >&2; return 1; }
+  printf '%s ' 'Proceed? [y/N]' >&2
+  IFS= read -r answer < /dev/tty || { message no_tty >&2; return 1; }
+  case "$answer" in y|Y|yes|YES) return 0 ;; *) return 0 ;; esac
+}
+
+move_conflicts() {
+  test "$DRY_RUN" -eq 0 || return 0
+  test -f "$CONFLICTS_FILE" || return 1
+  test ! -s "$CONFLICTS_FILE" && return 0
+  base=${STATE_ROOT:-${XDG_STATE_HOME:-"$PHYSICAL_HOME/.local/state"}}/backups
+  n=0
+  while :; do
+    BACKUP_ROOT="$base/$(/bin/date -u '+%Y%m%dT%H%M%SZ')-$$"
+    test "$n" -eq 0 || BACKUP_ROOT="$BACKUP_ROOT-$n"
+    test ! -e "$BACKUP_ROOT" && test ! -L "$BACKUP_ROOT" && break
+    n=$((n + 1))
+  done
+  /bin/mkdir -p "$BACKUP_ROOT/files" || return 1
+  while IFS='	' read -r source backup || test -n "$source"; do
+    rel=${backup#*/files/}
+    dest="$BACKUP_ROOT/files/$rel"
+    /bin/mkdir -p "${dest%/*}" || return 1
+    /bin/mv "$source" "$dest" || {
+      printf '%s\n' "Backup root: $BACKUP_ROOT" >&2
+      printf '%s\n' "Restore manually with: mv '$dest' '$source'" >&2
+      return 1
+    }
+  done < "$CONFLICTS_FILE"
+  return 0
+}
+
 usage() {
-  printf '%s\n' \
 'setup.sh [OPTIONS]
 
 Selection, exactly zero or one:
@@ -154,6 +474,8 @@ message_en() {
     invalid_submodule) printf 'Invalid or unallowed submodule definition: %s' "${1-}" ;;
     submodule_failed) printf "Failed to initialize submodule '%s'." "${1-}" ;;
     git_operation_failed) printf 'Git operation failed (%s).' "${1-}" ;;
+    invalid_package_tree) printf 'Package tree contains unsafe, duplicate, or colliding paths.' ;;
+    invalid_targets) printf 'Targets contain unsafe paths, overlaps, or cross-device conflicts.' ;;
     *) return 64 ;;
   esac
 }
@@ -239,6 +561,8 @@ message_zh_tw() {
     invalid_submodule) printf '無效或不允許的子模組定義：%s' "${1-}" ;;
     submodule_failed) printf '初始化子模組「%s」失敗。' "${1-}" ;;
     git_operation_failed) printf 'Git 操作失敗（%s）。' "${1-}" ;;
+    invalid_package_tree) printf '套件樹包含不安全、重複或衝突的路徑。' ;;
+    invalid_targets) printf '目標包含不安全路徑、重疊或跨裝置衝突。' ;;
     *) return 64 ;;
   esac
 }
@@ -794,7 +1118,7 @@ require_prerequisites() {
 is_pure_ascii() {
   test -n "${1-}" || return 1
   case "$1" in
-    *[!a-zA-Z0-9_.-/:]*) return 1 ;;
+    *[!a-zA-Z0-9._:/-]*) return 1 ;;
     *) return 0 ;;
   esac
 }
@@ -2186,6 +2510,11 @@ main() {
 
   parse_manifest "$CHECKOUT_DIR/.kaisian.json" "$CHECKOUT_DIR"
   resolve_selection
+  build_package_map || die invalid_package_tree
+  validate_typed_tree || die invalid_package_tree
+  preflight_targets || die invalid_targets
+  confirm_conflicts || exit 1
+  move_conflicts || exit 1
   return 0
 }
 

@@ -3756,6 +3756,33 @@ run_case 'FETCH_HEAD mismatch against EXPECTED_COMMIT_SHA rejection' fetch_head_
 run_case 'fetched object pinning beats same-named malicious local refs' fetched_object_pinning_beats_malicious_local_refs_case
 run_case 'new checkout uses git init and single fetch without local/tracking branches' new_checkout_uses_init_and_single_fetch_case
 run_case 'single fetch count and trace log sanitized environment assertions' single_fetch_and_trace_assertions_case
+task5_mapping_fixture_case() {
+  t=$(mktemp -d "$ROOT/task5.XXXXXX") || return 1
+  /bin/mkdir -p "$t/checkout/shell/dot-config/zsh" "$t/home" "$t/sandbox" || return 1
+  printf x > "$t/checkout/shell/dot-config/zsh/aliasrc" || return 1
+  GIT_CONFIG_NOSYSTEM=1 git -C "$t/checkout" init -q || return 1
+  GIT_CONFIG_NOSYSTEM=1 git -C "$t/checkout" -c commit.gpgSign=false config user.email test@example.invalid || return 1
+  GIT_CONFIG_NOSYSTEM=1 git -C "$t/checkout" -c commit.gpgSign=false config user.name test || return 1
+  GIT_CONFIG_NOSYSTEM=1 git -C "$t/checkout" add . || return 1
+  GIT_CONFIG_NOSYSTEM=1 git -C "$t/checkout" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm fixture || return 1
+  printf '%s\n' shell > "$t/sandbox/selected.txt" || return 1
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+    CHECKOUT_DIR="$t/checkout"
+    SANDBOX="$t/sandbox"
+    build_package_map || exit 1
+    validate_typed_tree || exit 1
+    test "$(wc -l < "$SANDBOX/mapping.tsv" | tr -d ' ')" = 3 || exit 1
+    test "$(sed -n '1p' "$SANDBOX/mapping.tsv")" = "$(printf 'dir\tshell\tdot-config\t.config\t.config')" || exit 1
+    test "$(sed -n '2p' "$SANDBOX/mapping.tsv")" = "$(printf 'dir\tshell\tdot-config/zsh\t.config/zsh\t.config/zsh')" || exit 1
+    test "$(sed -n '3p' "$SANDBOX/mapping.tsv")" = "$(printf 'file\tshell\tdot-config/zsh/aliasrc\t.config/zsh/aliasrc\t.config/zsh/aliasrc')" || exit 1
+  )
+  status=$?
+  /bin/rm -rf "$t"
+  return "$status"
+}
+
 run_case 'existing checkout cleanliness, untracked/ignored files, and origin mismatch' existing_checkout_cleanliness_and_origin_mismatch_case
 run_case 'existing non-repo directory and exact origin/fetch counts' existing_non_repo_and_origin_fetch_counts_case
 run_case 'git config strict allowlist and hostile config rejection' git_config_allowlist_and_hostile_configs_case
@@ -3802,6 +3829,7 @@ run_case 'compat probe failure on ignored compat behavior' compat_probe_failure_
 run_case 'subshell lock cleanup safety on assertion failure' lock_cleanup_on_subshell_failure_case
 run_case 'discover_executable does not execute external which, dirname, or basename from PATH' discover_executable_purity_case
 run_case 'nonempty .stow-global-ignore makes probe fail while empty succeeds' stow_nonempty_ignore_probe_failure_case
+run_case 'Task 5 normalized package mapping fixture' task5_mapping_fixture_case
 
 printf '%s passed; %s failed\n' "$PASS" "$FAIL"
 test "$FAIL" -eq 0
