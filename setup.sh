@@ -1,9 +1,9 @@
 #!/bin/bash
 set -u
 
-test -n "${KAISIAN_VERSION+x}" || readonly KAISIAN_VERSION='0.1.0'
-test -n "${DEFAULT_REPOSITORY+x}" || readonly DEFAULT_REPOSITORY='taiansu/dotfiles'
-test -n "${DEFAULT_DOTFILES_COMMIT+x}" || readonly DEFAULT_DOTFILES_COMMIT='0b3b0c3f206e1f4fb35dac82794a871c5c18f405'
+readonly KAISIAN_VERSION='0.1.0'
+readonly DEFAULT_REPOSITORY='taiansu/dotfiles'
+readonly DEFAULT_DOTFILES_COMMIT='0b3b0c3f206e1f4fb35dac82794a871c5c18f405'
 
 LANGUAGE='en'
 PHYSICAL_HOME=''
@@ -781,11 +781,43 @@ move_conflicts() {
       eval "$KAISIAN_TESTING_PRE_MV_HOOK" || true
     fi
 
-    if ! revalidate_conflict "$source" "$backup"; then
+    # Re-walk raw backup destination parents from dest_parent up to $BACKUP_ROOT/files
+    p_chk="$dest_parent"
+    files_root="$BACKUP_ROOT/files"
+    while test "$p_chk" != "$files_root" && test "$p_chk" != '/' && test -n "$p_chk"; do
+      if test -L "$p_chk" || test ! -d "$p_chk"; then
+        emit_restore_guidance
+        return 1
+      fi
+      p_chk=${p_chk%/*}
+      test -n "$p_chk" || p_chk='/'
+    done
+    if test -L "$files_root" || test ! -d "$files_root"; then
       emit_restore_guidance
       return 1
     fi
 
+    # Verify canonical containment under BACKUP_ROOT/files
+    canon_dest_p=$(canonicalize_path "$dest_parent") || {
+      emit_restore_guidance
+      return 1
+    }
+    canon_files_r=$(canonicalize_path "$files_root") || {
+      emit_restore_guidance
+      return 1
+    }
+    case "$canon_dest_p" in
+      "$canon_files_r"|"$canon_files_r"/*) ;;
+      *)
+        emit_restore_guidance
+        return 1
+        ;;
+    esac
+
+    if ! revalidate_conflict "$source" "$backup"; then
+      emit_restore_guidance
+      return 1
+    fi
     if ! run_mv "$source" "$dest"; then
       emit_restore_guidance
       return 1

@@ -4828,7 +4828,7 @@ task5_move_conflicts_execution_case() {
     printf 'new_app_config\n' > "$chk/macos/dot-config/app/config"
     printf 'new_dir_conflict_payload\n' > "$chk/macos/dot-config/dir_conflict"
     printf 'new_broken_payload\n' > "$chk/macos/dot-broken_link"
-
+    printf 'new_wrong_payload\n' > "$chk/macos/dot-wrong_link"
     GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$chk" init -q || exit 1
     GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$chk" -c commit.gpgSign=false config user.email test@example.invalid || exit 1
     GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$chk" -c commit.gpgSign=false config user.name test || exit 1
@@ -4863,7 +4863,9 @@ task5_move_conflicts_execution_case() {
     broken_dest=$(printf 'broken\ttarget\nwith\tcontrol\n')
     ln -s "$broken_dest" "$hm/.broken_link" || exit 1
 
-    # 6. Non-conflicting regular file in HOME: .unrelated
+    # 6. Conflicting wrong symlink: .wrong_link with tabs and newlines in target
+    wrong_dest=$(printf 'wrong\ttarget\twith\nnewlines\t')
+    ln -s "$wrong_dest" "$hm/.wrong_link" || exit 1
     printf 'unrelated_data_555\n' > "$hm/.unrelated"
     unrel_ino=$(/usr/bin/stat -f '%i' "$hm/.unrelated")
 
@@ -4881,9 +4883,9 @@ task5_move_conflicts_execution_case() {
     validate_typed_tree || exit 1
     KAISIAN_TEST_TIME="20260819T080000Z" preflight_targets || exit 1
 
-    # Verify conflicts table has exactly 5 entries
+    # Verify conflicts table has exactly 6 entries
     test -f "$CONFLICTS_FILE" || exit 1
-    test "$(wc -l < "$CONFLICTS_FILE" | tr -d ' ')" = "5" || exit 1
+    test "$(wc -l < "$CONFLICTS_FILE" | tr -d ' ')" = "6" || exit 1
 
     # Run confirmation (--yes)
     ASSUME_YES=1
@@ -4928,7 +4930,12 @@ task5_move_conflicts_execution_case() {
     test -L "$BACKUP_ROOT/files/.broken_link" || exit 1
     test "$(/usr/bin/readlink "$BACKUP_ROOT/files/.broken_link")" = "$broken_dest" || exit 1
 
-    # 6. Non-conflicting files untouched
+    # 6. .wrong_link wrong symlink moved
+    test ! -e "$hm/.wrong_link" && test ! -L "$hm/.wrong_link" || exit 1
+    test -L "$BACKUP_ROOT/files/.wrong_link" || exit 1
+    test "$(/usr/bin/readlink "$BACKUP_ROOT/files/.wrong_link")" = "$wrong_dest" || exit 1
+
+    # 7. Non-conflicting files untouched
     test -f "$hm/.unrelated" || exit 1
     test "$(/usr/bin/stat -f '%i' "$hm/.unrelated")" = "$unrel_ino" || exit 1
     test "$(cat "$hm/.unrelated")" = "unrelated_data_555" || exit 1
@@ -4937,10 +4944,9 @@ task5_move_conflicts_execution_case() {
     test "$(/usr/bin/stat -f '%i' "$hm/.config/other/data")" = "$other_ino" || exit 1
     test "$(cat "$hm/.config/other/data")" = "other_data_777" || exit 1
 
-    # 7. Canonical symlink untouched
+    # 8. Canonical symlink untouched
     test -L "$hm/.config/mise/config.toml" || exit 1
     test "$(/usr/bin/readlink "$hm/.config/mise/config.toml")" = "$chk/mise/dot-config/mise/config.toml" || exit 1
-
     # 8. Idempotent re-run: 0 conflicts, no new backup directory
     preflight_targets || exit 1
     test ! -s "$CONFLICTS_FILE" || exit 1
@@ -5055,6 +5061,23 @@ task5_backup_prefix_validation_case() {
     # 8. Truncated sidecar file (cardinality mismatch) aborts before root/move
     t8="$t/case8"
     /bin/mkdir -p "$t8/home" "$t8/state" "$t8/sandbox" || exit 1
+
+    # 10. Literal regex/metacharacter source paths with brackets and asterisks match sidecar literally
+    t10="$t/case10"
+    /bin/mkdir -p "$t10/home/app[1]" "$t10/state" "$t10/sandbox" || exit 1
+    HOME="$t10/home" PHYSICAL_HOME="$t10/home" STATE_ROOT="$t10/state" SANDBOX="$t10/sandbox"
+    CONFLICTS_FILE="$t10/sandbox/conflicts.tsv" BACKUP_ROOT="$t10/state/backups/20260819T090010Z-10"
+    printf 'bracket_data\n' > "$t10/home/app[1]/conf*ig.txt"
+    dev10=$(stat_dev "$t10/home/app[1]/conf*ig.txt")
+    ino10=$(/usr/bin/stat -f '%i' "$t10/home/app[1]/conf*ig.txt")
+    mode10=$(/usr/bin/stat -f '%p' "$t10/home/app[1]/conf*ig.txt")
+    printf '%s\t%s\n' "$t10/home/app[1]/conf*ig.txt" "$BACKUP_ROOT/files/app[1]/conf*ig.txt" > "$CONFLICTS_FILE"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$t10/home/app[1]/conf*ig.txt" "$dev10" "$ino10" "Regular File" "$mode10" > "$t10/sandbox/conflicts_identities.tsv"
+    ( move_conflicts ) || exit 1
+    test ! -e "$t10/home/app[1]/conf*ig.txt" || exit 1
+    test -f "$BACKUP_ROOT/files/app[1]/conf*ig.txt" || exit 1
+    test "$(/usr/bin/stat -f '%i' "$BACKUP_ROOT/files/app[1]/conf*ig.txt")" = "$ino10" || exit 1
+    test "$(cat "$BACKUP_ROOT/files/app[1]/conf*ig.txt")" = "bracket_data" || exit 1
     HOME="$t8/home" PHYSICAL_HOME="$t8/home" STATE_ROOT="$t8/state" SANDBOX="$t8/sandbox"
     CONFLICTS_FILE="$t8/sandbox/conflicts.tsv" BACKUP_ROOT="$t8/state/backups/20260819T090008Z-8"
     printf 'test_zshrc_8a\n' > "$t8/home/.zshrc"
@@ -5220,6 +5243,40 @@ task5_toctou_premutation_rejection_case() {
     fi
 
 
+    # 6. TOCTOU Swap during Pass 2: dest_parent swapped to outside symlink before 2nd mv
+    t6="$t/toctou_dest_parent"
+    /bin/mkdir -p "$t6/home/.config/app" "$t6/state" "$t6/sandbox" "$t6/outside" "$t6/lock" || exit 1
+    printf 'f1_data\n' > "$t6/home/.zshrc"
+    f1_ino_6=$(/usr/bin/stat -f '%i' "$t6/home/.zshrc")
+    printf 'f2_data\n' > "$t6/home/.config/app/config"
+    printf 'pkg1\tpkg1\tpkg1\npkg2\tpkg2\tpkg2\n' > "$t6/sandbox/groups.tsv"
+    printf 'pkg1\npkg2\n' > "$t6/sandbox/selected.txt"
+    : > "$t6/sandbox/unselected.txt"
+    HOME="$t6/home" PHYSICAL_HOME="$t6/home" CHECKOUT_DIR="$chk" STATE_ROOT="$t6/state" SANDBOX="$t6/sandbox" LOCK_DIR="$t6/lock"
+    build_package_map || exit 1
+    validate_typed_tree || exit 1
+    KAISIAN_TEST_TIME="20260819T120006Z" preflight_targets || exit 1
+
+    # Hook triggers before 2nd mv: replaces dest_parent with symlink -> outside
+    pre_dest_hook="if test -d '$BACKUP_ROOT/files/.config/app'; then rm -rf '$BACKUP_ROOT/files/.config/app' && ln -s '$t6/outside' '$BACKUP_ROOT/files/.config/app'; fi"
+
+    err_dest_swp=$(
+      CONFIRMED=1
+      KAISIAN_TESTING_PRE_MV_HOOK="$pre_dest_hook" move_conflicts 2>&1
+    ) || st_dest=$?
+    test "${st_dest-0}" -eq 1 || exit 1
+
+    # Assert no files written to outside
+    test ! -e "$t6/outside/config" || exit 1
+    # Assert .zshrc was moved and preserved
+    test ! -e "$t6/home/.zshrc" || exit 1
+    test -f "$BACKUP_ROOT/files/.zshrc" || exit 1
+    # Assert restore guidance ONLY for .zshrc
+    assert_contains "$err_dest_swp" "Backup root: $BACKUP_ROOT" || exit 1
+    assert_contains "$err_dest_swp" "Restore manually with: mv '$BACKUP_ROOT/files/.zshrc' '$t6/home/.zshrc'" || exit 1
+    if printf '%s\n' "$err_dest_swp" | /usr/bin/grep -q "Restore manually with: mv.*app/config"; then
+      exit 1
+    fi
     exit 0
   )
   status=$?
@@ -5499,6 +5556,23 @@ MOCK_FAIL
   return "$status"
 }
 
+task5_readonly_env_injection_case() {
+  (
+    res=$(
+      KAISIAN_VERSION='evil' DEFAULT_REPOSITORY='evil/repo' DEFAULT_DOTFILES_COMMIT='0000000000000000000000000000000000000000' KAISIAN_TESTING=1 /bin/bash -c "
+        . '$SCRIPT'
+        test \"\$KAISIAN_VERSION\" = '0.1.0' || exit 1
+        test \"\$DEFAULT_REPOSITORY\" = 'taiansu/dotfiles' || exit 1
+        test \"\$DEFAULT_DOTFILES_COMMIT\" = '0b3b0c3f206e1f4fb35dac82794a871c5c18f405' || exit 1
+        printf 'OK'
+      " 2>/dev/null
+    )
+    test "$res" = 'OK' || exit 1
+    exit 0
+  ) || return 1
+  return 0
+}
+
 run_case 'Task 5 preflight target classification and exact conflict planning' task5_preflight_targets_classification_case
 run_case 'Task 5 preflight target rejection for symlink parents and special nodes' task5_preflight_targets_rejection_case
 run_case 'Task 5 preflight unselected package filtering' task5_preflight_selection_filtering_case
@@ -5510,6 +5584,6 @@ run_case 'Task 5 move conflicts execution, inode preservation, and idempotency' 
 run_case 'Task 5 backup prefix validation and reservation safety' task5_backup_prefix_validation_case
 run_case 'Task 5 TOCTOU pre-mutation rejection for parent swaps, FIFOs, symlink target swaps, and backup ancestors' task5_toctou_premutation_rejection_case
 run_case 'Task 5 partial failure preservation and manual restore guidance' task5_partial_failure_and_preservation_case
-
+run_case 'Task 5 readonly constants environment injection immunity' task5_readonly_env_injection_case
 printf '%s passed; %s failed\n' "$PASS" "$FAIL"
 test "$FAIL" -eq 0
