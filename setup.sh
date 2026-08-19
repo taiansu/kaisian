@@ -1,9 +1,9 @@
 #!/bin/bash
 set -u
 
-readonly KAISIAN_VERSION='0.1.0'
-readonly DEFAULT_REPOSITORY='taiansu/dotfiles'
-readonly DEFAULT_DOTFILES_COMMIT='0b3b0c3f206e1f4fb35dac82794a871c5c18f405'
+test -n "${KAISIAN_VERSION+x}" || readonly KAISIAN_VERSION='0.1.0'
+test -n "${DEFAULT_REPOSITORY+x}" || readonly DEFAULT_REPOSITORY='taiansu/dotfiles'
+test -n "${DEFAULT_DOTFILES_COMMIT+x}" || readonly DEFAULT_DOTFILES_COMMIT='0b3b0c3f206e1f4fb35dac82794a871c5c18f405'
 
 LANGUAGE='en'
 PHYSICAL_HOME=''
@@ -480,12 +480,7 @@ preflight_targets() {
     dst_mode=$(/usr/bin/stat -f '%p' "$dst" 2>/dev/null) || return 1
     test -n "$dst_mode" || return 1
     has_control_char "$dst_mode" && return 1
-    dst_sym_target=''
-    if test -L "$dst"; then
-      dst_sym_target=$(/usr/bin/readlink "$dst") || return 1
-      has_control_char "$dst_sym_target" && return 1
-    fi
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$dst" "$dst_dev" "$dst_ino" "$dst_type" "$dst_mode" "$dst_sym_target" >> "$IDENTITIES_FILE" || return 1
+    printf '%s\t%s\t%s\t%s\t%s\n' "$dst" "$dst_dev" "$dst_ino" "$dst_type" "$dst_mode" >> "$IDENTITIES_FILE" || return 1
   done < "$MAPPING_FILE"
   return 0
 }
@@ -587,6 +582,62 @@ confirm_conflicts() {
   esac
 }
 
+revalidate_conflict() {
+  local target_src=$1
+  local target_bk=$2
+  local match_count=0
+  local row_src row_dev row_ino row_type row_mode extra_id
+  local cur_dev cur_ino cur_type cur_mode bk_ancestor bk_dev
+
+  # Re-run physical_parent_safe on source
+  physical_parent_safe "$target_src" || return 1
+
+  # Source must exist (regular, directory, or symlink)
+  if test ! -e "$target_src" && test ! -L "$target_src"; then
+    return 1
+  fi
+  if test -e "$target_src" && test ! -L "$target_src" && test ! -f "$target_src" && test ! -d "$target_src"; then
+    return 1
+  fi
+
+  # Find matching row in $IDENTITIES_FILE using pure literal comparison
+  while IFS='	' read -r row_src row_dev row_ino row_type row_mode extra_id || test -n "$row_src"; do
+    test -n "$row_src" || return 1
+    test -n "$row_dev" || return 1
+    test -n "$row_ino" || return 1
+    test -n "$row_type" || return 1
+    test -n "$row_mode" || return 1
+    test -z "$extra_id" || return 1
+    if test "$row_src" = "$target_src"; then
+      match_count=$((match_count + 1))
+      test "$match_count" -eq 1 || return 1 # reject duplicates
+
+      cur_dev=$(stat_dev "$target_src") || return 1
+      test -n "$cur_dev" || return 1
+      test "$cur_dev" = "$row_dev" || return 1
+
+      cur_ino=$(/usr/bin/stat -f '%i' "$target_src" 2>/dev/null) || return 1
+      test "$cur_ino" = "$row_ino" || return 1
+
+      cur_type=$(/usr/bin/stat -f '%HT' "$target_src" 2>/dev/null) || return 1
+      test "$cur_type" = "$row_type" || return 1
+
+      cur_mode=$(/usr/bin/stat -f '%p' "$target_src" 2>/dev/null) || return 1
+      test "$cur_mode" = "$row_mode" || return 1
+    fi
+  done < "$IDENTITIES_FILE"
+
+  test "$match_count" -eq 1 || return 1
+
+  # Re-check source device against nearest destination ancestor device
+  bk_ancestor=$(nearest_existing "$target_bk")
+  bk_dev=$(stat_dev "$bk_ancestor") || return 1
+  test -n "$bk_dev" || return 1
+  test "$cur_dev" = "$bk_dev" || return 1
+
+  return 0
+}
+
 emit_restore_guidance() {
   local err_pfx bk_root_msg q_dest q_src restore_msg s b
   err_pfx=$(message error_prefix 2>/dev/null) || err_pfx='Error'
@@ -626,6 +677,11 @@ move_conflicts() {
   test -n "$backup_base" || return 1
 
   IDENTITIES_FILE="$SANDBOX/conflicts_identities.tsv"
+  test -f "$IDENTITIES_FILE" && test -s "$IDENTITIES_FILE" || return 1
+
+  conflicts_cnt=$(/usr/bin/wc -l < "$CONFLICTS_FILE" | /usr/bin/tr -d ' ')
+  identities_cnt=$(/usr/bin/wc -l < "$IDENTITIES_FILE" | /usr/bin/tr -d ' ')
+  test "$conflicts_cnt" = "$identities_cnt" || return 1
 
   # Pass 1: Validate EVERY row without any filesystem mutation
   while IFS='	' read -r source backup extra || test -n "$source"; do
@@ -642,37 +698,6 @@ move_conflicts() {
       "$BACKUP_ROOT/files"/*) ;;
       *) return 1 ;;
     esac
-    if test ! -e "$source" && test ! -L "$source"; then
-      return 1
-    fi
-    # Re-run physical_parent_safe on every source
-    physical_parent_safe "$source" || return 1
-    # Reject special nodes: must be regular file, directory, or symlink
-    if test -e "$source" && test ! -L "$source" && test ! -f "$source" && test ! -d "$source"; then
-      return 1
-    fi
-
-    # Revalidate against sidecar metadata if present
-    if test -f "$IDENTITIES_FILE" && test -s "$IDENTITIES_FILE"; then
-      meta_row=$(/usr/bin/grep "^${source}	" "$IDENTITIES_FILE" 2>/dev/null) || return 1
-      test -n "$meta_row" || return 1
-      IFS='	' read -r m_src m_dev m_ino m_type m_mode m_sym extra_m << EOF
-$meta_row
-EOF
-      cur_dev=$(stat_dev "$source") || return 1
-      test -n "$cur_dev" || return 1
-      test "$cur_dev" = "$m_dev" || return 1
-      cur_ino=$(/usr/bin/stat -f '%i' "$source" 2>/dev/null) || return 1
-      test "$cur_ino" = "$m_ino" || return 1
-      cur_type=$(/usr/bin/stat -f '%HT' "$source" 2>/dev/null) || return 1
-      test "$cur_type" = "$m_type" || return 1
-      cur_mode=$(/usr/bin/stat -f '%p' "$source" 2>/dev/null) || return 1
-      test "$cur_mode" = "$m_mode" || return 1
-      if test -L "$source"; then
-        cur_sym=$(/usr/bin/readlink "$source") || return 1
-        test "$cur_sym" = "$m_sym" || return 1
-      fi
-    fi
 
     rel_src=${source#"$PHYSICAL_HOME/"}
     test -n "$rel_src" || return 1
@@ -691,6 +716,8 @@ EOF
     if test "$backup" != "$BACKUP_ROOT/files/$rel_src"; then
       return 1
     fi
+
+    revalidate_conflict "$source" "$backup" || return 1
   done < "$CONFLICTS_FILE"
 
   # Immediately before mutation: re-walk ALL raw state/backup ancestors, reject symlink/non-dir
@@ -746,6 +773,15 @@ EOF
     dest_parent=${dest%/*}
 
     if ! /bin/mkdir -p "$dest_parent" || test -L "$dest_parent"; then
+      emit_restore_guidance
+      return 1
+    fi
+
+    if test "${KAISIAN_TESTING-0}" = '1' && test -n "${KAISIAN_TESTING_PRE_MV_HOOK-}"; then
+      eval "$KAISIAN_TESTING_PRE_MV_HOOK" || true
+    fi
+
+    if ! revalidate_conflict "$source" "$backup"; then
       emit_restore_guidance
       return 1
     fi

@@ -4,11 +4,17 @@ set -u
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/kaisian-test.XXXXXX") || exit 1
 ROOT=$(cd -P "$ROOT" && pwd -P)
 trap 'rm -rf -- "$ROOT"' EXIT HUP INT TERM
-SCRIPT=$(cd "$(dirname "$0")/.." && pwd -P)/setup.sh
-TRACE_LOG="$(cd "$(dirname "$0")" && pwd -P)/tmp/last-command-trace.log"
+SCRIPT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)/setup.sh
+TRACE_LOG="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/tmp/last-command-trace.log"
 /bin/mkdir -p "$(dirname "$TRACE_LOG")" 2>/dev/null || true
 : > "$TRACE_LOG"
 export KAISIAN_GIT_TRACE_LOG="$TRACE_LOG"
+export GIT_CONFIG_GLOBAL=/dev/null
+export GIT_CONFIG_NOSYSTEM=1
+export GIT_AUTHOR_NAME="Test User"
+export GIT_AUTHOR_EMAIL="test@example.com"
+export GIT_COMMITTER_NAME="Test User"
+export GIT_COMMITTER_EMAIL="test@example.com"
 PASS=0
 FAIL=0
 
@@ -2710,7 +2716,7 @@ staged_submodules_validation_and_containment_case() {
 }
 
 command_trace_forbidden_operations_case() {
-  local trace_log="tests/tmp/last-command-trace.log"
+  local trace_log="$TRACE_LOG"
   test -f "$trace_log" || return 1
   test -s "$trace_log" || return 1
   if /usr/bin/grep -Eq -- 'reset --hard|clean -f|stash|submodule update --recursive' "$trace_log"; then
@@ -4653,6 +4659,7 @@ task5_confirm_conflicts_matrix_case() {
   (
     export KAISIAN_TESTING=1
     . "$SCRIPT"
+    unset KAISIAN_TESTING_TTY KAISIAN_TESTING_PROMPT_FAIL KAISIAN_TESTING_READ_FAIL KAISIAN_TESTING_ANSWER KAISIAN_TESTING_PROMPT_TRACE_LOG KAISIAN_TESTING_PRE_MV_HOOK KAISIAN_TESTING_FILES_FAIL KAISIAN_TESTING_APPEND_FAIL KAISIAN_TESTING_TRACKING_CREATE_FAIL KAISIAN_MV_EXEC
 
     SANDBOX="$t/sandbox"
     /bin/mkdir -p "$SANDBOX" || exit 1
@@ -4796,6 +4803,7 @@ task5_move_conflicts_execution_case() {
   (
     export KAISIAN_TESTING=1
     . "$SCRIPT"
+    unset KAISIAN_TESTING_TTY KAISIAN_TESTING_PROMPT_FAIL KAISIAN_TESTING_READ_FAIL KAISIAN_TESTING_ANSWER KAISIAN_TESTING_PROMPT_TRACE_LOG KAISIAN_TESTING_PRE_MV_HOOK KAISIAN_TESTING_FILES_FAIL KAISIAN_TESTING_APPEND_FAIL KAISIAN_TESTING_TRACKING_CREATE_FAIL KAISIAN_MV_EXEC
 
     hm="$t/home"
     chk="$t/checkout"
@@ -4851,8 +4859,8 @@ task5_move_conflicts_execution_case() {
     printf 'dir_conflict_child_data\n' > "$hm/.config/dir_conflict/child.txt"
     dir_conflict_child_ino=$(/usr/bin/stat -f '%i' "$hm/.config/dir_conflict/child.txt")
 
-    # 5. Conflicting broken symlink: .broken_link
-    broken_dest="$t/nonexistent_dest"
+    # 5. Conflicting broken symlink: .broken_link with tabs and newlines in target
+    broken_dest=$(printf 'broken\ttarget\nwith\tcontrol\n')
     ln -s "$broken_dest" "$hm/.broken_link" || exit 1
 
     # 6. Non-conflicting regular file in HOME: .unrelated
@@ -4955,6 +4963,7 @@ task5_backup_prefix_validation_case() {
   (
     export KAISIAN_TESTING=1
     . "$SCRIPT"
+    unset KAISIAN_TESTING_TTY KAISIAN_TESTING_PROMPT_FAIL KAISIAN_TESTING_READ_FAIL KAISIAN_TESTING_ANSWER KAISIAN_TESTING_PROMPT_TRACE_LOG KAISIAN_TESTING_PRE_MV_HOOK KAISIAN_TESTING_FILES_FAIL KAISIAN_TESTING_APPEND_FAIL KAISIAN_TESTING_TRACKING_CREATE_FAIL KAISIAN_MV_EXEC
 
     # 1. Non-matching backup prefix: $BACKUP_ROOT/other/.zshrc with isolated roots
     t1="$t/case1"
@@ -5030,6 +5039,50 @@ task5_backup_prefix_validation_case() {
     printf '%s\t%s\n' "$t6/home/.zshrc" "$BACKUP_ROOT/files/.zshrc" > "$CONFLICTS_FILE"
     ( move_conflicts ) >/dev/null 2>&1 && exit 1
     test -f "$t6/home/.zshrc" || exit 1
+
+    # 7. Missing sidecar file aborts before root/move
+    t7="$t/case7"
+    /bin/mkdir -p "$t7/home" "$t7/state" "$t7/sandbox" || exit 1
+    HOME="$t7/home" PHYSICAL_HOME="$t7/home" STATE_ROOT="$t7/state" SANDBOX="$t7/sandbox"
+    CONFLICTS_FILE="$t7/sandbox/conflicts.tsv" BACKUP_ROOT="$t7/state/backups/20260819T090007Z-7"
+    printf 'test_zshrc_7\n' > "$t7/home/.zshrc"
+    printf '%s\t%s\n' "$t7/home/.zshrc" "$BACKUP_ROOT/files/.zshrc" > "$CONFLICTS_FILE"
+    # No sidecar file
+    ( move_conflicts ) >/dev/null 2>&1 && exit 1
+    test ! -e "$t7/state/backups" || exit 1
+    test ! -e "$BACKUP_ROOT" || exit 1
+
+    # 8. Truncated sidecar file (cardinality mismatch) aborts before root/move
+    t8="$t/case8"
+    /bin/mkdir -p "$t8/home" "$t8/state" "$t8/sandbox" || exit 1
+    HOME="$t8/home" PHYSICAL_HOME="$t8/home" STATE_ROOT="$t8/state" SANDBOX="$t8/sandbox"
+    CONFLICTS_FILE="$t8/sandbox/conflicts.tsv" BACKUP_ROOT="$t8/state/backups/20260819T090008Z-8"
+    printf 'test_zshrc_8a\n' > "$t8/home/.zshrc"
+    printf 'test_zshrc_8b\n' > "$t8/home/.other"
+    printf '%s\t%s\n' "$t8/home/.zshrc" "$BACKUP_ROOT/files/.zshrc" > "$CONFLICTS_FILE"
+    printf '%s\t%s\n' "$t8/home/.other" "$BACKUP_ROOT/files/.other" >> "$CONFLICTS_FILE"
+    # Sidecar only has 1 row for 2 conflicts
+    dev8=$(stat_dev "$t8/home/.zshrc")
+    ino8=$(/usr/bin/stat -f '%i' "$t8/home/.zshrc")
+    printf '%s\t%s\t%s\t%s\t%s\n' "$t8/home/.zshrc" "$dev8" "$ino8" "Regular File" "100644" > "$t8/sandbox/conflicts_identities.tsv"
+    ( move_conflicts ) >/dev/null 2>&1 && exit 1
+    test ! -e "$t8/state/backups" || exit 1
+    test ! -e "$BACKUP_ROOT" || exit 1
+
+    # 9. Duplicate sidecar rows abort before root/move
+    t9="$t/case9"
+    /bin/mkdir -p "$t9/home" "$t9/state" "$t9/sandbox" || exit 1
+    HOME="$t9/home" PHYSICAL_HOME="$t9/home" STATE_ROOT="$t9/state" SANDBOX="$t9/sandbox"
+    CONFLICTS_FILE="$t9/sandbox/conflicts.tsv" BACKUP_ROOT="$t9/state/backups/20260819T090009Z-9"
+    printf 'test_zshrc_9\n' > "$t9/home/.zshrc"
+    printf '%s\t%s\n' "$t9/home/.zshrc" "$BACKUP_ROOT/files/.zshrc" > "$CONFLICTS_FILE"
+    dev9=$(stat_dev "$t9/home/.zshrc")
+    ino9=$(/usr/bin/stat -f '%i' "$t9/home/.zshrc")
+    printf '%s\t%s\t%s\t%s\t%s\n' "$t9/home/.zshrc" "$dev9" "$ino9" "Regular File" "100644" > "$t9/sandbox/conflicts_identities.tsv"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$t9/home/.zshrc" "$dev9" "$ino9" "Regular File" "100644" >> "$t9/sandbox/conflicts_identities.tsv"
+    ( move_conflicts ) >/dev/null 2>&1 && exit 1
+    test ! -e "$t9/state/backups" || exit 1
+    test ! -e "$BACKUP_ROOT" || exit 1
     test "$(/usr/bin/stat -f '%i' "$t6/home/.zshrc")" = "$zshrc_ino_6" || exit 1
     exit 0
   )
@@ -5044,6 +5097,7 @@ task5_toctou_premutation_rejection_case() {
   (
     export KAISIAN_TESTING=1
     . "$SCRIPT"
+    unset KAISIAN_TESTING_TTY KAISIAN_TESTING_PROMPT_FAIL KAISIAN_TESTING_READ_FAIL KAISIAN_TESTING_ANSWER KAISIAN_TESTING_PROMPT_TRACE_LOG KAISIAN_TESTING_PRE_MV_HOOK KAISIAN_TESTING_FILES_FAIL KAISIAN_TESTING_APPEND_FAIL KAISIAN_TESTING_TRACKING_CREATE_FAIL KAISIAN_MV_EXEC
 
     chk="$t/checkout"
     /bin/mkdir -p "$chk/pkg1" "$chk/pkg2/dot-config/app" || exit 1
@@ -5130,6 +5184,41 @@ task5_toctou_premutation_rejection_case() {
     ln -s "$t4/outside" "$t4/state/backups" || exit 1
     ( move_conflicts ) >/dev/null 2>&1 && exit 1
     test ! -e "$t4/outside/files" || exit 1
+    # 5. TOCTOU Swap during Pass 2 immediately before 2nd mv (using KAISIAN_TESTING_PRE_MV_HOOK)
+    t5="$t/toctou_pre_mv"
+    /bin/mkdir -p "$t5/home/.config/app" "$t5/state" "$t5/sandbox" "$t5/lock" || exit 1
+    printf 'f1_data\n' > "$t5/home/.zshrc"
+    f1_ino_5=$(/usr/bin/stat -f '%i' "$t5/home/.zshrc")
+    printf 'f2_data\n' > "$t5/home/.config/app/config"
+    printf 'pkg1\tpkg1\tpkg1\npkg2\tpkg2\tpkg2\n' > "$t5/sandbox/groups.tsv"
+    printf 'pkg1\npkg2\n' > "$t5/sandbox/selected.txt"
+    : > "$t5/sandbox/unselected.txt"
+    HOME="$t5/home" PHYSICAL_HOME="$t5/home" CHECKOUT_DIR="$chk" STATE_ROOT="$t5/state" SANDBOX="$t5/sandbox" LOCK_DIR="$t5/lock"
+    build_package_map || exit 1
+    validate_typed_tree || exit 1
+    KAISIAN_TEST_TIME="20260819T120005Z" preflight_targets || exit 1
+
+    # Hook triggers before 2nd mv: swaps .config/app/config to a FIFO
+    pre_mv_hook="if test -f '$t5/home/.config/app/config'; then rm -f '$t5/home/.config/app/config' && mkfifo '$t5/home/.config/app/config'; fi"
+
+    err_premvh=$(
+      CONFIRMED=1
+      KAISIAN_TESTING_PRE_MV_HOOK="$pre_mv_hook" move_conflicts 2>&1
+    )
+    test $? -eq 1 || exit 1
+
+    # Assert .zshrc (1st conflict) was moved and is preserved in backup
+    test ! -e "$t5/home/.zshrc" || exit 1
+    test -f "$BACKUP_ROOT/files/.zshrc" || exit 1
+    test "$(/usr/bin/stat -f '%i' "$BACKUP_ROOT/files/.zshrc")" = "$f1_ino_5" || exit 1
+
+    # Assert restore guidance ONLY emitted for .zshrc, not for the swapped item
+    assert_contains "$err_premvh" "Backup root: $BACKUP_ROOT" || exit 1
+    assert_contains "$err_premvh" "Restore manually with: mv '$BACKUP_ROOT/files/.zshrc' '$t5/home/.zshrc'" || exit 1
+    if printf '%s\n' "$err_premvh" | /usr/bin/grep -q "Restore manually with: mv.*app/config"; then
+      exit 1
+    fi
+
 
     exit 0
   )
@@ -5145,6 +5234,7 @@ task5_partial_failure_and_preservation_case() {
   (
     export KAISIAN_TESTING=1
     . "$SCRIPT"
+    unset KAISIAN_TESTING_TTY KAISIAN_TESTING_PROMPT_FAIL KAISIAN_TESTING_READ_FAIL KAISIAN_TESTING_ANSWER KAISIAN_TESTING_PROMPT_TRACE_LOG KAISIAN_TESTING_PRE_MV_HOOK KAISIAN_TESTING_FILES_FAIL KAISIAN_TESTING_APPEND_FAIL KAISIAN_TESTING_TRACKING_CREATE_FAIL KAISIAN_MV_EXEC
 
     hm="$t/home"
     st="$t/state"
@@ -5171,6 +5261,15 @@ task5_partial_failure_and_preservation_case() {
     printf '%s\t%s\n' "$hm/.file1" "$BACKUP_ROOT/files/.file1" > "$CONFLICTS_FILE"
     printf '%s\t%s\n' "$hm/.file2" "$BACKUP_ROOT/files/.file2" >> "$CONFLICTS_FILE"
     printf '%s\t%s\n' "$hm/.file3" "$BACKUP_ROOT/files/.file3" >> "$CONFLICTS_FILE"
+    f1_mode=$(/usr/bin/stat -f '%p' "$hm/.file1")
+    f2_mode=$(/usr/bin/stat -f '%p' "$hm/.file2")
+    f3_mode=$(/usr/bin/stat -f '%p' "$hm/.file3")
+    dev1=$(stat_dev "$hm/.file1")
+    dev2=$(stat_dev "$hm/.file2")
+    dev3=$(stat_dev "$hm/.file3")
+    printf '%s\t%s\t%s\t%s\t%s\n' "$hm/.file1" "$dev1" "$f1_ino" "Regular File" "$f1_mode" > "$sb/conflicts_identities.tsv"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$hm/.file2" "$dev2" "$f2_ino" "Regular File" "$f2_mode" >> "$sb/conflicts_identities.tsv"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$hm/.file3" "$dev3" "$f3_ino" "Regular File" "$f3_mode" >> "$sb/conflicts_identities.tsv"
 
     # Create mock mv that succeeds on .file1 and fails on .file2
     trace_log="$t/mv_trace.log"
@@ -5194,8 +5293,8 @@ MOCK_MV
     err_out=$(
       CONFIRMED=1
       move_conflicts 2>&1
-    )
-    test $? -eq 1 || exit 1
+    ) || st_err=$?
+    test "${st_err-0}" -eq 1 || exit 1
 
     # Assertions on partial preservation:
     # a. BACKUP_ROOT is kept and not deleted
@@ -5221,8 +5320,7 @@ MOCK_MV
     test ! -e "$BACKUP_ROOT/files/.file2" || exit 1
     test ! -e "$BACKUP_ROOT/files/.file3" || exit 1
 
-    # e. Stderr contains exact root ONCE and manual restore guidance ONLY for .file1
-    root_occurrences=$(printf '%s\n' "$err_out" | /usr/bin/grep -c "Backup root: $BACKUP_ROOT")
+    root_occurrences=$(printf '%s\n' "$err_out" | /usr/bin/grep -E -c '^(Error|錯誤): (Backup root|備份根目錄)')
     test "$root_occurrences" -eq 1 || exit 1
 
     assert_contains "$err_out" "Restore manually with: mv '$BACKUP_ROOT/files/.file1' '$hm/.file1'" || exit 1
@@ -5234,16 +5332,21 @@ MOCK_MV
     fi
 
     # f. Assert no cp, rsync, rm, or rollback was executed
-    if /usr/bin/grep -Eq -- 'cp|rsync|rm' "$trace_log"; then
+    if /usr/bin/grep -E -w -q -- 'cp|rsync|rm' "$trace_log"; then
       exit 1
     fi
+
     # 1g. Tracking file create/truncate failure before reservation
-    t_track_fail="$t/track_fail"
+    t_track_fail=$(mktemp -d "$t/track_fail.XXXXXX")
+    t_track_fail=$(cd -P "$t_track_fail" && pwd -P)
     /bin/mkdir -p "$t_track_fail/home" "$t_track_fail/state" "$t_track_fail/sandbox" || exit 1
     bk_tf="$t_track_fail/state/backups/20260819T100000Z-tf"
     printf 'tf_data\n' > "$t_track_fail/home/.file"
     printf '%s\t%s\n' "$t_track_fail/home/.file" "$bk_tf/files/.file" > "$t_track_fail/sandbox/conflicts.tsv"
-    HOME="$t_track_fail/home" PHYSICAL_HOME="$t_track_fail/home" STATE_ROOT="$t_track_fail/state" SANDBOX="$t_track_fail/sandbox" CONFLICTS_FILE="$t_track_fail/sandbox/conflicts.tsv" BACKUP_ROOT="$bk_tf"
+    dev_tf=$(stat_dev "$t_track_fail/home/.file")
+    ino_tf=$(/usr/bin/stat -f '%i' "$t_track_fail/home/.file")
+    mode_tf=$(/usr/bin/stat -f '%p' "$t_track_fail/home/.file")
+    printf '%s\t%s\t%s\t%s\t%s\n' "$t_track_fail/home/.file" "$dev_tf" "$ino_tf" "Regular File" "$mode_tf" > "$t_track_fail/sandbox/conflicts_identities.tsv"
     (
       CONFIRMED=1
       KAISIAN_TESTING_TRACKING_CREATE_FAIL=1 move_conflicts
@@ -5253,39 +5356,49 @@ MOCK_MV
     test -f "$t_track_fail/home/.file" || exit 1
 
     # 1h. Tracking file append failure after mv succeeds derives recovery from filesystem state
-    t_app_fail="$t/app_fail"
+    t_app_fail=$(mktemp -d "$t/app_fail.XXXXXX")
+    t_app_fail=$(cd -P "$t_app_fail" && pwd -P)
     /bin/mkdir -p "$t_app_fail/home" "$t_app_fail/state" "$t_app_fail/sandbox" || exit 1
     bk_af="$t_app_fail/state/backups/20260819T100000Z-af"
     printf 'af_data\n' > "$t_app_fail/home/.file"
     printf '%s\t%s\n' "$t_app_fail/home/.file" "$bk_af/files/.file" > "$t_app_fail/sandbox/conflicts.tsv"
+    dev_af=$(stat_dev "$t_app_fail/home/.file")
+    ino_af=$(/usr/bin/stat -f '%i' "$t_app_fail/home/.file")
+    mode_af=$(/usr/bin/stat -f '%p' "$t_app_fail/home/.file")
+    printf '%s\t%s\t%s\t%s\t%s\n' "$t_app_fail/home/.file" "$dev_af" "$ino_af" "Regular File" "$mode_af" > "$t_app_fail/sandbox/conflicts_identities.tsv"
     HOME="$t_app_fail/home" PHYSICAL_HOME="$t_app_fail/home" STATE_ROOT="$t_app_fail/state" SANDBOX="$t_app_fail/sandbox" CONFLICTS_FILE="$t_app_fail/sandbox/conflicts.tsv" BACKUP_ROOT="$bk_af"
     err_af=$(
       CONFIRMED=1
       KAISIAN_TESTING_APPEND_FAIL=1 move_conflicts 2>&1
-    )
-    test $? -eq 1 || exit 1
+    ) || st_af=$?
+    test "${st_af-0}" -eq 1 || exit 1
     assert_contains "$err_af" "Backup root: $bk_af" || exit 1
     assert_contains "$err_af" "Restore manually with: mv '$bk_af/files/.file' '$t_app_fail/home/.file'" || exit 1
-
-
     # 2. Initial files directory creation failure reports root and 0 restore commands
-    t_files_fail="$t/files_fail"
+    t_files_fail=$(mktemp -d "$t/files_fail.XXXXXX")
+    t_files_fail=$(cd -P "$t_files_fail" && pwd -P)
     /bin/mkdir -p "$t_files_fail/home" "$t_files_fail/state" "$t_files_fail/sandbox" || exit 1
     bk_ff="$t_files_fail/state/backups/20260819T100001Z-ff"
     printf 'data\n' > "$t_files_fail/home/.file"
     printf '%s\t%s\n' "$t_files_fail/home/.file" "$bk_ff/files/.file" > "$t_files_fail/sandbox/conflicts.tsv"
+    dev_ff=$(stat_dev "$t_files_fail/home/.file")
+    ino_ff=$(/usr/bin/stat -f '%i' "$t_files_fail/home/.file")
+    mode_ff=$(/usr/bin/stat -f '%p' "$t_files_fail/home/.file")
+    printf '%s\t%s\t%s\t%s\t%s\n' "$t_files_fail/home/.file" "$dev_ff" "$ino_ff" "Regular File" "$mode_ff" > "$t_files_fail/sandbox/conflicts_identities.tsv"
     HOME="$t_files_fail/home" PHYSICAL_HOME="$t_files_fail/home" STATE_ROOT="$t_files_fail/state" SANDBOX="$t_files_fail/sandbox" CONFLICTS_FILE="$t_files_fail/sandbox/conflicts.tsv" BACKUP_ROOT="$bk_ff"
     err_ff=$(
       CONFIRMED=1
       KAISIAN_TESTING_FILES_FAIL=1 move_conflicts 2>&1
-    )
-    test $? -eq 1 || exit 1
+    ) || st_ff=$?
+    test "${st_ff-0}" -eq 1 || exit 1
     assert_contains "$err_ff" "Backup root: $bk_ff" || exit 1
     if printf '%s\n' "$err_ff" | /usr/bin/grep -q "Restore manually with:"; then
       exit 1
     fi
+
     # 3. Apostrophe-path shell quoting & recovery execution test
-    t_apo="$t/apo_test"
+    t_apo=$(mktemp -d "$t/apo_test.XXXXXX")
+    t_apo=$(cd -P "$t_apo" && pwd -P)
     /bin/mkdir -p "$t_apo/home/Bob's Config" "$t_apo/state" "$t_apo/sandbox" || exit 1
     hm_apo="$t_apo/home"
     st_apo="$t_apo/state"
@@ -5294,10 +5407,18 @@ MOCK_MV
 
     printf 'apostrophe_config_payload\n' > "$hm_apo/Bob's Config/app.conf"
     apo_ino=$(/usr/bin/stat -f '%i' "$hm_apo/Bob's Config/app.conf")
+    apo_mode=$(/usr/bin/stat -f '%p' "$hm_apo/Bob's Config/app.conf")
     printf 'fail_payload\n' > "$hm_apo/.fail_target"
+    fail_ino=$(/usr/bin/stat -f '%i' "$hm_apo/.fail_target")
+    fail_mode=$(/usr/bin/stat -f '%p' "$hm_apo/.fail_target")
 
     printf '%s\t%s\n' "$hm_apo/Bob's Config/app.conf" "$bk_apo/files/Bob's Config/app.conf" > "$sb_apo/conflicts.tsv"
     printf '%s\t%s\n' "$hm_apo/.fail_target" "$bk_apo/files/.fail_target" >> "$sb_apo/conflicts.tsv"
+
+    dev_apo1=$(stat_dev "$hm_apo/Bob's Config/app.conf")
+    dev_apo2=$(stat_dev "$hm_apo/.fail_target")
+    printf '%s\t%s\t%s\t%s\t%s\n' "$hm_apo/Bob's Config/app.conf" "$dev_apo1" "$apo_ino" "Regular File" "$apo_mode" > "$sb_apo/conflicts_identities.tsv"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$hm_apo/.fail_target" "$dev_apo2" "$fail_ino" "Regular File" "$fail_mode" >> "$sb_apo/conflicts_identities.tsv"
 
     cat << MOCK_APO_MV > "$mock_bin/mv_apo"
 #!/bin/bash
@@ -5313,8 +5434,8 @@ MOCK_APO_MV
     err_apo=$(
       CONFIRMED=1
       KAISIAN_MV_EXEC="$mock_bin/mv_apo" move_conflicts 2>&1
-    )
-    test $? -eq 1 || exit 1
+    ) || st_apo=$?
+    test "${st_apo-0}" -eq 1 || exit 1
 
     # Verify Bob's Config/app.conf was moved
     test ! -e "$hm_apo/Bob's Config/app.conf" || exit 1
@@ -5325,7 +5446,6 @@ MOCK_APO_MV
     test -n "$restore_line" || exit 1
     restore_cmd=${restore_line#*Restore manually with: }
 
-    # Execute the recovery command in a subshell using eval
     ( eval "$restore_cmd" ) || exit 1
 
     # Assert file is safely restored to HOME
@@ -5334,7 +5454,8 @@ MOCK_APO_MV
     test "$(cat "$hm_apo/Bob's Config/app.conf")" = "apostrophe_config_payload" || exit 1
 
     # 4. Test localized error messages under LANGUAGE=zh-TW on another failure setup
-    t2="$t/zhtw"
+    t2=$(mktemp -d "$t/zhtw.XXXXXX")
+    t2=$(cd -P "$t2" && pwd -P)
     /bin/mkdir -p "$t2/home" "$t2/state" "$t2/sandbox" || exit 1
     hm2="$t2/home"
     st2="$t2/state"
@@ -5342,7 +5463,10 @@ MOCK_APO_MV
     bk2="$st2/backups/20260819T110000Z-400"
     printf 'f2\n' > "$hm2/.file"
     printf '%s\t%s\n' "$hm2/.file" "$bk2/files/.file" > "$sb2/conflicts.tsv"
-
+    dev2=$(stat_dev "$hm2/.file")
+    ino2=$(/usr/bin/stat -f '%i' "$hm2/.file")
+    mode2=$(/usr/bin/stat -f '%p' "$hm2/.file")
+    printf '%s\t%s\t%s\t%s\t%s\n' "$hm2/.file" "$dev2" "$ino2" "Regular File" "$mode2" > "$sb2/conflicts_identities.tsv"
     HOME="$hm2"
     PHYSICAL_HOME="$hm2"
     STATE_ROOT="$st2"
@@ -5360,8 +5484,8 @@ MOCK_FAIL
     err_zhtw_out=$(
       CONFIRMED=1
       KAISIAN_MV_EXEC="$mock_bin/mv_fail" move_conflicts 2>&1
-    )
-    test $? -eq 1 || exit 1
+    ) || st_zhtw=$?
+    test "${st_zhtw-0}" -eq 1 || exit 1
     assert_contains "$err_zhtw_out" "備份根目錄：$bk2" || exit 1
     # 0 restore commands because mv_fail failed on the first item
     if printf '%s\n' "$err_zhtw_out" | /usr/bin/grep -q "手動還原指令："; then
