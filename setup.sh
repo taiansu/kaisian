@@ -42,6 +42,14 @@ has_control_char() {
   esac
 }
 
+shell_quote() {
+  local arg=${1-}
+  local sq="'"
+  local repl="'\\''"
+  local escaped="${arg//$sq/$repl}"
+  printf "'%s'" "$escaped"
+}
+
 append_directory_rows() {
   dir_rel=$1
   dir_seen=$2
@@ -473,13 +481,34 @@ run_mv() {
   fi
 }
 
+prompt_tty() {
+  if test "${KAISIAN_TESTING-0}" = '1' && test -n "${KAISIAN_TESTING_PROMPT_FAIL-}"; then
+    return 1
+  fi
+  if test "${KAISIAN_TESTING-0}" = '1' && test -n "${KAISIAN_TESTING_ANSWER+x}"; then
+    return 0
+  fi
+  printf '%s ' 'Proceed? [y/N]' > /dev/tty
+}
+
+read_tty() {
+  if test "${KAISIAN_TESTING-0}" = '1' && test -n "${KAISIAN_TESTING_READ_FAIL-}"; then
+    return 1
+  fi
+  if test "${KAISIAN_TESTING-0}" = '1' && test -n "${KAISIAN_TESTING_ANSWER+x}"; then
+    answer="$KAISIAN_TESTING_ANSWER"
+    return 0
+  fi
+  IFS= read -r answer < /dev/tty
+}
+
 confirm_conflicts() {
   test -f "$CONFLICTS_FILE" || return 1
   if test ! -s "$CONFLICTS_FILE"; then
     CONFIRMED=1
     return 0
   fi
-  while IFS='	' read -r source backup || test -n "$source"; do
+  while IFS='	' read -r source backup extra || test -n "$source"; do
     test -n "$source" || continue
     printf 'Move %s to %s\n' "$source" "$backup"
   done < "$CONFLICTS_FILE"
@@ -494,30 +523,30 @@ confirm_conflicts() {
     err_pfx=$(message error_prefix 2>/dev/null) || err_pfx='Error'
     msg=$(message no_tty 2>/dev/null) || msg='A controlling terminal is required.'
     printf '%s: %s\n' "$err_pfx" "$msg" >&2
+    CONFIRMED=0
     return 1
   elif test "${KAISIAN_TESTING-0}" != '1' || test "${KAISIAN_TESTING_TTY-}" != '1'; then
     if ! ( : < /dev/tty && : > /dev/tty ) 2>/dev/null; then
       err_pfx=$(message error_prefix 2>/dev/null) || err_pfx='Error'
       msg=$(message no_tty 2>/dev/null) || msg='A controlling terminal is required.'
       printf '%s: %s\n' "$err_pfx" "$msg" >&2
+      CONFIRMED=0
       return 1
     fi
   fi
-  if test "${KAISIAN_TESTING-0}" = '1' && test -n "${KAISIAN_TESTING_ANSWER+x}"; then
-    answer="$KAISIAN_TESTING_ANSWER"
-  else
-    printf '%s ' 'Proceed? [y/N]' > /dev/tty 2>/dev/null || {
-      err_pfx=$(message error_prefix 2>/dev/null) || err_pfx='Error'
-      msg=$(message no_tty 2>/dev/null) || msg='A controlling terminal is required.'
-      printf '%s: %s\n' "$err_pfx" "$msg" >&2
-      return 1
-    }
-    IFS= read -r answer < /dev/tty || {
-      err_pfx=$(message error_prefix 2>/dev/null) || err_pfx='Error'
-      msg=$(message no_tty 2>/dev/null) || msg='A controlling terminal is required.'
-      printf '%s: %s\n' "$err_pfx" "$msg" >&2
-      return 1
-    }
+  if ! prompt_tty 2>/dev/null; then
+    err_pfx=$(message error_prefix 2>/dev/null) || err_pfx='Error'
+    msg=$(message no_tty 2>/dev/null) || msg='A controlling terminal is required.'
+    printf '%s: %s\n' "$err_pfx" "$msg" >&2
+    CONFIRMED=0
+    return 1
+  fi
+  if ! read_tty; then
+    err_pfx=$(message error_prefix 2>/dev/null) || err_pfx='Error'
+    msg=$(message no_tty 2>/dev/null) || msg='A controlling terminal is required.'
+    printf '%s: %s\n' "$err_pfx" "$msg" >&2
+    CONFIRMED=0
+    return 1
   fi
   case "$answer" in
     y|Y|yes|YES)
@@ -544,37 +573,125 @@ move_conflicts() {
 
   backup_base=${BACKUP_ROOT%/*}
   test -n "$backup_base" || return 1
-  /bin/mkdir -p "$backup_base" || return 1
-  /bin/mkdir -m 0700 "$BACKUP_ROOT" 2>/dev/null || return 1
-  /bin/mkdir -p "$BACKUP_ROOT/files" || return 1
 
-  while IFS='	' read -r source backup || test -n "$source"; do
-    test -n "$source" || continue
-    rel=${backup#"$BACKUP_ROOT/files/"}
-    if test "$rel" = "$backup" || test -z "$rel"; then
+  # Pass 1: Validate EVERY row without any filesystem mutation
+  while IFS='	' read -r source backup extra || test -n "$source"; do
+    test -n "$source" || return 1
+    test -n "$backup" || return 1
+    test -z "$extra" || return 1
+    has_control_char "$source" && return 1
+    has_control_char "$backup" && return 1
+    case "$source" in
+      "$PHYSICAL_HOME"/*) ;;
+      *) return 1 ;;
+    esac
+    case "$backup" in
+      "$BACKUP_ROOT/files"/*) ;;
+      *) return 1 ;;
+    esac
+    if test ! -e "$source" && test ! -L "$source"; then
       return 1
     fi
-    has_control_char "$rel" && return 1
-    dest="$BACKUP_ROOT/files/$rel"
+    rel_src=${source#"$PHYSICAL_HOME/"}
+    test -n "$rel_src" || return 1
+    old_ifs=$IFS
+    IFS='/'
+    set -f
+    set -- $rel_src
+    set +f
+    IFS=$old_ifs
+    test $# -gt 0 || return 1
+    for comp in "$@"; do
+      test -n "$comp" || return 1
+      test "$comp" != '.' || return 1
+      test "$comp" != '..' || return 1
+    done
+    if test "$backup" != "$BACKUP_ROOT/files/$rel_src"; then
+      return 1
+    fi
+  done < "$CONFLICTS_FILE"
+
+  # Immediately before mutation: re-walk raw state/backup ancestors, reject symlink/non-dir
+  chk_ancestor="$backup_base"
+  while test "$chk_ancestor" != '/' && test -n "$chk_ancestor"; do
+    if test -L "$chk_ancestor"; then return 1; fi
+    if test -e "$chk_ancestor" && test ! -d "$chk_ancestor"; then return 1; fi
+    chk_ancestor=${chk_ancestor%/*}
+    test -n "$chk_ancestor" || chk_ancestor='/'
+  done
+
+  # Re-check each source against nearest destination ancestor device
+  while IFS='	' read -r source backup extra || test -n "$source"; do
+    test -n "$source" || continue
+    src_dev=$(stat_dev "$source") || return 1
+    test -n "$src_dev" || return 1
+    bk_ancestor=$(nearest_existing "$backup")
+    bk_dev=$(stat_dev "$bk_ancestor") || return 1
+    test -n "$bk_dev" || return 1
+    test "$src_dev" = "$bk_dev" || return 1
+  done < "$CONFLICTS_FILE"
+
+  # Defensively create backup_base and verify no symlink at any level
+  /bin/mkdir -p "$backup_base" || return 1
+  if test -L "$backup_base" || test ! -d "$backup_base"; then return 1; fi
+
+  # Atomically reserve BACKUP_ROOT
+  /bin/mkdir -m 0700 "$BACKUP_ROOT" 2>/dev/null || return 1
+  if test -L "$BACKUP_ROOT" || test ! -d "$BACKUP_ROOT"; then return 1; fi
+
+  # Create $BACKUP_ROOT/files
+  files_ok=1
+  if test "${KAISIAN_TESTING-0}" = '1' && test -n "${KAISIAN_TESTING_FILES_FAIL-}"; then
+    files_ok=0
+  elif ! /bin/mkdir -p "$BACKUP_ROOT/files" || test -L "$BACKUP_ROOT/files"; then
+    files_ok=0
+  fi
+  if test "$files_ok" -eq 0; then
+    err_pfx=$(message error_prefix 2>/dev/null) || err_pfx='Error'
+    bk_root_msg=$(message backup_root "$BACKUP_ROOT" 2>/dev/null) || bk_root_msg="Backup root: $BACKUP_ROOT"
+    printf '%s: %s\n' "$err_pfx" "$bk_root_msg" >&2
+    return 1
+  fi
+
+  # Pass 2: Move execution with exact completed move tracking
+  test -n "$SANDBOX" && test -d "$SANDBOX" || return 1
+  completed_file="$SANDBOX/completed_moves.tsv"
+  : > "$completed_file" || return 1
+
+  while IFS='	' read -r source backup extra || test -n "$source"; do
+    test -n "$source" || continue
+    dest="$backup"
     dest_parent=${dest%/*}
 
-    if ! /bin/mkdir -p "$dest_parent"; then
+    if ! /bin/mkdir -p "$dest_parent" || test -L "$dest_parent"; then
       err_pfx=$(message error_prefix 2>/dev/null) || err_pfx='Error'
       bk_root_msg=$(message backup_root "$BACKUP_ROOT" 2>/dev/null) || bk_root_msg="Backup root: $BACKUP_ROOT"
-      restore_msg=$(message manual_restore "$dest" "$source" 2>/dev/null) || restore_msg="Restore manually with: mv '$dest' '$source'"
       printf '%s: %s\n' "$err_pfx" "$bk_root_msg" >&2
-      printf '%s: %s\n' "$err_pfx" "$restore_msg" >&2
+      while IFS='	' read -r c_dest c_src || test -n "$c_dest"; do
+        test -n "$c_dest" || continue
+        q_dest=$(shell_quote "$c_dest")
+        q_src=$(shell_quote "$c_src")
+        restore_msg=$(message manual_restore "$q_dest" "$q_src" 2>/dev/null) || restore_msg="Restore manually with: mv $q_dest $q_src"
+        printf '%s: %s\n' "$err_pfx" "$restore_msg" >&2
+      done < "$completed_file"
       return 1
     fi
 
     if ! run_mv "$source" "$dest"; then
       err_pfx=$(message error_prefix 2>/dev/null) || err_pfx='Error'
       bk_root_msg=$(message backup_root "$BACKUP_ROOT" 2>/dev/null) || bk_root_msg="Backup root: $BACKUP_ROOT"
-      restore_msg=$(message manual_restore "$dest" "$source" 2>/dev/null) || restore_msg="Restore manually with: mv '$dest' '$source'"
       printf '%s: %s\n' "$err_pfx" "$bk_root_msg" >&2
-      printf '%s: %s\n' "$err_pfx" "$restore_msg" >&2
+      while IFS='	' read -r c_dest c_src || test -n "$c_dest"; do
+        test -n "$c_dest" || continue
+        q_dest=$(shell_quote "$c_dest")
+        q_src=$(shell_quote "$c_src")
+        restore_msg=$(message manual_restore "$q_dest" "$q_src" 2>/dev/null) || restore_msg="Restore manually with: mv $q_dest $q_src"
+        printf '%s: %s\n' "$err_pfx" "$restore_msg" >&2
+      done < "$completed_file"
       return 1
     fi
+
+    printf '%s\t%s\n' "$dest" "$source" >> "$completed_file" || return 1
   done < "$CONFLICTS_FILE"
   return 0
 }
@@ -707,7 +824,7 @@ message_en() {
     invalid_package_tree) printf 'Package tree contains unsafe, duplicate, or colliding paths.' ;;
     invalid_targets) printf 'Targets contain unsafe paths, overlaps, or cross-device conflicts.' ;;
     backup_root) printf 'Backup root: %s' "${1-}" ;;
-    manual_restore) printf "Restore manually with: mv '%s' '%s'" "${1-}" "${2-}" ;;
+    manual_restore) printf 'Restore manually with: mv %s %s' "${1-}" "${2-}" ;;
     *) return 64 ;;
   esac
 }
@@ -796,7 +913,7 @@ message_zh_tw() {
     invalid_package_tree) printf '套件樹包含不安全、重複或衝突的路徑。' ;;
     invalid_targets) printf '目標包含不安全路徑、重疊或跨裝置衝突。' ;;
     backup_root) printf '備份根目錄：%s' "${1-}" ;;
-    manual_restore) printf '手動還原指令：mv '\''%s'\'' '\''%s'\''' "${1-}" "${2-}" ;;
+    manual_restore) printf '手動還原指令：mv %s %s' "${1-}" "${2-}" ;;
     *) return 64 ;;
   esac
 }
