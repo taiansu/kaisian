@@ -625,6 +625,8 @@ message_key_parity_case() {
       "git_operation_failed"
       "invalid_package_tree"
       "invalid_targets"
+      "backup_root"
+      "manual_restore"
     )
     for key in "${keys[@]}"; do
       en_msg=$(LANGUAGE=en message "$key" "test_arg" "test_arg2") || {
@@ -4644,6 +4646,446 @@ MOCK_EMPTY
   /bin/rm -rf "$t"
   return "$status"
 }
+task5_confirm_conflicts_matrix_case() {
+  local t
+  t=$(mktemp -d "$ROOT/task5-confirm-mat.XXXXXX") || return 1
+  t=$(cd -P "$t" && pwd -P)
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+
+    SANDBOX="$t/sandbox"
+    /bin/mkdir -p "$SANDBOX" || exit 1
+    CONFLICTS_FILE="$SANDBOX/conflicts.tsv"
+    BACKUP_ROOT="$t/state/backups/20260819T000000Z-100"
+
+    # 1. Empty / no conflicts: continues without TTY or root, returns 0, CONFIRMED=1
+    : > "$CONFLICTS_FILE"
+    CONFIRMED=0
+    (
+      KAISIAN_TESTING_TTY=0 confirm_conflicts
+    ) || exit 1
+    CONFIRMED=0
+    out_empty=$(KAISIAN_TESTING_TTY=0 confirm_conflicts) || exit 1
+    test -z "$out_empty" || exit 1
+    test ! -d "$t/state/backups" || exit 1
+
+    # 2. Populated conflicts file with DRY_RUN=1: prints planned moves, skips prompt, returns 0, no backup root
+    printf '%s\t%s\n' "$t/home/.zshrc" "$BACKUP_ROOT/files/.zshrc" > "$CONFLICTS_FILE"
+    printf '%s\t%s\n' "$t/home/.config/app/config" "$BACKUP_ROOT/files/.config/app/config" >> "$CONFLICTS_FILE"
+
+    CONFIRMED=0
+    DRY_RUN=1
+    ASSUME_YES=0
+    out_dry=$(KAISIAN_TESTING_TTY=0 confirm_conflicts) || exit 1
+    expected_moves=$(printf 'Move %s to %s\nMove %s to %s\n' \
+      "$t/home/.zshrc" "$BACKUP_ROOT/files/.zshrc" \
+      "$t/home/.config/app/config" "$BACKUP_ROOT/files/.config/app/config")
+    test "$out_dry" = "$expected_moves" || exit 1
+    test ! -e "$BACKUP_ROOT" || exit 1
+
+    # 3. Populated conflicts file with ASSUME_YES=1: prints planned moves, skips prompt, returns 0, CONFIRMED=1
+    DRY_RUN=0
+    ASSUME_YES=1
+    CONFIRMED=0
+    out_yes=$(KAISIAN_TESTING_TTY=0 confirm_conflicts) || exit 1
+    test "$out_yes" = "$expected_moves" || exit 1
+    res_yes=$(
+      CONFIRMED=0
+      confirm_conflicts >/dev/null || exit 1
+      test "$CONFIRMED" -eq 1 || exit 1
+      printf 'ok'
+    )
+    test "$res_yes" = 'ok' || exit 1
+
+    # 4. Missing/unusable TTY: returns 1 before backup creation/move, emits localized error to stderr
+    DRY_RUN=0
+    ASSUME_YES=0
+    err_notty=$(
+      CONFIRMED=0
+      KAISIAN_TESTING_TTY=0 confirm_conflicts 2>&1 >/dev/null
+      st=$?
+      test "$st" -eq 1 || exit 1
+      test "$CONFIRMED" -eq 0 || exit 1
+    )
+    test $? -eq 0 || exit 1
+    err_notty_msg=$(LANGUAGE=en message no_tty)
+    err_pfx=$(LANGUAGE=en message error_prefix)
+    assert_contains "$err_notty" "$err_pfx" || exit 1
+    assert_contains "$err_notty" "$err_notty_msg" || exit 1
+    test ! -e "$BACKUP_ROOT" || exit 1
+
+    # 5. Interactive prompt with 'y' / 'yes': returns 0, CONFIRMED=1
+    res_y=$(
+      CONFIRMED=0
+      KAISIAN_TESTING_TTY=1 KAISIAN_TESTING_ANSWER='y' confirm_conflicts >/dev/null || exit 1
+      test "$CONFIRMED" -eq 1 || exit 1
+      printf 'ok'
+    )
+    test "$res_y" = 'ok' || exit 1
+
+    res_yes_ans=$(
+      CONFIRMED=0
+      KAISIAN_TESTING_TTY=1 KAISIAN_TESTING_ANSWER='yes' confirm_conflicts >/dev/null || exit 1
+      test "$CONFIRMED" -eq 1 || exit 1
+      printf 'ok'
+    )
+    test "$res_yes_ans" = 'ok' || exit 1
+
+    # 6. Interactive prompt with 'n' / empty: returns 0 without target/state changes, CONFIRMED=0
+    res_n=$(
+      CONFIRMED=0
+      KAISIAN_TESTING_TTY=1 KAISIAN_TESTING_ANSWER='n' confirm_conflicts >/dev/null || exit 1
+      test "$CONFIRMED" -eq 0 || exit 1
+      printf 'ok'
+    )
+    test "$res_n" = 'ok' || exit 1
+
+    res_empty=$(
+      CONFIRMED=0
+      KAISIAN_TESTING_TTY=1 KAISIAN_TESTING_ANSWER='' confirm_conflicts >/dev/null || exit 1
+      test "$CONFIRMED" -eq 0 || exit 1
+      printf 'ok'
+    )
+    test "$res_empty" = 'ok' || exit 1
+
+    # 7. Bilingual TTY error check for zh-TW
+    err_zhtw=$(
+      LANGUAGE=zh-TW KAISIAN_TESTING_TTY=0 confirm_conflicts 2>&1 >/dev/null
+    )
+    err_zhtw_msg=$(LANGUAGE=zh-TW message no_tty)
+    err_zhtw_pfx=$(LANGUAGE=zh-TW message error_prefix)
+    assert_contains "$err_zhtw" "$err_zhtw_pfx" || exit 1
+    assert_contains "$err_zhtw" "$err_zhtw_msg" || exit 1
+
+    exit 0
+  )
+  status=$?
+  /bin/rm -rf "$t"
+  return "$status"
+}
+
+task5_move_conflicts_execution_case() {
+  local t
+  t=$(mktemp -d "$ROOT/task5-move-exec.XXXXXX") || return 1
+  t=$(cd -P "$t" && pwd -P)
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+
+    hm="$t/home"
+    chk="$t/checkout"
+    st="$t/state"
+    sb="$t/sandbox"
+    lk="$t/lock"
+    /bin/mkdir -p "$hm" "$chk" "$st" "$sb" "$lk" || exit 1
+
+    HOME="$hm"
+    PHYSICAL_HOME="$hm"
+    CHECKOUT_DIR="$chk"
+    STATE_ROOT="$st"
+    SANDBOX="$sb"
+    LOCK_DIR="$lk"
+
+    # Setup manifest packages: shell, git, mise, macos
+    /bin/mkdir -p "$chk/shell" "$chk/git" "$chk/mise" "$chk/macos" || exit 1
+    printf 'new_zshrc_payload\n' > "$chk/shell/dot-zshrc"
+    printf 'new_gitconfig_payload\n' > "$chk/git/dot-gitconfig"
+    /bin/mkdir -p "$chk/mise/dot-config/mise" || exit 1
+    printf 'new_mise_toml\n' > "$chk/mise/dot-config/mise/config.toml"
+    /bin/mkdir -p "$chk/macos/dot-config/app" || exit 1
+    printf 'new_app_config\n' > "$chk/macos/dot-config/app/config"
+
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$chk" init -q || exit 1
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$chk" -c commit.gpgSign=false config user.email test@example.invalid || exit 1
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$chk" -c commit.gpgSign=false config user.name test || exit 1
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$chk" add . || exit 1
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$chk" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm fixture || exit 1
+
+    printf 'shell\tshell\tshell\ngit\tgit\tgit\nmise\tmise\tmise\nmacos\tmacos\tmacos\n' > "$sb/groups.tsv"
+    printf 'shell\ngit\nmise\nmacos\n' > "$sb/selected.txt"
+    : > "$sb/unselected.txt"
+
+    # Setup conflicting targets in HOME:
+    # 1. Regular file: .zshrc
+    printf 'old_zshrc_data_12345\n' > "$hm/.zshrc"
+    zshrc_ino=$(/usr/bin/stat -f '%i' "$hm/.zshrc")
+
+    # 2. Nested directory & file: .config/app/config
+    /bin/mkdir -p "$hm/.config/app" || exit 1
+    printf 'old_app_data_98765\n' > "$hm/.config/app/config"
+    app_ino=$(/usr/bin/stat -f '%i' "$hm/.config/app/config")
+
+    # 3. Symlink conflict: .gitconfig pointing to external file
+    ext_target="$t/external_gitconfig"
+    printf 'ext_gitconfig_data\n' > "$ext_target"
+    ln -s "$ext_target" "$hm/.gitconfig" || exit 1
+
+    # 4. Non-conflicting regular file in HOME: .unrelated
+    printf 'unrelated_data_555\n' > "$hm/.unrelated"
+    unrel_ino=$(/usr/bin/stat -f '%i' "$hm/.unrelated")
+
+    # 5. Non-conflicting directory in HOME: .config/other/data
+    /bin/mkdir -p "$hm/.config/other" || exit 1
+    printf 'other_data_777\n' > "$hm/.config/other/data"
+    other_ino=$(/usr/bin/stat -f '%i' "$hm/.config/other/data")
+
+    # 6. Canonical symlink already pointing to exact package source (no conflict): .config/mise/config.toml
+    /bin/mkdir -p "$hm/.config/mise" || exit 1
+    ln -s "$chk/mise/dot-config/mise/config.toml" "$hm/.config/mise/config.toml" || exit 1
+
+    # Run mapping and preflight
+    build_package_map || exit 1
+    validate_typed_tree || exit 1
+    KAISIAN_TEST_TIME="20260819T080000Z" preflight_targets || exit 1
+
+    # Verify conflicts table has exactly 3 entries
+    test -f "$CONFLICTS_FILE" || exit 1
+    test "$(wc -l < "$CONFLICTS_FILE" | tr -d ' ')" = "3" || exit 1
+
+    # Run confirmation (--yes)
+    ASSUME_YES=1
+    DRY_RUN=0
+    confirm_conflicts >/dev/null || exit 1
+    test "$CONFIRMED" -eq 1 || exit 1
+
+    # Run move_conflicts
+    move_conflicts || exit 1
+
+    # Assertions on BACKUP_ROOT
+    test -d "$BACKUP_ROOT" || exit 1
+    test "$(/usr/bin/stat -f '%Lp' "$BACKUP_ROOT")" = "700" || exit 1
+    test -d "$BACKUP_ROOT/files" || exit 1
+
+    # 1. .zshrc moved
+    test ! -e "$hm/.zshrc" || exit 1
+    test -f "$BACKUP_ROOT/files/.zshrc" || exit 1
+    test "$(/usr/bin/stat -f '%i' "$BACKUP_ROOT/files/.zshrc")" = "$zshrc_ino" || exit 1
+    test "$(cat "$BACKUP_ROOT/files/.zshrc")" = "old_zshrc_data_12345" || exit 1
+
+    # 2. .config/app/config moved
+    test ! -e "$hm/.config/app/config" || exit 1
+    test -f "$BACKUP_ROOT/files/.config/app/config" || exit 1
+    test "$(/usr/bin/stat -f '%i' "$BACKUP_ROOT/files/.config/app/config")" = "$app_ino" || exit 1
+    test "$(cat "$BACKUP_ROOT/files/.config/app/config")" = "old_app_data_98765" || exit 1
+
+    # 3. .gitconfig symlink moved
+    test ! -e "$hm/.gitconfig" || exit 1
+    test -L "$BACKUP_ROOT/files/.gitconfig" || exit 1
+    test "$(/usr/bin/readlink "$BACKUP_ROOT/files/.gitconfig")" = "$ext_target" || exit 1
+
+    # 4. Non-conflicting files untouched
+    test -f "$hm/.unrelated" || exit 1
+    test "$(/usr/bin/stat -f '%i' "$hm/.unrelated")" = "$unrel_ino" || exit 1
+    test "$(cat "$hm/.unrelated")" = "unrelated_data_555" || exit 1
+
+    test -f "$hm/.config/other/data" || exit 1
+    test "$(/usr/bin/stat -f '%i' "$hm/.config/other/data")" = "$other_ino" || exit 1
+    test "$(cat "$hm/.config/other/data")" = "other_data_777" || exit 1
+
+    # 5. Canonical symlink untouched
+    test -L "$hm/.config/mise/config.toml" || exit 1
+    test "$(/usr/bin/readlink "$hm/.config/mise/config.toml")" = "$chk/mise/dot-config/mise/config.toml" || exit 1
+
+    # 6. Idempotent re-run: 0 conflicts, no new backup directory
+    preflight_targets || exit 1
+    test ! -s "$CONFLICTS_FILE" || exit 1
+    confirm_conflicts >/dev/null || exit 1
+    move_conflicts || exit 1
+    backup_count=$(/bin/ls -1 "$st/backups" | wc -l | tr -d ' ')
+    test "$backup_count" = "1" || exit 1
+
+    exit 0
+  )
+  status=$?
+  /bin/rm -rf "$t"
+  return "$status"
+}
+
+task5_backup_prefix_validation_case() {
+  local t
+  t=$(mktemp -d "$ROOT/task5-bk-prefix.XXXXXX") || return 1
+  t=$(cd -P "$t" && pwd -P)
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+
+    hm="$t/home"
+    st="$t/state"
+    sb="$t/sandbox"
+    /bin/mkdir -p "$hm" "$st" "$sb" || exit 1
+
+    HOME="$hm"
+    PHYSICAL_HOME="$hm"
+    STATE_ROOT="$st"
+    SANDBOX="$sb"
+    CONFLICTS_FILE="$sb/conflicts.tsv"
+    BACKUP_ROOT="$st/backups/20260819T090000Z-200"
+
+    printf 'test_zshrc\n' > "$hm/.zshrc"
+    zshrc_ino=$(/usr/bin/stat -f '%i' "$hm/.zshrc")
+
+    # 1. Non-matching backup prefix: $BACKUP_ROOT/other/.zshrc
+    printf '%s\t%s\n' "$hm/.zshrc" "$BACKUP_ROOT/other/.zshrc" > "$CONFLICTS_FILE"
+    ( move_conflicts ) >/dev/null 2>&1 && exit 1
+    test -f "$hm/.zshrc" || exit 1
+    test "$(/usr/bin/stat -f '%i' "$hm/.zshrc")" = "$zshrc_ino" || exit 1
+
+    # 2. Generic /files/ prefix without $BACKUP_ROOT
+    printf '%s\t%s\n' "$hm/.zshrc" "/files/.zshrc" > "$CONFLICTS_FILE"
+    ( move_conflicts ) >/dev/null 2>&1 && exit 1
+    test -f "$hm/.zshrc" || exit 1
+    test "$(/usr/bin/stat -f '%i' "$hm/.zshrc")" = "$zshrc_ino" || exit 1
+
+    # 3. Relative or empty rel
+    printf '%s\t%s\n' "$hm/.zshrc" "$BACKUP_ROOT/files/" > "$CONFLICTS_FILE"
+    ( move_conflicts ) >/dev/null 2>&1 && exit 1
+    test -f "$hm/.zshrc" || exit 1
+
+    # 4. Pre-existing BACKUP_ROOT reservation collision
+    /bin/mkdir -p "$BACKUP_ROOT" || exit 1
+    printf '%s\t%s\n' "$hm/.zshrc" "$BACKUP_ROOT/files/.zshrc" > "$CONFLICTS_FILE"
+    ( move_conflicts ) >/dev/null 2>&1 && exit 1
+    test -f "$hm/.zshrc" || exit 1
+    test "$(/usr/bin/stat -f '%i' "$hm/.zshrc")" = "$zshrc_ino" || exit 1
+
+    exit 0
+  )
+  status=$?
+  /bin/rm -rf "$t"
+  return "$status"
+}
+
+task5_partial_failure_and_preservation_case() {
+  local t
+  t=$(mktemp -d "$ROOT/task5-partial-fail.XXXXXX") || return 1
+  t=$(cd -P "$t" && pwd -P)
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+
+    hm="$t/home"
+    st="$t/state"
+    sb="$t/sandbox"
+    mock_bin="$t/mockbin"
+    /bin/mkdir -p "$hm" "$st" "$sb" "$mock_bin" || exit 1
+
+    HOME="$hm"
+    PHYSICAL_HOME="$hm"
+    STATE_ROOT="$st"
+    SANDBOX="$sb"
+    CONFLICTS_FILE="$sb/conflicts.tsv"
+    BACKUP_ROOT="$st/backups/20260819T100000Z-300"
+
+    # Setup 3 conflicting files
+    printf 'file1_data\n' > "$hm/.file1"
+    printf 'file2_data\n' > "$hm/.file2"
+    printf 'file3_data\n' > "$hm/.file3"
+
+    f1_ino=$(/usr/bin/stat -f '%i' "$hm/.file1")
+    f2_ino=$(/usr/bin/stat -f '%i' "$hm/.file2")
+    f3_ino=$(/usr/bin/stat -f '%i' "$hm/.file3")
+
+    printf '%s\t%s\n' "$hm/.file1" "$BACKUP_ROOT/files/.file1" > "$CONFLICTS_FILE"
+    printf '%s\t%s\n' "$hm/.file2" "$BACKUP_ROOT/files/.file2" >> "$CONFLICTS_FILE"
+    printf '%s\t%s\n' "$hm/.file3" "$BACKUP_ROOT/files/.file3" >> "$CONFLICTS_FILE"
+
+    # Create mock mv that succeeds on .file1 and fails on .file2
+    trace_log="$t/mv_trace.log"
+    : > "$trace_log"
+    cat << MOCK_MV > "$mock_bin/mv"
+#!/bin/bash
+printf 'mv %s %s\n' "\$1" "\$2" >> "$trace_log"
+if test "\$1" = "$hm/.file2"; then
+  exit 1
+fi
+/bin/mv "\$@"
+MOCK_MV
+    chmod +x "$mock_bin/mv"
+
+    # 1. Run under LANGUAGE=en
+    CONFIRMED=1
+    DRY_RUN=0
+    KAISIAN_MV_EXEC="$mock_bin/mv"
+    LANGUAGE=en
+
+    err_out=$(
+      CONFIRMED=1
+      move_conflicts 2>&1
+    )
+    test $? -eq 1 || exit 1
+
+    # Assertions on partial preservation:
+    # a. BACKUP_ROOT is kept and not deleted
+    test -d "$BACKUP_ROOT" || exit 1
+    test -d "$BACKUP_ROOT/files" || exit 1
+
+    # b. file1 was moved and is preserved in backup with original inode and content
+    test ! -e "$hm/.file1" || exit 1
+    test -f "$BACKUP_ROOT/files/.file1" || exit 1
+    test "$(/usr/bin/stat -f '%i' "$BACKUP_ROOT/files/.file1")" = "$f1_ino" || exit 1
+    test "$(cat "$BACKUP_ROOT/files/.file1")" = "file1_data" || exit 1
+
+    # c. file2 and file3 remain in home untouched with original inodes and content
+    test -f "$hm/.file2" || exit 1
+    test "$(/usr/bin/stat -f '%i' "$hm/.file2")" = "$f2_ino" || exit 1
+    test "$(cat "$hm/.file2")" = "file2_data" || exit 1
+
+    test -f "$hm/.file3" || exit 1
+    test "$(/usr/bin/stat -f '%i' "$hm/.file3")" = "$f3_ino" || exit 1
+    test "$(cat "$hm/.file3")" = "file3_data" || exit 1
+
+    # d. file2 and file3 are not in backup
+    test ! -e "$BACKUP_ROOT/files/.file2" || exit 1
+    test ! -e "$BACKUP_ROOT/files/.file3" || exit 1
+
+    # e. Stderr contains exact root and manual restore guidance in English
+    assert_contains "$err_out" "Backup root: $BACKUP_ROOT" || exit 1
+    assert_contains "$err_out" "Restore manually with: mv '$BACKUP_ROOT/files/.file2' '$hm/.file2'" || exit 1
+
+    # f. Assert no cp, rsync, rm, or rollback was executed
+    if /usr/bin/grep -Eq -- 'cp|rsync|rm' "$trace_log"; then
+      exit 1
+    fi
+
+    # 2. Test localized error messages under LANGUAGE=zh-TW on another failure setup
+    t2="$t/zhtw"
+    /bin/mkdir -p "$t2/home" "$t2/state" "$t2/sandbox" || exit 1
+    hm2="$t2/home"
+    st2="$t2/state"
+    sb2="$t2/sandbox"
+    bk2="$st2/backups/20260819T110000Z-400"
+    printf 'f2\n' > "$hm2/.file"
+    printf '%s\t%s\n' "$hm2/.file" "$bk2/files/.file" > "$sb2/conflicts.tsv"
+
+    HOME="$hm2"
+    PHYSICAL_HOME="$hm2"
+    STATE_ROOT="$st2"
+    SANDBOX="$sb2"
+    CONFLICTS_FILE="$sb2/conflicts.tsv"
+    BACKUP_ROOT="$bk2"
+    LANGUAGE=zh-TW
+
+    cat << 'MOCK_FAIL' > "$mock_bin/mv_fail"
+#!/bin/bash
+exit 1
+MOCK_FAIL
+    chmod +x "$mock_bin/mv_fail"
+
+    err_zhtw_out=$(
+      CONFIRMED=1
+      KAISIAN_MV_EXEC="$mock_bin/mv_fail" move_conflicts 2>&1
+    )
+    test $? -eq 1 || exit 1
+    assert_contains "$err_zhtw_out" "備份根目錄：$bk2" || exit 1
+    assert_contains "$err_zhtw_out" "手動還原指令：mv '$bk2/files/.file' '$hm2/.file'" || exit 1
+
+    exit 0
+  )
+  status=$?
+  /bin/rm -rf "$t"
+  return "$status"
+}
 
 run_case 'Task 5 preflight target classification and exact conflict planning' task5_preflight_targets_classification_case
 run_case 'Task 5 preflight target rejection for symlink parents and special nodes' task5_preflight_targets_rejection_case
@@ -4651,6 +5093,10 @@ run_case 'Task 5 preflight unselected package filtering' task5_preflight_selecti
 run_case 'Task 5 preflight XDG_STATE_HOME and state root validation' task5_preflight_state_root_validation_case
 run_case 'Task 5 preflight path overlap matrix and sibling acceptance' task5_preflight_overlap_matrix_case
 run_case 'Task 5 preflight cross-device stat validation rejection' task5_preflight_cross_device_case
+run_case 'Task 5 confirm conflicts matrix and TTY prompt cancellation' task5_confirm_conflicts_matrix_case
+run_case 'Task 5 move conflicts execution, inode preservation, and idempotency' task5_move_conflicts_execution_case
+run_case 'Task 5 backup prefix validation and reservation safety' task5_backup_prefix_validation_case
+run_case 'Task 5 partial failure preservation and manual restore guidance' task5_partial_failure_and_preservation_case
 
 printf '%s passed; %s failed\n' "$PASS" "$FAIL"
 test "$FAIL" -eq 0
