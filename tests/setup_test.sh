@@ -5134,6 +5134,26 @@ task5_toctou_premutation_rejection_case() {
     GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$chk" add . || exit 1
     GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$chk" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm fixture || exit 1
 
+    prepare_backup_identity_case() {
+      case_root=$1
+      case_time=$2
+      /bin/mkdir -p "$case_root/home/.config/app" "$case_root/state" "$case_root/sandbox" "$case_root/outside" "$case_root/lock" || return 1
+      printf 'old_zshrc\n' > "$case_root/home/.zshrc"
+      printf 'old_app\n' > "$case_root/home/.config/app/config"
+      printf 'pkg1\tpkg1\tpkg1\npkg2\tpkg2\tpkg2\n' > "$case_root/sandbox/groups.tsv"
+      printf 'pkg1\npkg2\n' > "$case_root/sandbox/selected.txt"
+      : > "$case_root/sandbox/unselected.txt"
+      HOME="$case_root/home"
+      PHYSICAL_HOME="$case_root/home"
+      CHECKOUT_DIR="$chk"
+      STATE_ROOT="$case_root/state"
+      SANDBOX="$case_root/sandbox"
+      LOCK_DIR="$case_root/lock"
+      build_package_map || return 1
+      validate_typed_tree || return 1
+      KAISIAN_TEST_TIME="$case_time" preflight_targets || return 1
+    }
+
     # 1. TOCTOU Swap: Source parent swapped to symlink after confirmation
     t1="$t/toctou_parent"
     /bin/mkdir -p "$t1/home/.config/app" "$t1/state" "$t1/sandbox" "$t1/real_app" "$t1/lock" || exit 1
@@ -5277,6 +5297,32 @@ task5_toctou_premutation_rejection_case() {
     if printf '%s\n' "$err_dest_swp" | /usr/bin/grep -q "Restore manually with: mv.*app/config"; then
       exit 1
     fi
+
+    # 7. Reserved BACKUP_ROOT replaced by a same-device external symlink after creation
+    t7="$t/toctou_reserved_root"
+    prepare_backup_identity_case "$t7" "20260819T120007Z" || exit 1
+    reserved_root="$BACKUP_ROOT"
+    swap_root_hook="/bin/rm -rf '$reserved_root' && /bin/ln -s '$t7/outside' '$reserved_root'"
+    if KAISIAN_TESTING_PRE_MV_HOOK="$swap_root_hook" move_conflicts >/dev/null 2>&1; then
+      exit 1
+    fi
+    test -f "$t7/home/.zshrc" || exit 1
+    test -f "$t7/home/.config/app/config" || exit 1
+    test -L "$reserved_root" || exit 1
+    test -z "$(/usr/bin/find "$t7/outside" -mindepth 1 -print -quit)" || exit 1
+
+    # 8. Upper backup_base replaced by a same-device external symlink after creation
+    t8="$t/toctou_backup_base"
+    prepare_backup_identity_case "$t8" "20260819T120008Z" || exit 1
+    reserved_base=${BACKUP_ROOT%/*}
+    swap_base_hook="/bin/rm -rf '$reserved_base' && /bin/ln -s '$t8/outside' '$reserved_base'"
+    if KAISIAN_TESTING_PRE_MV_HOOK="$swap_base_hook" move_conflicts >/dev/null 2>&1; then
+      exit 1
+    fi
+    test -f "$t8/home/.zshrc" || exit 1
+    test -f "$t8/home/.config/app/config" || exit 1
+    test -L "$reserved_base" || exit 1
+    test -z "$(/usr/bin/find "$t8/outside" -mindepth 1 -print -quit)" || exit 1
     exit 0
   )
   status=$?

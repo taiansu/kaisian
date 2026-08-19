@@ -638,6 +638,42 @@ revalidate_conflict() {
   return 0
 }
 
+record_backup_tree_identities() {
+  local identity_file=$1
+  local path canon dev ino
+  : > "$identity_file" || return 1
+  for path in "$STATE_ROOT" "$backup_base" "$BACKUP_ROOT" "$BACKUP_ROOT/files"; do
+    test -d "$path" && test ! -L "$path" || return 1
+    canon=$(canonicalize_path "$path") || return 1
+    dev=$(stat_dev "$path") || return 1
+    ino=$(/usr/bin/stat -f '%i' "$path" 2>/dev/null) || return 1
+    test -n "$canon" && test -n "$dev" && test -n "$ino" || return 1
+    has_control_char "$path" && return 1
+    has_control_char "$canon" && return 1
+    printf '%s\t%s\t%s\t%s\n' "$path" "$canon" "$dev" "$ino" >> "$identity_file" || return 1
+  done
+  test "$(/usr/bin/wc -l < "$identity_file" | /usr/bin/tr -d ' ')" = '4'
+}
+
+verify_backup_tree_identities() {
+  local identity_file=$1
+  local path canon dev ino extra current_canon current_dev current_ino count=0
+  test -f "$identity_file" && test -s "$identity_file" || return 1
+  while IFS='	' read -r path canon dev ino extra || test -n "$path"; do
+    test -n "$path" && test -n "$canon" && test -n "$dev" && test -n "$ino" || return 1
+    test -z "$extra" || return 1
+    test -d "$path" && test ! -L "$path" || return 1
+    current_canon=$(canonicalize_path "$path") || return 1
+    current_dev=$(stat_dev "$path") || return 1
+    current_ino=$(/usr/bin/stat -f '%i' "$path" 2>/dev/null) || return 1
+    test "$current_canon" = "$canon" || return 1
+    test "$current_dev" = "$dev" || return 1
+    test "$current_ino" = "$ino" || return 1
+    count=$((count + 1))
+  done < "$identity_file"
+  test "$count" -eq 4
+}
+
 emit_restore_guidance() {
   local err_pfx bk_root_msg q_dest q_src restore_msg s b
   err_pfx=$(message error_prefix 2>/dev/null) || err_pfx='Error'
@@ -766,6 +802,12 @@ move_conflicts() {
     return 1
   fi
 
+  BACKUP_TREE_IDENTITIES_FILE="$SANDBOX/backup_tree_identities.tsv"
+  if ! record_backup_tree_identities "$BACKUP_TREE_IDENTITIES_FILE"; then
+    emit_restore_guidance
+    return 1
+  fi
+
   # Pass 2: Move execution with exact completed move tracking and derivation
   while IFS='	' read -r source backup extra || test -n "$source"; do
     test -n "$source" || continue
@@ -779,6 +821,11 @@ move_conflicts() {
 
     if test "${KAISIAN_TESTING-0}" = '1' && test -n "${KAISIAN_TESTING_PRE_MV_HOOK-}"; then
       eval "$KAISIAN_TESTING_PRE_MV_HOOK" || true
+    fi
+
+    if ! verify_backup_tree_identities "$BACKUP_TREE_IDENTITIES_FILE"; then
+      emit_restore_guidance
+      return 1
     fi
 
     # Re-walk raw backup destination parents from dest_parent up to $BACKUP_ROOT/files
