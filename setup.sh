@@ -399,6 +399,8 @@ preflight_targets() {
 
   CONFLICTS_FILE="$SANDBOX/conflicts.tsv"
   : > "$CONFLICTS_FILE" || return 1
+  IDENTITIES_FILE="$SANDBOX/conflicts_identities.tsv"
+  : > "$IDENTITIES_FILE" || return 1
 
   while IFS='	' read -r typ pkg src target folded extra || test -n "$typ"; do
     test -n "$typ" || continue
@@ -469,6 +471,21 @@ preflight_targets() {
     test "$dst_dev" = "$backup_dev" || return 1
 
     printf '%s\t%s\n' "$dst" "$backup" >> "$CONFLICTS_FILE" || return 1
+    dst_ino=$(/usr/bin/stat -f '%i' "$dst" 2>/dev/null) || return 1
+    test -n "$dst_ino" || return 1
+    has_control_char "$dst_ino" && return 1
+    dst_type=$(/usr/bin/stat -f '%HT' "$dst" 2>/dev/null) || return 1
+    test -n "$dst_type" || return 1
+    has_control_char "$dst_type" && return 1
+    dst_mode=$(/usr/bin/stat -f '%p' "$dst" 2>/dev/null) || return 1
+    test -n "$dst_mode" || return 1
+    has_control_char "$dst_mode" && return 1
+    dst_sym_target=''
+    if test -L "$dst"; then
+      dst_sym_target=$(/usr/bin/readlink "$dst") || return 1
+      has_control_char "$dst_sym_target" && return 1
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$dst" "$dst_dev" "$dst_ino" "$dst_type" "$dst_mode" "$dst_sym_target" >> "$IDENTITIES_FILE" || return 1
   done < "$MAPPING_FILE"
   return 0
 }
@@ -482,22 +499,32 @@ run_mv() {
 }
 
 prompt_tty() {
-  if test "${KAISIAN_TESTING-0}" = '1' && test -n "${KAISIAN_TESTING_PROMPT_FAIL-}"; then
-    return 1
-  fi
-  if test "${KAISIAN_TESTING-0}" = '1' && test -n "${KAISIAN_TESTING_ANSWER+x}"; then
-    return 0
+  if test "${KAISIAN_TESTING-0}" = '1'; then
+    if test -n "${KAISIAN_TESTING_PROMPT_FAIL-}"; then
+      return 1
+    fi
+    if test "${KAISIAN_TESTING_TTY-}" = '1'; then
+      if test -n "${KAISIAN_TESTING_PROMPT_TRACE_LOG-}"; then
+        printf 'PROMPT_REACHED\n' >> "$KAISIAN_TESTING_PROMPT_TRACE_LOG"
+      fi
+      return 0
+    fi
   fi
   printf '%s ' 'Proceed? [y/N]' > /dev/tty
 }
 
 read_tty() {
-  if test "${KAISIAN_TESTING-0}" = '1' && test -n "${KAISIAN_TESTING_READ_FAIL-}"; then
-    return 1
-  fi
-  if test "${KAISIAN_TESTING-0}" = '1' && test -n "${KAISIAN_TESTING_ANSWER+x}"; then
-    answer="$KAISIAN_TESTING_ANSWER"
-    return 0
+  if test "${KAISIAN_TESTING-0}" = '1'; then
+    if test -n "${KAISIAN_TESTING_READ_FAIL-}"; then
+      return 1
+    fi
+    if test -n "${KAISIAN_TESTING_ANSWER+x}"; then
+      answer="$KAISIAN_TESTING_ANSWER"
+      return 0
+    fi
+    if test "${KAISIAN_TESTING_TTY-}" = '1'; then
+      return 1
+    fi
   fi
   IFS= read -r answer < /dev/tty
 }
@@ -560,6 +587,23 @@ confirm_conflicts() {
   esac
 }
 
+emit_restore_guidance() {
+  local err_pfx bk_root_msg q_dest q_src restore_msg s b
+  err_pfx=$(message error_prefix 2>/dev/null) || err_pfx='Error'
+  bk_root_msg=$(message backup_root "$BACKUP_ROOT" 2>/dev/null) || bk_root_msg="Backup root: $BACKUP_ROOT"
+  printf '%s: %s\n' "$err_pfx" "$bk_root_msg" >&2
+
+  while IFS='	' read -r s b extra || test -n "$s"; do
+    test -n "$s" || continue
+    if (test ! -e "$s" && test ! -L "$s") && (test -e "$b" || test -L "$b"); then
+      q_dest=$(shell_quote "$b")
+      q_src=$(shell_quote "$s")
+      restore_msg=$(message manual_restore "$q_dest" "$q_src" 2>/dev/null) || restore_msg="Restore manually with: mv $q_dest $q_src"
+      printf '%s: %s\n' "$err_pfx" "$restore_msg" >&2
+    fi
+  done < "$CONFLICTS_FILE"
+}
+
 move_conflicts() {
   test "$DRY_RUN" -eq 0 || return 0
   test -f "$CONFLICTS_FILE" || return 1
@@ -571,8 +615,17 @@ move_conflicts() {
     *) return 1 ;;
   esac
 
+  test -n "$SANDBOX" && test -d "$SANDBOX" || return 1
+  completed_file="$SANDBOX/completed_moves.tsv"
+  if test "${KAISIAN_TESTING-0}" = '1' && test -n "${KAISIAN_TESTING_TRACKING_CREATE_FAIL-}"; then
+    return 1
+  fi
+  : > "$completed_file" || return 1
+
   backup_base=${BACKUP_ROOT%/*}
   test -n "$backup_base" || return 1
+
+  IDENTITIES_FILE="$SANDBOX/conflicts_identities.tsv"
 
   # Pass 1: Validate EVERY row without any filesystem mutation
   while IFS='	' read -r source backup extra || test -n "$source"; do
@@ -592,6 +645,35 @@ move_conflicts() {
     if test ! -e "$source" && test ! -L "$source"; then
       return 1
     fi
+    # Re-run physical_parent_safe on every source
+    physical_parent_safe "$source" || return 1
+    # Reject special nodes: must be regular file, directory, or symlink
+    if test -e "$source" && test ! -L "$source" && test ! -f "$source" && test ! -d "$source"; then
+      return 1
+    fi
+
+    # Revalidate against sidecar metadata if present
+    if test -f "$IDENTITIES_FILE" && test -s "$IDENTITIES_FILE"; then
+      meta_row=$(/usr/bin/grep "^${source}	" "$IDENTITIES_FILE" 2>/dev/null) || return 1
+      test -n "$meta_row" || return 1
+      IFS='	' read -r m_src m_dev m_ino m_type m_mode m_sym extra_m << EOF
+$meta_row
+EOF
+      cur_dev=$(stat_dev "$source") || return 1
+      test -n "$cur_dev" || return 1
+      test "$cur_dev" = "$m_dev" || return 1
+      cur_ino=$(/usr/bin/stat -f '%i' "$source" 2>/dev/null) || return 1
+      test "$cur_ino" = "$m_ino" || return 1
+      cur_type=$(/usr/bin/stat -f '%HT' "$source" 2>/dev/null) || return 1
+      test "$cur_type" = "$m_type" || return 1
+      cur_mode=$(/usr/bin/stat -f '%p' "$source" 2>/dev/null) || return 1
+      test "$cur_mode" = "$m_mode" || return 1
+      if test -L "$source"; then
+        cur_sym=$(/usr/bin/readlink "$source") || return 1
+        test "$cur_sym" = "$m_sym" || return 1
+      fi
+    fi
+
     rel_src=${source#"$PHYSICAL_HOME/"}
     test -n "$rel_src" || return 1
     old_ifs=$IFS
@@ -611,7 +693,7 @@ move_conflicts() {
     fi
   done < "$CONFLICTS_FILE"
 
-  # Immediately before mutation: re-walk raw state/backup ancestors, reject symlink/non-dir
+  # Immediately before mutation: re-walk ALL raw state/backup ancestors, reject symlink/non-dir
   chk_ancestor="$backup_base"
   while test "$chk_ancestor" != '/' && test -n "$chk_ancestor"; do
     if test -L "$chk_ancestor"; then return 1; fi
@@ -631,9 +713,15 @@ move_conflicts() {
     test "$src_dev" = "$bk_dev" || return 1
   done < "$CONFLICTS_FILE"
 
-  # Defensively create backup_base and verify no symlink at any level
+  # Defensively create backup_base and re-walk ALL components after creation to ensure no intermediate symlinks
   /bin/mkdir -p "$backup_base" || return 1
-  if test -L "$backup_base" || test ! -d "$backup_base"; then return 1; fi
+  chk_after="$backup_base"
+  while test "$chk_after" != '/' && test -n "$chk_after"; do
+    if test -L "$chk_after"; then return 1; fi
+    if test ! -d "$chk_after"; then return 1; fi
+    chk_after=${chk_after%/*}
+    test -n "$chk_after" || chk_after='/'
+  done
 
   # Atomically reserve BACKUP_ROOT
   /bin/mkdir -m 0700 "$BACKUP_ROOT" 2>/dev/null || return 1
@@ -647,51 +735,35 @@ move_conflicts() {
     files_ok=0
   fi
   if test "$files_ok" -eq 0; then
-    err_pfx=$(message error_prefix 2>/dev/null) || err_pfx='Error'
-    bk_root_msg=$(message backup_root "$BACKUP_ROOT" 2>/dev/null) || bk_root_msg="Backup root: $BACKUP_ROOT"
-    printf '%s: %s\n' "$err_pfx" "$bk_root_msg" >&2
+    emit_restore_guidance
     return 1
   fi
 
-  # Pass 2: Move execution with exact completed move tracking
-  test -n "$SANDBOX" && test -d "$SANDBOX" || return 1
-  completed_file="$SANDBOX/completed_moves.tsv"
-  : > "$completed_file" || return 1
-
+  # Pass 2: Move execution with exact completed move tracking and derivation
   while IFS='	' read -r source backup extra || test -n "$source"; do
     test -n "$source" || continue
     dest="$backup"
     dest_parent=${dest%/*}
 
     if ! /bin/mkdir -p "$dest_parent" || test -L "$dest_parent"; then
-      err_pfx=$(message error_prefix 2>/dev/null) || err_pfx='Error'
-      bk_root_msg=$(message backup_root "$BACKUP_ROOT" 2>/dev/null) || bk_root_msg="Backup root: $BACKUP_ROOT"
-      printf '%s: %s\n' "$err_pfx" "$bk_root_msg" >&2
-      while IFS='	' read -r c_dest c_src || test -n "$c_dest"; do
-        test -n "$c_dest" || continue
-        q_dest=$(shell_quote "$c_dest")
-        q_src=$(shell_quote "$c_src")
-        restore_msg=$(message manual_restore "$q_dest" "$q_src" 2>/dev/null) || restore_msg="Restore manually with: mv $q_dest $q_src"
-        printf '%s: %s\n' "$err_pfx" "$restore_msg" >&2
-      done < "$completed_file"
+      emit_restore_guidance
       return 1
     fi
 
     if ! run_mv "$source" "$dest"; then
-      err_pfx=$(message error_prefix 2>/dev/null) || err_pfx='Error'
-      bk_root_msg=$(message backup_root "$BACKUP_ROOT" 2>/dev/null) || bk_root_msg="Backup root: $BACKUP_ROOT"
-      printf '%s: %s\n' "$err_pfx" "$bk_root_msg" >&2
-      while IFS='	' read -r c_dest c_src || test -n "$c_dest"; do
-        test -n "$c_dest" || continue
-        q_dest=$(shell_quote "$c_dest")
-        q_src=$(shell_quote "$c_src")
-        restore_msg=$(message manual_restore "$q_dest" "$q_src" 2>/dev/null) || restore_msg="Restore manually with: mv $q_dest $q_src"
-        printf '%s: %s\n' "$err_pfx" "$restore_msg" >&2
-      done < "$completed_file"
+      emit_restore_guidance
       return 1
     fi
 
-    printf '%s\t%s\n' "$dest" "$source" >> "$completed_file" || return 1
+    if test "${KAISIAN_TESTING-0}" = '1' && test -n "${KAISIAN_TESTING_APPEND_FAIL-}"; then
+      emit_restore_guidance
+      return 1
+    fi
+
+    printf '%s\t%s\n' "$dest" "$source" >> "$completed_file" || {
+      emit_restore_guidance
+      return 1
+    }
   done < "$CONFLICTS_FILE"
   return 0
 }

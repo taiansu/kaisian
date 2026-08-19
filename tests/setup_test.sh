@@ -4725,9 +4725,11 @@ task5_confirm_conflicts_matrix_case() {
     test ! -e "$BACKUP_ROOT" || exit 1
 
     # 4c. TTY read failure / EOF / nonzero: returns 1 before backup creation/move, emits localized error, CONFIRMED=0
+    prompt_trace="$t/prompt_trace.log"
+    : > "$prompt_trace"
     err_read_fail=$(
       CONFIRMED=0
-      KAISIAN_TESTING_TTY=1 KAISIAN_TESTING_READ_FAIL=1 confirm_conflicts 2>&1 >/dev/null
+      KAISIAN_TESTING_TTY=1 KAISIAN_TESTING_READ_FAIL=1 KAISIAN_TESTING_PROMPT_TRACE_LOG="$prompt_trace" confirm_conflicts 2>&1 >/dev/null
       st=$?
       test "$st" -eq 1 || exit 1
       test "$CONFIRMED" -eq 0 || exit 1
@@ -4736,7 +4738,7 @@ task5_confirm_conflicts_matrix_case() {
     assert_contains "$err_read_fail" "$err_pfx" || exit 1
     assert_contains "$err_read_fail" "$err_notty_msg" || exit 1
     test ! -e "$BACKUP_ROOT" || exit 1
-
+    assert_contains "$(cat "$prompt_trace")" "PROMPT_REACHED" || exit 1
     # 5. Interactive prompt with 'y' / 'yes': returns 0, CONFIRMED=1
     res_y=$(
       CONFIRMED=0
@@ -5029,6 +5031,105 @@ task5_backup_prefix_validation_case() {
     ( move_conflicts ) >/dev/null 2>&1 && exit 1
     test -f "$t6/home/.zshrc" || exit 1
     test "$(/usr/bin/stat -f '%i' "$t6/home/.zshrc")" = "$zshrc_ino_6" || exit 1
+    exit 0
+  )
+  status=$?
+  /bin/rm -rf "$t"
+  return "$status"
+}
+task5_toctou_premutation_rejection_case() {
+  local t
+  t=$(mktemp -d "$ROOT/task5-toctou.XXXXXX") || return 1
+  t=$(cd -P "$t" && pwd -P)
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+
+    chk="$t/checkout"
+    /bin/mkdir -p "$chk/pkg1" "$chk/pkg2/dot-config/app" || exit 1
+    printf 'pkg1_payload\n' > "$chk/pkg1/dot-zshrc"
+    printf 'pkg2_payload\n' > "$chk/pkg2/dot-config/app/config"
+    printf 'gitconfig_payload\n' > "$chk/pkg1/dot-gitconfig"
+
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$chk" init -q || exit 1
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$chk" -c commit.gpgSign=false config user.email test@example.invalid || exit 1
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$chk" -c commit.gpgSign=false config user.name test || exit 1
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$chk" add . || exit 1
+    GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$chk" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm fixture || exit 1
+
+    # 1. TOCTOU Swap: Source parent swapped to symlink after confirmation
+    t1="$t/toctou_parent"
+    /bin/mkdir -p "$t1/home/.config/app" "$t1/state" "$t1/sandbox" "$t1/real_app" "$t1/lock" || exit 1
+    printf 'old_app\n' > "$t1/home/.config/app/config"
+    printf 'old_zshrc\n' > "$t1/home/.zshrc"
+    printf 'pkg1\tpkg1\tpkg1\npkg2\tpkg2\tpkg2\n' > "$t1/sandbox/groups.tsv"
+    printf 'pkg1\npkg2\n' > "$t1/sandbox/selected.txt"
+    : > "$t1/sandbox/unselected.txt"
+    HOME="$t1/home" PHYSICAL_HOME="$t1/home" CHECKOUT_DIR="$chk" STATE_ROOT="$t1/state" SANDBOX="$t1/sandbox" LOCK_DIR="$t1/lock"
+    build_package_map || exit 1
+    validate_typed_tree || exit 1
+    KAISIAN_TEST_TIME="20260819T120000Z" preflight_targets || exit 1
+    mv "$t1/home/.config/app" "$t1/real_app/app" || exit 1
+    ln -s "$t1/real_app/app" "$t1/home/.config/app" || exit 1
+    ( move_conflicts ) >/dev/null 2>&1 && exit 1
+    test ! -e "$t1/state/backups" || exit 1
+    test ! -e "$BACKUP_ROOT" || exit 1
+
+    # 2. TOCTOU Swap: Source regular file replaced with FIFO / special node
+    t2="$t/toctou_fifo"
+    /bin/mkdir -p "$t2/home/.config/app" "$t2/state" "$t2/sandbox" "$t2/lock" || exit 1
+    printf 'old_app\n' > "$t2/home/.config/app/config"
+    printf 'old_zshrc\n' > "$t2/home/.zshrc"
+    printf 'pkg1\tpkg1\tpkg1\npkg2\tpkg2\tpkg2\n' > "$t2/sandbox/groups.tsv"
+    printf 'pkg1\npkg2\n' > "$t2/sandbox/selected.txt"
+    : > "$t2/sandbox/unselected.txt"
+    HOME="$t2/home" PHYSICAL_HOME="$t2/home" CHECKOUT_DIR="$chk" STATE_ROOT="$t2/state" SANDBOX="$t2/sandbox" LOCK_DIR="$t2/lock"
+    build_package_map || exit 1
+    validate_typed_tree || exit 1
+    KAISIAN_TEST_TIME="20260819T120001Z" preflight_targets || exit 1
+    rm -f "$t2/home/.zshrc" || exit 1
+    mkfifo "$t2/home/.zshrc" || exit 1
+    ( move_conflicts ) >/dev/null 2>&1 && exit 1
+    test ! -e "$t2/state/backups" || exit 1
+    test ! -e "$BACKUP_ROOT" || exit 1
+
+    # 3. TOCTOU Swap: Source symlink target swapped after confirmation
+    t3="$t/toctou_symlink"
+    /bin/mkdir -p "$t3/home" "$t3/state" "$t3/sandbox" "$t3/lock" || exit 1
+    ext1="$t3/ext1"
+    ext2="$t3/ext2"
+    printf 'ext1\n' > "$ext1"
+    printf 'ext2\n' > "$ext2"
+    ln -s "$ext1" "$t3/home/.gitconfig" || exit 1
+    printf 'old_zshrc\n' > "$t3/home/.zshrc"
+    printf 'pkg1\tpkg1\tpkg1\npkg2\tpkg2\tpkg2\n' > "$t3/sandbox/groups.tsv"
+    printf 'pkg1\npkg2\n' > "$t3/sandbox/selected.txt"
+    : > "$t3/sandbox/unselected.txt"
+    HOME="$t3/home" PHYSICAL_HOME="$t3/home" CHECKOUT_DIR="$chk" STATE_ROOT="$t3/state" SANDBOX="$t3/sandbox" LOCK_DIR="$t3/lock"
+    build_package_map || exit 1
+    validate_typed_tree || exit 1
+    KAISIAN_TEST_TIME="20260819T120002Z" preflight_targets || exit 1
+    rm -f "$t3/home/.gitconfig" || exit 1
+    ln -s "$ext2" "$t3/home/.gitconfig" || exit 1
+    ( move_conflicts ) >/dev/null 2>&1 && exit 1
+    test ! -e "$t3/state/backups" || exit 1
+    test ! -e "$BACKUP_ROOT" || exit 1
+
+    # 4. TOCTOU Swap: Backup intermediate directory swapped to symlink after confirmation
+    t4="$t/toctou_bk_ancestor"
+    /bin/mkdir -p "$t4/home/.config/app" "$t4/state/backups/sub" "$t4/sandbox" "$t4/outside" "$t4/lock" || exit 1
+    printf 'old_zshrc\n' > "$t4/home/.zshrc"
+    printf 'pkg1\tpkg1\tpkg1\npkg2\tpkg2\tpkg2\n' > "$t4/sandbox/groups.tsv"
+    printf 'pkg1\npkg2\n' > "$t4/sandbox/selected.txt"
+    : > "$t4/sandbox/unselected.txt"
+    HOME="$t4/home" PHYSICAL_HOME="$t4/home" STATE_ROOT="$t4/state" SANDBOX="$t4/sandbox" LOCK_DIR="$t4/lock"
+    build_package_map || exit 1
+    validate_typed_tree || exit 1
+    KAISIAN_TEST_TIME="20260819T120003Z" preflight_targets || exit 1
+    rm -rf "$t4/state/backups" || exit 1
+    ln -s "$t4/outside" "$t4/state/backups" || exit 1
+    ( move_conflicts ) >/dev/null 2>&1 && exit 1
+    test ! -e "$t4/outside/files" || exit 1
 
     exit 0
   )
@@ -5136,6 +5237,36 @@ MOCK_MV
     if /usr/bin/grep -Eq -- 'cp|rsync|rm' "$trace_log"; then
       exit 1
     fi
+    # 1g. Tracking file create/truncate failure before reservation
+    t_track_fail="$t/track_fail"
+    /bin/mkdir -p "$t_track_fail/home" "$t_track_fail/state" "$t_track_fail/sandbox" || exit 1
+    bk_tf="$t_track_fail/state/backups/20260819T100000Z-tf"
+    printf 'tf_data\n' > "$t_track_fail/home/.file"
+    printf '%s\t%s\n' "$t_track_fail/home/.file" "$bk_tf/files/.file" > "$t_track_fail/sandbox/conflicts.tsv"
+    HOME="$t_track_fail/home" PHYSICAL_HOME="$t_track_fail/home" STATE_ROOT="$t_track_fail/state" SANDBOX="$t_track_fail/sandbox" CONFLICTS_FILE="$t_track_fail/sandbox/conflicts.tsv" BACKUP_ROOT="$bk_tf"
+    (
+      CONFIRMED=1
+      KAISIAN_TESTING_TRACKING_CREATE_FAIL=1 move_conflicts
+    ) >/dev/null 2>&1 && exit 1
+    test ! -e "$t_track_fail/state/backups" || exit 1
+    test ! -e "$bk_tf" || exit 1
+    test -f "$t_track_fail/home/.file" || exit 1
+
+    # 1h. Tracking file append failure after mv succeeds derives recovery from filesystem state
+    t_app_fail="$t/app_fail"
+    /bin/mkdir -p "$t_app_fail/home" "$t_app_fail/state" "$t_app_fail/sandbox" || exit 1
+    bk_af="$t_app_fail/state/backups/20260819T100000Z-af"
+    printf 'af_data\n' > "$t_app_fail/home/.file"
+    printf '%s\t%s\n' "$t_app_fail/home/.file" "$bk_af/files/.file" > "$t_app_fail/sandbox/conflicts.tsv"
+    HOME="$t_app_fail/home" PHYSICAL_HOME="$t_app_fail/home" STATE_ROOT="$t_app_fail/state" SANDBOX="$t_app_fail/sandbox" CONFLICTS_FILE="$t_app_fail/sandbox/conflicts.tsv" BACKUP_ROOT="$bk_af"
+    err_af=$(
+      CONFIRMED=1
+      KAISIAN_TESTING_APPEND_FAIL=1 move_conflicts 2>&1
+    )
+    test $? -eq 1 || exit 1
+    assert_contains "$err_af" "Backup root: $bk_af" || exit 1
+    assert_contains "$err_af" "Restore manually with: mv '$bk_af/files/.file' '$t_app_fail/home/.file'" || exit 1
+
 
     # 2. Initial files directory creation failure reports root and 0 restore commands
     t_files_fail="$t/files_fail"
@@ -5253,6 +5384,7 @@ run_case 'Task 5 preflight cross-device stat validation rejection' task5_preflig
 run_case 'Task 5 confirm conflicts matrix and TTY prompt cancellation' task5_confirm_conflicts_matrix_case
 run_case 'Task 5 move conflicts execution, inode preservation, and idempotency' task5_move_conflicts_execution_case
 run_case 'Task 5 backup prefix validation and reservation safety' task5_backup_prefix_validation_case
+run_case 'Task 5 TOCTOU pre-mutation rejection for parent swaps, FIFOs, symlink target swaps, and backup ancestors' task5_toctou_premutation_rejection_case
 run_case 'Task 5 partial failure preservation and manual restore guidance' task5_partial_failure_and_preservation_case
 
 printf '%s passed; %s failed\n' "$PASS" "$FAIL"
