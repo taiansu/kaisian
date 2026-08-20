@@ -279,8 +279,8 @@ unknown_and_missing_values_case() {
     "--repo="
     "--ref"
     "--ref="
-    "--repo-dir"
-    "--repo-dir="
+    "--dir"
+    "--dir="
     "--lang"
     "--lang="
   )
@@ -479,7 +479,7 @@ tmpdir_lock_contention_case() {
   return 0
 }
 
-# 11. repo-dir/state paths equal to, above, or below the lock fail; sibling paths pass
+# 11. checkout/state paths equal to, above, or below the lock fail; sibling paths pass
 path_overlap_with_lock_case() {
   test_home=$(make_home)
   fake_bin=$(make_fake_bin)
@@ -487,30 +487,30 @@ path_overlap_with_lock_case() {
   lock_dir="/private/tmp/kaisian-$uid.lock"
 
   # Equals lock
-  out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --repo-dir "$lock_dir" 2>&1)
+  out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --dir "$lock_dir" 2>&1)
   test $? -ne 0 || return 1
   assert_contains "$out" "overlaps with lock or sandbox directory" || return 1
 
   # Ancestor of lock (/private/tmp)
-  out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --repo-dir "/private/tmp" 2>&1)
+  out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --dir "/private/tmp" 2>&1)
   test $? -ne 0 || return 1
   assert_contains "$out" "overlaps with lock or sandbox directory" || return 1
 
   # Descendant of lock
-  out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --repo-dir "$lock_dir/sub" 2>&1)
+  out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --dir "$lock_dir/sub" 2>&1)
   test $? -ne 0 || return 1
   assert_contains "$out" "overlaps with lock or sandbox directory" || return 1
 
   # Dot, dotdot, and doubled-slash aliases of lock
-  out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --repo-dir "/private/tmp/./kaisian-$uid.lock" 2>&1)
+  out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --dir "/private/tmp/./kaisian-$uid.lock" 2>&1)
   test $? -ne 0 || return 1
   assert_contains "$out" "overlaps with lock or sandbox directory" || return 1
 
-  out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --repo-dir "/private/tmp/kaisian-$uid.lock/../kaisian-$uid.lock" 2>&1)
+  out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --dir "/private/tmp/kaisian-$uid.lock/../kaisian-$uid.lock" 2>&1)
   test $? -ne 0 || return 1
   assert_contains "$out" "overlaps with lock or sandbox directory" || return 1
 
-  out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --repo-dir "/private/tmp//kaisian-$uid.lock" 2>&1)
+  out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --dir "/private/tmp//kaisian-$uid.lock" 2>&1)
   test $? -ne 0 || return 1
   assert_contains "$out" "overlaps with lock or sandbox directory" || return 1
 
@@ -518,7 +518,7 @@ path_overlap_with_lock_case() {
   symlink_target="$lock_dir/sandbox"
   symlink_path="$ROOT/to-sandbox"
   ln -s "$symlink_target" "$symlink_path"
-  out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --repo-dir "$symlink_path/.." 2>&1)
+  out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --dir "$symlink_path/.." 2>&1)
   test $? -ne 0 || return 1
   assert_contains "$out" "overlaps with lock or sandbox directory" || return 1
 
@@ -542,14 +542,14 @@ path_overlap_with_lock_case() {
   esac
   assert_contains "$out" "Missing required commands" || return 1
 
-  # Sibling repo-dir is valid: reaches prerequisite check without path overlap failure
+  # Sibling checkout is valid: reaches prerequisite check without path overlap failure
   sibling_dir="$ROOT/sibling-repo"
   mkdir -p "$sibling_dir"
-  out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --repo-dir "$sibling_dir" 2>&1)
+  out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --dir "$sibling_dir" 2>&1)
   test $? -ne 0 || return 1
   case "$out" in
     *"overlaps with lock"*)
-      printf 'Sibling repo-dir incorrectly failed with path overlap: %s\n' "$out" >&2
+      printf 'Sibling checkout incorrectly failed with path overlap: %s\n' "$out" >&2
       return 1
       ;;
   esac
@@ -3975,7 +3975,7 @@ run_case 'normal execution reports every missing prerequisite without installing
 run_case 'relative, missing, symlinked, unowned, or unwritable HOME fails' home_validation_case
 run_case 'existing /private/tmp/kaisian-$UID.lock fails and is never removed' existing_lock_case
 run_case 'runs with different TMPDIR values contend on the same fixed lock' tmpdir_lock_contention_case
-run_case 'repo-dir/state paths equal to, above, or below the lock fail; sibling paths pass' path_overlap_with_lock_case
+run_case 'checkout/state paths equal to, above, or below the lock fail; sibling paths pass' path_overlap_with_lock_case
 run_case 'cleanup leaves an unrecognized lock entry untouched' cleanup_leaves_unrecognized_lock_case
 run_case 'bilingual message key parity and unknown key check' message_key_parity_case
 run_case 'run_git environment sanitization' run_git_sanitization_case

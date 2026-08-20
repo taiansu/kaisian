@@ -895,7 +895,7 @@ Selection, exactly zero or one:
 Source and execution:
   --repo URL|OWNER/REPO
   --ref REF
-  --repo-dir PATH
+  --dir PATH
   --lang en|zh-TW
   --dry-run
   --yes
@@ -1210,15 +1210,15 @@ parse_args() {
         REQUESTED_REF="$val"
         ref_explicit=1
         ;;
-      --repo-dir|--repo-dir=*)
-        if test "$arg" = '--repo-dir'; then
-          test $# -gt 0 || die missing_option_value '--repo-dir'
+      --dir|--dir=*)
+        if test "$arg" = '--dir'; then
+          test $# -gt 0 || die missing_option_value '--dir'
           val=$1
           shift
         else
-          val=${arg#--repo-dir=}
+          val=${arg#--dir=}
         fi
-        test -n "$val" || die missing_option_value '--repo-dir'
+        test -n "$val" || die missing_option_value '--dir'
         CHECKOUT_DIR="$val"
         ;;
       --lang|--lang=*)
