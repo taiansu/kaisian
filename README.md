@@ -9,9 +9,9 @@ curl -fsSL https://kaisian.phx.tw | bash -s -- --yes --prompt prompt-pure --font
 
 Review `setup.sh` before running it. kaisian bootstraps Homebrew, git, and stow,
 clones the dotfiles repository, backs up conflicting files, and stows the selected
-groups into your home directory. It writes a Ghostty font override, generates a
-Brewfile and mise configuration, then hands them to [tsunpi](https://tsunpi.phx.tw)
-for non-interactive installation. Homebrew, git, stow, and mise are always included,
+groups into your home directory. It writes a Ghostty font override, then installs
+the selected Homebrew packages with `brew bundle` and the selected languages with
+mise. Homebrew, git, stow, and mise are always included,
 not selectable tools. Homebrew installation may require a sudo password.
 
 ## Options
@@ -27,8 +27,8 @@ not selectable tools. Homebrew installation may require a sudo password.
 | `--brew NAME[,NAME...]` | Select names from the manifest's `brew` array. |
 | `--langs LANG[,LANG...]` | Select tools to install via mise (e.g. `python,node` or any tool in the mise registry); Elixir also installs Erlang. |
 | `--features NAME[,NAME...]` | Select features from the manifest's `features` array. |
-| `--no-tsunpi` | Bootstrap and stow, and write the font override, but do not generate or run tsunpi inputs. |
-| `--dry-run` | Preview changes, bootstrap requirements, and generated inputs without installing or running tsunpi. |
+| `--stow-only` | Bootstrap and stow, and write the font override, but do not install packages or languages. |
+| `--dry-run` | Preview changes, bootstrap requirements, and generated inputs without installing anything. |
 | `--lang en\|zh-TW` | Set the installer language. |
 | `--repo URL\|OWNER/REPO[/tree/REF]` | Use another dotfiles source; requires a ref via `/tree/REF` or `--ref`. |
 | `--ref REF` | Choose a repository reference; defaults to the `kaisian` branch of `taiansu/dotfiles`. |
@@ -38,18 +38,20 @@ not selectable tools. Homebrew installation may require a sudo password.
 
 Selection flags (`--prompt`, `--groups`, `--profile`, `--interactive`, `--all`) are
 mutually exclusive. Optional font, brew, and language selections default to empty in
-the CLI. tsunpi still runs with empty selections to ensure mise is installed.
+the CLI. mise is installed even with empty selections.
 The web generator omits the selection flag when the chosen prompt is the default
 profile's prompt and emits `--prompt NAME` otherwise.
 
 The selected font writes `~/.config/ghostty/kaisian.conf` with
 `font-family = "<family>"`. Your stowed Ghostty configuration should include
 `config-file = ?~/.config/ghostty/kaisian.conf`. Generated inputs are stored under the installer's
-state directory at `<run-timestamp>/tsunpi/{Brewfile,mise.toml}`. tsunpi receives
-`--brewfile`, `--mise-config`, `--no-rc`, and the chosen locale, keeping shell
-integration in your dotfiles rather than editing rc files.
+state directory at `<run-timestamp>/{Brewfile,mise.toml}`. The Brewfile is installed
+with `brew bundle`; the mise configuration is copied to
+`~/.config/mise/conf.d/kaisian.toml` and applied with `mise install` after every tool
+name is checked against the mise registry. Shell rc files are never edited; shell
+integration belongs to your dotfiles.
 
-For local testing, `KAISIAN_TSUNPI_EXEC` selects a replacement tsunpi executable,
+For local testing, `KAISIAN_MISE_EXEC` selects a replacement mise executable,
 `KAISIAN_BREW_EXEC` selects a replacement brew executable,
 `KAISIAN_BREW_INSTALLER` replaces the Homebrew installer command,
 `KAISIAN_DEFAULTS_EXEC` replaces defaults, and

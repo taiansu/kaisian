@@ -1,0 +1,21 @@
+#!/bin/bash
+set -u
+
+log_file="${KAISIAN_MISE_LOG:-}"
+if test -n "$log_file"; then
+  /bin/mkdir -p "$(/usr/bin/dirname "$log_file")" 2>/dev/null || true
+  printf '%s\n' "$*" >> "$log_file"
+fi
+
+case "${1-}" in
+  registry)
+    # Mimic `mise registry` columns: name followed by backends.
+    printf '%s\n' "${KAISIAN_MISE_REGISTRY:-python core:python
+node core:node
+erlang asdf:erlang
+elixir asdf:elixir
+zig ubi:ziglang/zig}"
+    ;;
+esac
+
+exit "${KAISIAN_MISE_EXIT:-0}"

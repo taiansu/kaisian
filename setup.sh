@@ -28,11 +28,13 @@ STOW_EXEC=''
 FZF_EXEC=''
 PLUTIL_EXEC=''
 BREW_EXEC=''
+MISE_EXEC=''
 SELECTED_FONT=''
 SELECTED_BREW=''
 SELECTED_LANGS=''
 SELECTED_FEATURES=''
-NO_TSUNPI=0
+STOW_ONLY=0
+MISE_TOOLS=''
 RUN_TIMESTAMP=''
 MAPPING_FILE=''
 CONFLICTS_FILE=''
@@ -967,7 +969,7 @@ Customization (optional):
   --brew PKG[,PKG...]
   --langs LANG[,LANG...]
   --features NAME[,NAME...]
-  --no-tsunpi
+  --stow-only
 
 Source and execution:
   --repo URL|OWNER/REPO[/tree/REF]
@@ -1168,7 +1170,9 @@ message_en() {
     activate_settings_failed) printf 'Failed to activate settings. Please log out and log back in for hotkey changes to take effect.' ;;
     warning_prefix) printf 'Warning' ;;
     prompt_conflict) printf 'Multiple prompt groups selected. At most one prompt group may be selected.' ;;
-    tsunpi_failed) printf 'Tsunpi execution failed (%s).' "${1-}" ;;
+    brew_bundle_failed) printf 'brew bundle failed (%s).' "${1-}" ;;
+    unknown_mise_tools) printf 'Unknown mise tools: %s — see https://mise.jdx.dev/registry.html' "${1-}" ;;
+    mise_install_failed) printf 'mise install failed (%s).' "${1-}" ;;
     bootstrap_failed) printf 'Bootstrap failed: %s' "${1-}" ;;
     bootstrap_brew_installing) printf 'Installing Homebrew...' ;;
     bootstrap_tools_installing) printf 'Installing missing tools: %s' "${1-}" ;;
@@ -1341,7 +1345,9 @@ message_zh_tw() {
     activate_settings_failed) printf '無法套用設定。請登出並重新登入以讓快捷鍵變更生效。' ;;
     warning_prefix) printf '警告' ;;
     prompt_conflict) printf '選取了多個提示字元群組。最多只能選取一個提示字元群組。' ;;
-    tsunpi_failed) printf 'Tsunpi 執行失敗（%s）。' "${1-}" ;;
+    brew_bundle_failed) printf 'brew bundle 執行失敗（%s）。' "${1-}" ;;
+    unknown_mise_tools) printf 'mise 不認識這些工具：%s — 參考 https://mise.jdx.dev/registry.html' "${1-}" ;;
+    mise_install_failed) printf 'mise install 執行失敗（%s）。' "${1-}" ;;
     bootstrap_failed) printf '引導安裝失敗：%s' "${1-}" ;;
     bootstrap_brew_installing) printf '正在安裝 Homebrew...' ;;
     bootstrap_tools_installing) printf '正在安裝缺少工具：%s' "${1-}" ;;
@@ -1590,8 +1596,8 @@ parse_args() {
         test -n "$val" || die missing_option_value '--features'
         SELECTED_FEATURES="$val"
         ;;
-      --no-tsunpi)
-        NO_TSUNPI=1
+      --stow-only)
+        STOW_ONLY=1
         ;;
       --dry-run)
         DRY_RUN=1
@@ -1997,6 +2003,14 @@ get_tool_exec() {
         printf '%s\n' "$KAISIAN_BREW_EXEC"
         return 0
       elif test "${KAISIAN_BREW_EXEC+x}" = 'x'; then
+        return 1
+      fi
+      ;;
+    mise)
+      if test -n "${KAISIAN_MISE_EXEC-}"; then
+        printf '%s\n' "$KAISIAN_MISE_EXEC"
+        return 0
+      elif test "${KAISIAN_MISE_EXEC+x}" = 'x'; then
         return 1
       fi
       ;;
@@ -4488,8 +4502,8 @@ apply_feature_hotkeys() {
   fi
 }
 
-generate_tsunpi_inputs() {
-  test "$NO_TSUNPI" -eq 0 || return 0
+generate_install_inputs() {
+  test "$STOW_ONLY" -eq 0 || return 0
 
   if test -z "$RUN_TIMESTAMP"; then
     if test "${KAISIAN_TESTING-0}" = '1' && test -n "${KAISIAN_TEST_TIME-}"; then
@@ -4499,16 +4513,16 @@ generate_tsunpi_inputs() {
     fi
   fi
 
-  tsunpi_dir="$STATE_ROOT/$RUN_TIMESTAMP/tsunpi"
-  brewfile_path="$tsunpi_dir/Brewfile"
-  mise_config_path="$tsunpi_dir/mise.toml"
+  run_dir="$STATE_ROOT/$RUN_TIMESTAMP"
+  brewfile_path="$run_dir/Brewfile"
+  mise_config_path="$run_dir/mise.toml"
 
   if test "$DRY_RUN" -eq 1; then
     printf 'Would generate %s and %s\n' "$brewfile_path" "$mise_config_path"
     return 0
   fi
 
-  /bin/mkdir -p "$tsunpi_dir" 2>/dev/null || die invalid_targets "failed to create $tsunpi_dir"
+  /bin/mkdir -p "$run_dir" 2>/dev/null || die invalid_targets "failed to create $run_dir"
 
   # 1. Brewfile
   : > "$brewfile_path"
@@ -4624,9 +4638,9 @@ generate_tsunpi_inputs() {
 
   # 2. mise.toml
   printf '[tools]\n' > "$mise_config_path"
+  seen_mise_tools=''
   if test -n "$SELECTED_LANGS"; then
     cur="$SELECTED_LANGS"
-    seen_mise_tools=''
     while :; do
       has_more=0
       case "$cur" in
@@ -4670,40 +4684,68 @@ generate_tsunpi_inputs() {
       test "$has_more" -eq 0 && break
     done
   fi
+  MISE_TOOLS="${seen_mise_tools# }"
   /bin/chmod 644 "$mise_config_path" 2>/dev/null || true
 }
 
-run_tsunpi() {
-  test "$NO_TSUNPI" -eq 0 || return 0
+install_packages() {
+  test "$STOW_ONLY" -eq 0 || return 0
 
-  if test -z "$RUN_TIMESTAMP"; then
-    if test "${KAISIAN_TESTING-0}" = '1' && test -n "${KAISIAN_TEST_TIME-}"; then
-      RUN_TIMESTAMP="$KAISIAN_TEST_TIME"
-    else
-      RUN_TIMESTAMP=$(/bin/date -u '+%Y%m%dT%H%M%SZ')
-    fi
-  fi
-
-  tsunpi_dir="$STATE_ROOT/$RUN_TIMESTAMP/tsunpi"
-  brewfile_path="$tsunpi_dir/Brewfile"
-  mise_config_path="$tsunpi_dir/mise.toml"
-
-  loc='en'
-  case "$LANGUAGE" in
-    zh-TW|zh_TW) loc='zh-TW' ;;
-    *) loc='en' ;;
-  esac
+  brewfile_path="$STATE_ROOT/$RUN_TIMESTAMP/Brewfile"
 
   if test "$DRY_RUN" -eq 1; then
-    printf 'Would execute tsunpi with: --brewfile %s --mise-config %s --no-rc --locale %s\n' "$brewfile_path" "$mise_config_path" "$loc"
+    printf 'Would run brew bundle --file=%s\n' "$brewfile_path"
     return 0
   fi
 
-  if test -n "${KAISIAN_TSUNPI_EXEC-}"; then
-    "$KAISIAN_TSUNPI_EXEC" --brewfile "$brewfile_path" --mise-config "$mise_config_path" --no-rc --locale "$loc" || die tsunpi_failed "$?"
-  else
-    /usr/bin/curl -fsSL https://tsunpi.phx.tw | /bin/bash -s -- --brewfile "$brewfile_path" --mise-config "$mise_config_path" --no-rc --locale "$loc" || die tsunpi_failed "$?"
+  test -s "$brewfile_path" || return 0
+  test -n "$BREW_EXEC" || die bootstrap_failed 'Homebrew is required to install packages'
+  "$BREW_EXEC" bundle --file="$brewfile_path" || die brew_bundle_failed "$?"
+}
+
+install_languages() {
+  test "$STOW_ONLY" -eq 0 || return 0
+
+  mise_config_path="$STATE_ROOT/$RUN_TIMESTAMP/mise.toml"
+  mise_conf_dir="$PHYSICAL_HOME/.config/mise/conf.d"
+  mise_conf="$mise_conf_dir/kaisian.toml"
+
+  if test "$DRY_RUN" -eq 1; then
+    printf 'Would install %s and run mise install\n' "$mise_conf"
+    return 0
   fi
+
+  MISE_EXEC=$(get_tool_exec mise) || true
+  if test -z "$MISE_EXEC"; then
+    test -n "$BREW_EXEC" || die bootstrap_failed 'Homebrew is required to install: mise'
+    "$BREW_EXEC" install mise || die bootstrap_failed 'brew install mise failed'
+    # An empty override means "absent"; after installing, discover normally.
+    if test "${KAISIAN_MISE_EXEC+x}" = 'x' && test -z "$KAISIAN_MISE_EXEC"; then
+      unset KAISIAN_MISE_EXEC
+    fi
+    MISE_EXEC=$(get_tool_exec mise) || die bootstrap_failed 'mise executable not found after installation'
+  fi
+
+  if test -n "$MISE_TOOLS"; then
+    nl=$(printf '\n.')
+    nl=${nl%.}
+    registry="$nl$("$MISE_EXEC" registry 2>/dev/null | /usr/bin/awk 'NF {print $1}')$nl"
+    unknown_tools=''
+    for tool in $MISE_TOOLS; do
+      case "$registry" in
+        *"$nl$tool$nl"*) ;;
+        *) unknown_tools="$unknown_tools $tool" ;;
+      esac
+    done
+    test -z "$unknown_tools" || die unknown_mise_tools "${unknown_tools# }"
+  fi
+
+  /bin/mkdir -p "$mise_conf_dir" 2>/dev/null || die invalid_targets "failed to create $mise_conf_dir"
+  /bin/cp "$mise_config_path" "$mise_conf" || die invalid_targets "failed to write $mise_conf"
+  /bin/chmod 644 "$mise_conf" 2>/dev/null || true
+
+  test -n "$MISE_TOOLS" || return 0
+  "$MISE_EXEC" install || die mise_install_failed "$?"
 }
 
 print_feature_notes() {
@@ -4767,8 +4809,9 @@ main() {
   write_font_override
   apply_feature_copies
   apply_feature_hotkeys
-  generate_tsunpi_inputs
-  run_tsunpi
+  generate_install_inputs
+  install_packages
+  install_languages
   print_feature_notes
   return 0
 }

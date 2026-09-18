@@ -9,7 +9,7 @@ TRACE_LOG="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd -P)/tmp/last-command
 /bin/mkdir -p "$(dirname "$TRACE_LOG")" 2>/dev/null || true
 : > "$TRACE_LOG"
 export KAISIAN_GIT_TRACE_LOG="$TRACE_LOG"
-export KAISIAN_TSUNPI_EXEC="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd -P)/fixtures/fake-tsunpi"
+export KAISIAN_MISE_EXEC="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd -P)/fixtures/fake-mise"
 export KAISIAN_BREW_EXEC="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd -P)/fixtures/fake-brew"
 export GIT_CONFIG_GLOBAL=/dev/null
 export GIT_CONFIG_NOSYSTEM=1
@@ -659,7 +659,9 @@ message_key_parity_case() {
       "activate_settings_failed"
       "warning_prefix"
       "prompt_conflict"
-      "tsunpi_failed"
+      "brew_bundle_failed"
+      "unknown_mise_tools"
+      "mise_install_failed"
       "bootstrap_failed"
       "bootstrap_brew_installing"
       "bootstrap_tools_installing"
@@ -2212,7 +2214,8 @@ make_remote_repo() {
     mkdir -p shell git mise .vendor/helper
     printf 'zshrc\n' > shell/dot-zshrc
     printf 'gitconfig\n' > git/dot-gitconfig
-    printf 'miseconfig\n' > mise/dot-config
+    mkdir -p mise/dot-config/mise
+    printf 'miseconfig\n' > mise/dot-config/mise/config.toml
     cat << 'JSON' > .kaisian.json
 {
   "schema": 1,
@@ -3524,7 +3527,7 @@ single_fetch_and_trace_assertions_case() {
     expected_cmd[22]="git -C $(printf '%q' "$chk_single") ls-tree -r HEAD"
     expected_cmd[23]="git -C $(printf '%q' "$chk_single") hash-object $(printf '%q' "$chk_single/.kaisian.json")"
     expected_cmd[24]="git -C $(printf '%q' "$chk_single") hash-object $(printf '%q' "$chk_single/git/dot-gitconfig")"
-    expected_cmd[25]="git -C $(printf '%q' "$chk_single") hash-object $(printf '%q' "$chk_single/mise/dot-config")"
+    expected_cmd[25]="git -C $(printf '%q' "$chk_single") hash-object $(printf '%q' "$chk_single/mise/dot-config/mise/config.toml")"
     expected_cmd[26]="git -C $(printf '%q' "$chk_single") hash-object $(printf '%q' "$chk_single/shell/dot-zshrc")"
     expected_cmd[27]="git -C $(printf '%q' "$chk_single") status --porcelain=v1 --untracked-files=all --ignored=matching --ignore-submodules=none"
     pair_index=0
@@ -5871,7 +5874,7 @@ cli_unknown_options_case() {
 }
 
 # Generated Brewfile, mise.toml (elixir -> erlang first), and font file content
-generated_tsunpi_and_font_content_case() {
+generated_install_inputs_and_font_content_case() {
   checkout="$ROOT/checkout_generated"
   mkdir -p "$checkout/home" "$checkout/prompt-default" "$checkout/prompt-pure" "$checkout/karabiner"
   echo '{"profiles":[]}' > "$checkout/karabiner/default.json"
@@ -5899,7 +5902,7 @@ generated_tsunpi_and_font_content_case() {
 
     validate_custom_selections || exit 1
     write_font_override || exit 1
-    generate_tsunpi_inputs || exit 1
+    generate_install_inputs || exit 1
 
     # Check font override file
     font_file="$test_home/.config/ghostty/kaisian.conf"
@@ -5908,7 +5911,7 @@ generated_tsunpi_and_font_content_case() {
     test "$font_content" = 'font-family = "SauceCodePro NFM"' || exit 1
 
     # Check Brewfile
-    brewfile="$STATE_ROOT/$KAISIAN_TEST_TIME/tsunpi/Brewfile"
+    brewfile="$STATE_ROOT/$KAISIAN_TEST_TIME/Brewfile"
     test -f "$brewfile" || exit 1
     bf_content=$(cat "$brewfile")
     assert_contains "$bf_content" 'cask "font-sauce-code-pro-nerd-font"' || exit 1
@@ -5917,7 +5920,7 @@ generated_tsunpi_and_font_content_case() {
     assert_contains "$bf_content" 'brew "gitstatus"' || exit 1
 
     # Check mise.toml
-    mise_file="$STATE_ROOT/$KAISIAN_TEST_TIME/tsunpi/mise.toml"
+    mise_file="$STATE_ROOT/$KAISIAN_TEST_TIME/mise.toml"
     test -f "$mise_file" || exit 1
     mise_content=$(cat "$mise_file")
     assert_contains "$mise_content" '[tools]' || exit 1
@@ -5938,9 +5941,10 @@ generated_tsunpi_and_font_content_case() {
   return 0
 }
 
-# Tsunpi execution: fake-tsunpi receives exact args, --no-tsunpi skips it, --dry-run skips it
-tsunpi_execution_and_flags_case() {
-  checkout="$ROOT/checkout_tsunpi_exec"
+# Package and language installation: brew bundle receives the generated Brewfile,
+# mise config lands in conf.d, unknown registry tools abort, --stow-only and --dry-run skip
+install_execution_and_flags_case() {
+  checkout="$ROOT/checkout_install_exec"
   mkdir -p "$checkout/home" "$checkout/prompt-default" "$checkout/prompt-pure" "$checkout/karabiner"
   echo '{"profiles":[]}' > "$checkout/karabiner/default.json"
   cp "$(dirname "$SCRIPT")/tests/fixtures/manifest-v2.json" "$checkout/.kaisian.json"
@@ -5948,14 +5952,18 @@ tsunpi_execution_and_flags_case() {
   (
     export KAISIAN_TESTING=1
     export KAISIAN_TEST_TIME='20260917T130000Z'
-    tsunpi_log="$ROOT/tsunpi_test.log"
-    export KAISIAN_TSUNPI_LOG="$tsunpi_log"
-    export KAISIAN_TSUNPI_EXEC="$(dirname "$SCRIPT")/tests/fixtures/fake-tsunpi"
+    brew_log="$ROOT/install_brew.log"
+    mise_log="$ROOT/install_mise.log"
+    export KAISIAN_BREW_LOG="$brew_log"
+    export KAISIAN_MISE_LOG="$mise_log"
+    export KAISIAN_BREW_EXEC="$(dirname "$SCRIPT")/tests/fixtures/fake-brew"
+    export KAISIAN_MISE_EXEC="$(dirname "$SCRIPT")/tests/fixtures/fake-mise"
     . "$SCRIPT"
     test_home=$(make_home)
     HOME="$test_home"
     PHYSICAL_HOME="$test_home"
     STATE_ROOT="$test_home/state"
+    BREW_EXEC="$KAISIAN_BREW_EXEC"
     acquire_lock || exit 1
     trap 'cleanup' EXIT
 
@@ -5963,33 +5971,75 @@ tsunpi_execution_and_flags_case() {
     SELECTION_MODE='profile'
     SELECTION_VALUE='default'
     resolve_selection || exit 1
+    SELECTED_LANGS='python,elixir'
+    SELECTED_BREW='ripgrep'
 
-    # 1. Normal run executes fake-tsunpi with exact arguments
-    generate_tsunpi_inputs || exit 1
-    run_tsunpi || exit 1
-    test -f "$tsunpi_log" || exit 1
-    logged_args=$(cat "$tsunpi_log")
-    expected_brewfile="$STATE_ROOT/$KAISIAN_TEST_TIME/tsunpi/Brewfile"
-    expected_mise="$STATE_ROOT/$KAISIAN_TEST_TIME/tsunpi/mise.toml"
-    assert_contains "$logged_args" "--brewfile $expected_brewfile --mise-config $expected_mise --no-rc --locale en" || exit 1
+    # 1. Normal run: brew bundle on the generated Brewfile, config copied, mise install
+    : > "$brew_log"
+    : > "$mise_log"
+    generate_install_inputs || exit 1
+    install_packages || exit 1
+    install_languages || exit 1
+    test "$(cat "$brew_log")" = "bundle --file=$STATE_ROOT/$KAISIAN_TEST_TIME/Brewfile" || exit 1
+    test "$(cat "$mise_log")" = "$(printf 'registry\ninstall\n')" || exit 1
+    conf="$test_home/.config/mise/conf.d/kaisian.toml"
+    test -f "$conf" || exit 1
+    test "$(cat "$conf")" = "$(cat "$STATE_ROOT/$KAISIAN_TEST_TIME/mise.toml")" || exit 1
+    assert_contains "$(cat "$conf")" 'erlang = "latest"' || exit 1
 
-    # 2. --no-tsunpi skips generation and execution
-    rm -f "$tsunpi_log"
-    NO_TSUNPI=1
+    # 2. Unknown registry tool aborts before mise install and before writing conf.d
+    rm -f "$conf"
+    : > "$mise_log"
+    RUN_TIMESTAMP='20260917T131500Z'
+    SELECTED_LANGS='python,notatool'
+    generate_install_inputs || exit 1
+    out_unknown=$(LANGUAGE='en' install_languages 2>&1)
+    test $? -ne 0 || exit 1
+    assert_contains "$out_unknown" "Unknown mise tools: notatool" || exit 1
+    test "$(cat "$mise_log")" = 'registry' || exit 1
+    test ! -e "$conf" || exit 1
+
+    # 3. Missing mise is installed through brew, then discovered on PATH; config still lands
+    : > "$brew_log"
+    : > "$mise_log"
+    rm -f "$conf"
+    RUN_TIMESTAMP='20260917T133000Z'
+    SELECTED_LANGS=''
+    generate_install_inputs || exit 1
+    (
+      KAISIAN_MISE_EXEC=''
+      export KAISIAN_BREW_BIN_DIR="$ROOT/install_mise_bin"
+      PATH="$KAISIAN_BREW_BIN_DIR:$PATH"
+      install_languages || exit 1
+    ) || exit 1
+    test "$(cat "$brew_log")" = 'install mise' || exit 1
+    test ! -s "$mise_log" || exit 1
+    test "$(cat "$conf")" = '[tools]' || exit 1
+    SELECTED_LANGS='python,elixir'
+
+    # 4. --stow-only skips generation and installation
+    : > "$brew_log"
+    : > "$mise_log"
+    STOW_ONLY=1
     RUN_TIMESTAMP='20260917T140000Z'
-    generate_tsunpi_inputs || exit 1
-    run_tsunpi || exit 1
-    test ! -e "$tsunpi_log" || exit 1
-    test ! -d "$STATE_ROOT/20260917T140000Z/tsunpi" || exit 1
-    NO_TSUNPI=0
+    generate_install_inputs || exit 1
+    install_packages || exit 1
+    install_languages || exit 1
+    test ! -s "$brew_log" || exit 1
+    test ! -s "$mise_log" || exit 1
+    test ! -d "$STATE_ROOT/20260917T140000Z" || exit 1
+    STOW_ONLY=0
 
-    # 3. --dry-run skips execution
-    rm -f "$tsunpi_log"
+    # 5. --dry-run skips execution
+    : > "$brew_log"
+    : > "$mise_log"
     DRY_RUN=1
     RUN_TIMESTAMP='20260917T150000Z'
-    out_dry=$(run_tsunpi 2>&1)
-    test ! -e "$tsunpi_log" || exit 1
-    assert_contains "$out_dry" "Would execute tsunpi" || exit 1
+    out_dry=$(install_packages 2>&1; install_languages 2>&1)
+    test ! -s "$brew_log" || exit 1
+    test ! -s "$mise_log" || exit 1
+    assert_contains "$out_dry" "Would run brew bundle" || exit 1
+    assert_contains "$out_dry" "Would install" || exit 1
     DRY_RUN=0
 
     cleanup
@@ -6483,9 +6533,9 @@ feature_brewfile_cask_inclusion_case() {
     # 1. With karabiner-ime selected
     SELECTED_FEATURES='karabiner-ime'
     validate_custom_selections || exit 1
-    generate_tsunpi_inputs || exit 1
+    generate_install_inputs || exit 1
 
-    brewfile="$STATE_ROOT/$KAISIAN_TEST_TIME/tsunpi/Brewfile"
+    brewfile="$STATE_ROOT/$KAISIAN_TEST_TIME/Brewfile"
     test -f "$brewfile" || exit 1
     bf_content=$(cat "$brewfile")
     assert_contains "$bf_content" 'cask "karabiner-elements"' || exit 1
@@ -6494,9 +6544,9 @@ feature_brewfile_cask_inclusion_case() {
     SELECTED_FEATURES=''
     RUN_TIMESTAMP='20260918T120000Z'
     validate_custom_selections || exit 1
-    generate_tsunpi_inputs || exit 1
+    generate_install_inputs || exit 1
 
-    brewfile2="$STATE_ROOT/$RUN_TIMESTAMP/tsunpi/Brewfile"
+    brewfile2="$STATE_ROOT/$RUN_TIMESTAMP/Brewfile"
     test -f "$brewfile2" || exit 1
     bf2_content=$(cat "$brewfile2")
     if assert_contains "$bf2_content" 'karabiner-elements'; then
@@ -6535,9 +6585,9 @@ custom_langs_and_validation_case() {
     # 1. Valid custom langs: zig,deno accepted and appears in mise.toml
     SELECTED_LANGS='zig,deno'
     validate_langs || exit 1
-    generate_tsunpi_inputs || exit 1
+    generate_install_inputs || exit 1
 
-    mise_file="$STATE_ROOT/$KAISIAN_TEST_TIME/tsunpi/mise.toml"
+    mise_file="$STATE_ROOT/$KAISIAN_TEST_TIME/mise.toml"
     test -f "$mise_file" || exit 1
     mise_content=$(cat "$mise_file")
     assert_contains "$mise_content" 'zig = "latest"' || exit 1
@@ -6637,8 +6687,8 @@ run_case 'Task 5 readonly constants environment injection immunity' task5_readon
 run_case 'schema 2 manifest parsing and dependency catalog validation' schema_2_manifest_parsing_case
 run_case 'two prompt groups selected triggers prompt_conflict' prompt_conflict_case
 run_case 'cli unknown options --font, --brew, and --langs fail' cli_unknown_options_case
-run_case 'generated Brewfile, mise.toml, and font file content' generated_tsunpi_and_font_content_case
-run_case 'tsunpi execution and flags handling' tsunpi_execution_and_flags_case
+run_case 'generated Brewfile, mise.toml, and font file content' generated_install_inputs_and_font_content_case
+run_case 'brew bundle and mise install execution, --stow-only, and --dry-run' install_execution_and_flags_case
 run_case 'bootstrap fake brew records install git stow only for missing ones' bootstrap_fake_brew_records_missing_case
 run_case 'schema 2 features manifest parsing and validation failures' features_manifest_parsing_and_validation_failures_case
 run_case 'cli unknown features fail' cli_unknown_features_case
