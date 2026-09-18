@@ -42,9 +42,12 @@ the CLI. mise is installed even with empty selections.
 The web generator omits the selection flag when the chosen prompt is the default
 profile's prompt and emits `--prompt NAME` otherwise.
 
-The selected font writes `~/.config/ghostty/kaisian.conf` with
-`font-family = "<family>"`. Your stowed Ghostty configuration should include
-`config-file = ?~/.config/ghostty/kaisian.conf`. Generated inputs are stored under the installer's
+The selected font writes `~/.config/ghostty/kaisian.conf` with `font-family = ""`
+followed by `font-family = "<family>"`: Ghostty loads `config-file` includes after
+the main file and treats repeated `font-family` as fallbacks, so the reset makes the
+chosen font primary. Your stowed Ghostty configuration should include
+`config-file = ?~/.config/ghostty/kaisian.conf`; put CJK or emoji fallbacks in a
+second include listed after it. Generated inputs are stored under the installer's
 state directory at `<run-timestamp>/{Brewfile,mise.toml}`. The Brewfile is installed
 with `brew bundle`; the mise configuration is copied to
 `~/.config/mise/conf.d/kaisian.toml` and applied with `mise install` after every tool

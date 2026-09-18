@@ -5908,7 +5908,7 @@ generated_install_inputs_and_font_content_case() {
     font_file="$test_home/.config/ghostty/kaisian.conf"
     test -f "$font_file" || exit 1
     font_content=$(cat "$font_file")
-    test "$font_content" = 'font-family = "SauceCodePro NFM"' || exit 1
+    test "$font_content" = "$(printf 'font-family = ""\nfont-family = "SauceCodePro NFM"')" || exit 1
 
     # Check Brewfile
     brewfile="$STATE_ROOT/$KAISIAN_TEST_TIME/Brewfile"

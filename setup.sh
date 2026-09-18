@@ -4369,7 +4369,9 @@ write_font_override() {
   /bin/mkdir -p "$ghostty_dir" 2>/dev/null || die invalid_targets "failed to create $ghostty_dir"
   font_conf="$ghostty_dir/kaisian.conf"
   /bin/rm -f "$font_conf" 2>/dev/null || true
-  ( umask 022 && printf 'font-family = "%s"\n' "$font_family" > "$font_conf" ) || die invalid_targets "failed to write $font_conf"
+  # Ghostty loads config-file includes after the main file and appends font-family
+  # as a fallback; an empty value resets the list so the chosen font becomes primary.
+  ( umask 022 && printf 'font-family = ""\nfont-family = "%s"\n' "$font_family" > "$font_conf" ) || die invalid_targets "failed to write $font_conf"
   /bin/chmod 644 "$font_conf" 2>/dev/null || true
 }
 
