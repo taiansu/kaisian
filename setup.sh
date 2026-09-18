@@ -111,6 +111,62 @@ normalized_relpath() {
   printf '%s\n' "$out"
 }
 
+# Stow honors <package>/.stow-local-ignore; the package map must skip the same
+# paths or preflight would back up files stow never touches. Only the literal
+# subset is supported: `^/path$` (anchored, matched against the translated
+# target) and `name` (basename). Anything else is rejected so the manifest
+# author sees it rather than a silent mismatch with stow.
+load_stow_local_ignore() {
+  : > "$STOW_IGNORE_FILE" || return 1
+  ignore_file="$1/.stow-local-ignore"
+  test -e "$ignore_file" || return 0
+  test -f "$ignore_file" && test ! -L "$ignore_file" || die unsupported_stow_ignore "$ignore_file"
+  while IFS= read -r line || test -n "$line"; do
+    case "$line" in
+      ''|'#'*) continue ;;
+    esac
+    has_control_char "$line" && die unsupported_stow_ignore "$line"
+    pat=$line
+    kind='name'
+    case "$pat" in
+      '^/'*'$') pat=${pat#'^/'}; pat=${pat%'$'}; kind='path' ;;
+      *'^'*|*'$'*|*'/'*) die unsupported_stow_ignore "$line" ;;
+    esac
+    # Unescape `\.`; any other regex metacharacter is unsupported.
+    literal=''
+    rest=$pat
+    while test -n "$rest"; do
+      case "$rest" in
+        '\.'*) literal="$literal."; rest=${rest#'\.'} ;;
+        [a-zA-Z0-9_./-]*) literal="$literal${rest%"${rest#?}"}"; rest=${rest#?} ;;
+        *) die unsupported_stow_ignore "$line" ;;
+      esac
+    done
+    test -n "$literal" || die unsupported_stow_ignore "$line"
+    printf '%s\t%s\n' "$kind" "$literal" >> "$STOW_IGNORE_FILE"
+  done < "$ignore_file"
+}
+
+stow_ignored() {
+  target=$1
+  test -s "$STOW_IGNORE_FILE" || return 1
+  while IFS='	' read -r kind literal || test -n "$kind"; do
+    case "$kind" in
+      path)
+        case "$target" in
+          "$literal"|"$literal"/*) return 0 ;;
+        esac
+        ;;
+      name)
+        case "/$target/" in
+          *"/$literal/"*) return 0 ;;
+        esac
+        ;;
+    esac
+  done < "$STOW_IGNORE_FILE"
+  return 1
+}
+
 build_package_map() {
   test -n "$SANDBOX" && test -d "$SANDBOX" || return 1
   test -n "$CHECKOUT_DIR" && test -d "$CHECKOUT_DIR" || return 1
@@ -166,10 +222,14 @@ build_package_map() {
       /bin/rm -f "$entries"
       return 1
     }
+    load_stow_local_ignore "$pkg"
     package_count=0
     while IFS= read -r -d '' entry; do
       meta=${entry%%	*}
       rel=${entry#*	}
+      case "$rel" in
+        "$package"/.stow-local-ignore) continue ;;
+      esac
       mode=${meta%% *}
       case "$mode" in
         100644|100755) ;;
@@ -182,6 +242,7 @@ build_package_map() {
         *) /bin/rm -f "$entries"; return 1 ;;
       esac
       target=$(normalized_relpath "$rel") || { /bin/rm -f "$entries"; return 1; }
+      stow_ignored "$target" && continue
       file_target=$target
       is_pure_ascii "$rel" || { /bin/rm -f "$entries"; return 1; }
       # Dotfiles must use the explicit dot- encoding; a decoded traversal
@@ -229,6 +290,10 @@ validate_typed_tree() {
   test -f "$MAPPING_FILE" || return 1
   rows="$SANDBOX/typed-tree-$$"
   : > "$rows" || return 1
+  selected_pkgs=''
+  if test -f "$SANDBOX/selected.txt"; then
+    selected_pkgs=$(/usr/bin/tr '\n' ' ' < "$SANDBOX/selected.txt")
+  fi
   while IFS='	' read -r typ pkg src target folded extra || test -n "$typ"; do
     case "$typ" in dir|file) ;; *) /bin/rm -f "$rows"; return 1 ;; esac
     test -n "$pkg" && test -n "$src" && test -n "$target" && test -n "$folded" || {
@@ -244,6 +309,14 @@ validate_typed_tree() {
     test "$target" = "$expected_target" || { /bin/rm -f "$rows"; return 1; }
     expected_folded=$(ascii_fold "$target")
     test "$folded" = "$expected_folded" || { /bin/rm -f "$rows"; return 1; }
+    # Only selected packages compete for a target: unselected groups (say, the
+    # other prompt-* layouts) may map the same file without conflict.
+    if test -n "$selected_pkgs"; then
+      case " $selected_pkgs " in
+        *" $pkg "*) ;;
+        *) continue ;;
+      esac
+    fi
     while IFS='	' read -r oldtyp oldtarget oldfolded || test -n "$oldtarget"; do
       test -n "$oldtarget" || continue
       if test "$folded" = "$oldfolded"; then
@@ -422,7 +495,14 @@ preflight_targets() {
 
     for guard in "$canon_checkout" "$STATE_ROOT" "$canon_lock" "$canon_sandbox" "$BACKUP_ROOT"; do
       test -n "$guard" || continue
-      paths_overlap "$dst" "$guard" && return 1
+      if test "$typ" = 'dir'; then
+        # With --no-folding a directory row is only ever a real directory, so it
+        # may be an ancestor of the state/lock/backup roots (~/.local above
+        # ~/.local/state/kaisian); it must not be one of them or live inside one.
+        case "$dst/" in "$guard/"*) return 1 ;; esac
+      else
+        paths_overlap "$dst" "$guard" && return 1
+      fi
     done
 
     if test "$typ" = 'dir'; then
@@ -605,6 +685,9 @@ confirm_conflicts() {
     printf 'Move %s to %s\n' "$source" "$backup"
   done < "$CONFLICTS_FILE"
   if test "$DRY_RUN" -eq 1; then
+    # Nothing downstream mutates under --dry-run; keep going so the whole plan
+    # (stow, font, features, brew, mise) is shown, not just the backups.
+    CONFIRMED=1
     return 0
   fi
   if test "$ASSUME_YES" -eq 1; then
@@ -1022,6 +1105,7 @@ message_en() {
     lock_failed) printf 'Failed to acquire lock at %s. Another instance may be running, or a stale lock directory exists.' "${1-}" ;;
     unsafe_path_overlap) printf "Path '%s' overlaps with lock or sandbox directory '%s'." "${1-}" "${2-}" ;;
     unsupported_stow) printf 'GNU Stow does not support required behavior (%s).' "${1-}" ;;
+    unsupported_stow_ignore) printf 'Unsupported .stow-local-ignore rule (only ^/path$ and bare names, with \\. escapes, are accepted): %s' "${1-}" ;;
     invalid_manifest)
       reason_key=${1-}
       case "$reason_key" in
@@ -1052,7 +1136,6 @@ message_en() {
         description_empty_zhtw) printf "Invalid manifest: group %s description.zh-TW cannot be empty." "${2-}" ;;
         description_control_char) printf "Invalid manifest: group %s description contains control/tab/newline characters." "${2-}" ;;
         missing_package_dir) printf "Invalid manifest: missing package directory '%s'." "${2-}" ;;
-        undeclared_package_dir) printf "Invalid manifest: undeclared package directory '%s'." "${2-}" ;;
         profiles_not_object) printf "Invalid manifest: 'profiles' must be an object." ;;
         profile_invalid_name) printf "Invalid manifest: invalid profile name '%s'." "${2-}" ;;
         profile_not_array) printf "Invalid manifest: profile '%s' must be an array." "${2-}" ;;
@@ -1197,6 +1280,7 @@ message_zh_tw() {
     lock_failed) printf '無法取得鎖定：%s。可能有其他執行個體正在執行，或存在殘留的鎖定目錄。' "${1-}" ;;
     unsafe_path_overlap) printf '路徑「%s」與鎖定或沙盒目錄「%s」重疊。' "${1-}" "${2-}" ;;
     unsupported_stow) printf 'GNU Stow 不支援必要功能（%s）。' "${1-}" ;;
+    unsupported_stow_ignore) printf '.stow-local-ignore 規則不受支援（只接受 ^/路徑$ 與純檔名，允許 \\. 跳脫）：%s' "${1-}" ;;
     invalid_manifest)
       reason_key=${1-}
       case "$reason_key" in
@@ -1227,7 +1311,6 @@ message_zh_tw() {
         description_empty_zhtw) printf '無效的 manifest：群組 %s 的 description.zh-TW 不能為空。' "${2-}" ;;
         description_control_char) printf '無效的 manifest：群組 %s 的說明包含控制字元、Tab 或換行。' "${2-}" ;;
         missing_package_dir) printf '無效的 manifest：缺少套件目錄「%s」。' "${2-}" ;;
-        undeclared_package_dir) printf '無效的 manifest：未宣告的套件目錄「%s」。' "${2-}" ;;
         profiles_not_object) printf '無效的 manifest：「profiles」必須是物件。' ;;
         profile_invalid_name) printf '無效的 manifest：無效的設定檔名稱「%s」。' "${2-}" ;;
         profile_not_array) printf '無效的 manifest：設定檔「%s」必須是陣列。' "${2-}" ;;
@@ -2166,7 +2249,7 @@ canonicalize_repository() {
   test -n "$raw_repo" || die invalid_repository '<empty>'
 
   case "$raw_repo" in
-    *[!a-zA-Z0-9_.-/:]*)
+    *[!a-zA-Z0-9_./:-]*)
       die invalid_repository "$raw_repo"
       ;;
   esac
@@ -2302,7 +2385,7 @@ resolve_remote_ref() {
   test -n "$REQUESTED_REF" || die invalid_ref '<empty>'
 
   case "$REQUESTED_REF" in
-    *[!a-zA-Z0-9_.-/^{}]*)
+    *[!a-zA-Z0-9_./^{}-]*)
       die invalid_ref "$REQUESTED_REF"
       ;;
     -*|*:*|*..*|*//*|*.lock|*/)
@@ -2792,7 +2875,7 @@ EOF
     esac
 
     case "$spath" in
-      *[!a-zA-Z0-9_.-/]*|*[[:space:]]*|*[[:cntrl:]]*|*\\*|*\*|*\?*|*\[*|*\]*|*~*)
+      *[!a-zA-Z0-9_./-]*|*[[:space:]]*|*[[:cntrl:]]*|*\\*|*\*|*\?*|*\[*|*\]*|*~*)
         die invalid_submodule "unallowed characters in submodule path '$spath'"
         ;;
       /*|*/|..|../|../*|*/..|*/../*|*//*)
@@ -3197,7 +3280,6 @@ parse_manifest() {
   : > "$feature_hotkeys_tsv"
   feature_notes_tsv="$SANDBOX/feature_notes.tsv"
   : > "$feature_notes_tsv"
-  seen_feature_copy_dirs=''
   seen_group_names=''
 
   i=0
@@ -3813,14 +3895,6 @@ parse_manifest() {
             /*|..|*/..|../*|*/../*) die invalid_manifest feature_copy_invalid_to "$fname" "$fc_to" ;;
           esac
 
-          fc_top="${fc_from%%/*}"
-          if test -n "$fc_top"; then
-            case " $seen_feature_copy_dirs " in
-              *" $fc_top "*) ;;
-              *) seen_feature_copy_dirs="$seen_feature_copy_dirs $fc_top" ;;
-            esac
-          fi
-
           fc_check_xml="$SANDBOX/fc_check_${fn_idx}_${fc_i}.xml"
           /bin/cp "$manifest_xml" "$fc_check_xml"
           "$plutil_bin" -remove "features.$fn_idx.copy.$fc_i.from" "$fc_check_xml" 2>/dev/null || true
@@ -3961,20 +4035,11 @@ parse_manifest() {
     done
   fi
 
-  # 11. Package directory alignment
+  # 11. Every declared group has a real package directory. Other top-level
+  # directories (docs, tests, submodules, ...) are repository maintenance and are
+  # ignored: only declared groups are ever stowed.
   for g in $seen_group_names; do
     test -d "$checkout_dir/$g" && test ! -L "$checkout_dir/$g" || die invalid_manifest missing_package_dir "$g"
-  done
-
-  for entry in "$checkout_dir"/*; do
-    test -e "$entry" || continue
-    if test -d "$entry" && test ! -L "$entry"; then
-      entry_name="${entry##*/}"
-      case " $seen_group_names $seen_feature_copy_dirs " in
-        *" $entry_name "*) ;;
-        *) die invalid_manifest undeclared_package_dir "$entry_name" ;;
-      esac
-    fi
   done
 }
 

@@ -629,6 +629,7 @@ message_key_parity_case() {
       "lock_failed"
       "unsafe_path_overlap"
       "unsupported_stow"
+      "unsupported_stow_ignore"
       "invalid_manifest"
       "unknown_profile"
       "unknown_group"
@@ -1648,7 +1649,7 @@ manifest_invalid_syntax_and_types_case() {
   return 0
 }
 
-# 24. Package directory alignment: non-hidden root directories must match declared groups exactly
+# 24. Package directory alignment: every declared group needs a real directory; extra directories are ignored
 manifest_package_directory_alignment_case() {
   checkout="$ROOT/checkout_alignment_test"
   mkdir -p "$checkout/shell" "$checkout/git"
@@ -1693,13 +1694,10 @@ EOF
     assert_contains "$out" "Invalid manifest" || exit 1
     mkdir -p "$checkout/git"
 
-    # 4. Undeclared non-hidden package directory fails
-    mkdir -p "$checkout/extra_pkg"
-    out=$(parse_manifest "$checkout/.kaisian.json" "$checkout" 2>&1)
-    status=$?
-    test "$status" -ne 0 || exit 1
-    assert_contains "$out" "Invalid manifest" || exit 1
-    rmdir "$checkout/extra_pkg"
+    # 4. Undeclared non-hidden directories (docs, tests, submodules) are ignored
+    mkdir -p "$checkout/docs" "$checkout/fzf-git"
+    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+    rmdir "$checkout/docs" "$checkout/fzf-git"
 
     # 5. Symlinked package directory fails
     rmdir "$checkout/git"
@@ -2243,7 +2241,8 @@ source_canonicalization_matrix_case() {
     test "$(canonicalize_repository 'taiansu/dotfiles')" = "https://github.com/taiansu/dotfiles" || exit 1
     test "$(canonicalize_repository 'https://github.com/taiansu/dotfiles')" = "https://github.com/taiansu/dotfiles" || exit 1
     test "$(canonicalize_repository 'https://github.com/taiansu/dotfiles.git')" = "https://github.com/taiansu/dotfiles" || exit 1
-    test "$(canonicalize_repository 'https://github.com/taiansu/dotfiles/')" = "https://github.com/taiansu/dotfiles" || exit 1
+    test "$(canonicalize_repository 'taiansu/dotfiles')" = "https://github.com/taiansu/dotfiles" || exit 1
+    test "$(canonicalize_repository 'my-org/my-dotfiles')" = "https://github.com/my-org/my-dotfiles" || exit 1
     test "$(canonicalize_repository 'https://github.com/taiansu/dotfiles.git/')" = "https://github.com/taiansu/dotfiles" || exit 1
     test "$(canonicalize_repository 'https://GITHUB.COM/taiansu/dotfiles')" = "https://github.com/taiansu/dotfiles" || exit 1
     test "$(canonicalize_repository 'https://gitlab.com/group/subgroup/repo.git')" = "https://gitlab.com/group/subgroup/repo" || exit 1
@@ -2318,6 +2317,11 @@ repo_tree_ref_case() {
     parse_args --repo=https://github.com/someone/dotfiles/tree/v1.2 || exit 1
     test "$REPOSITORY" = 'https://github.com/someone/dotfiles' || exit 1
     test "$REQUESTED_REF" = 'v1.2' || exit 1
+
+    parse_args --repo my-org/my-dotfiles/tree/release-1.2 || exit 1
+    test "$REPOSITORY" = 'my-org/my-dotfiles' || exit 1
+    test "$REQUESTED_REF" = 'release-1.2' || exit 1
+    test "$(canonicalize_repository "$REPOSITORY")" = 'https://github.com/my-org/my-dotfiles' || exit 1
     exit 0
   ) || return 1
 
@@ -2759,9 +2763,9 @@ staged_submodules_validation_and_containment_case() {
     remote_repo=$(make_remote_repo)
     (
       cd "$remote_repo" || exit 1
-      git config -f .gitmodules submodule.helper.path ".vendor/helper"
+      git config -f .gitmodules submodule.helper.path ".vendor/fzf-git"
       git config -f .gitmodules submodule.helper.url "https://github.com/taiansu/helper"
-      git update-index --add --cacheinfo 160000,"$subm_commit",.vendor/helper
+      git update-index --add --cacheinfo 160000,"$subm_commit",.vendor/fzf-git
       git add .gitmodules
       git commit -q -m "add submodule helper"
     )
@@ -2779,14 +2783,14 @@ staged_submodules_validation_and_containment_case() {
     acquire_lock
     resolve_remote_ref
 
-    # 1. Valid submodule initializes into embedded child .git
+    # 1. Valid submodule (hyphenated path, like the real fzf-git) initializes into embedded child .git
     chk_valid=$(mktemp -d "$ROOT/chk-subm-valid.XXXXXX")
     initialize_repository "$chk_valid" || exit 1
 
-    test -d "$chk_valid/.vendor/helper/.git" || exit 1
-    test ! -L "$chk_valid/.vendor/helper/.git" || exit 1
-    test ! -f "$chk_valid/.vendor/helper/.git" || exit 1
-    sub_head=$(git -C "$chk_valid/.vendor/helper" rev-parse HEAD)
+    test -d "$chk_valid/.vendor/fzf-git/.git" || exit 1
+    test ! -L "$chk_valid/.vendor/fzf-git/.git" || exit 1
+    test ! -f "$chk_valid/.vendor/fzf-git/.git" || exit 1
+    sub_head=$(git -C "$chk_valid/.vendor/fzf-git" rev-parse HEAD)
     test "$sub_head" = "$subm_commit" || exit 1
 
     # 2. Hostile submodule definitions
@@ -3982,6 +3986,76 @@ task5_unselected_declared_rejection_case() {
   status=$?; /bin/rm -rf "$t"; return "$status"
 }
 
+# The package map must skip what stow's own <package>/.stow-local-ignore skips,
+# so preflight never claims (and backs up) a target stow will not link.
+task5_stow_local_ignore_case() {
+  t=$(mktemp -d "$ROOT/task5-ignore.XXXXXX") || return 1
+  /bin/mkdir -p "$t/checkout/home/dot-config/karabiner" "$t/checkout/home/dot-config/zsh" "$t/checkout/home/notes" "$t/sandbox"
+  printf '{}' > "$t/checkout/home/dot-config/karabiner/karabiner.json"
+  printf 'a' > "$t/checkout/home/dot-config/zsh/aliasrc"
+  printf 'x' > "$t/checkout/home/notes/scratch.md"
+  printf 'keep' > "$t/checkout/home/dot-zshrc"
+  cat << 'EOF' > "$t/checkout/home/.stow-local-ignore"
+# comments and blank lines are fine
+
+^/\.stow-local-ignore$
+^/\.config/karabiner$
+scratch\.md
+EOF
+  git -C "$t/checkout" init -q
+  git -C "$t/checkout" -c commit.gpgSign=false config user.email test@example.invalid
+  git -C "$t/checkout" -c commit.gpgSign=false config user.name test
+  git -C "$t/checkout" add . && git -C "$t/checkout" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm fixture || { /bin/rm -rf "$t"; return 1; }
+  printf 'home\th\th\n' > "$t/sandbox/groups.tsv"; printf 'home\n' > "$t/sandbox/selected.txt"
+  (
+    export KAISIAN_TESTING=1; . "$SCRIPT"; CHECKOUT_DIR="$t/checkout"; SANDBOX="$t/sandbox"
+    build_package_map && validate_typed_tree || exit 1
+    # Only aliasrc and dot-zshrc reach the map: the ignore file, the karabiner
+    # subtree, and the bare-name match are absent.
+    test "$(grep -c '^file	' "$SANDBOX/mapping.tsv")" = 2 || exit 1
+    grep -q 'dot-config/zsh/aliasrc' "$SANDBOX/mapping.tsv" || exit 1
+    grep -q 'dot-zshrc' "$SANDBOX/mapping.tsv" || exit 1
+    ! grep -q 'karabiner' "$SANDBOX/mapping.tsv" || exit 1
+    ! grep -q 'scratch' "$SANDBOX/mapping.tsv" || exit 1
+    ! grep -q 'stow-local-ignore' "$SANDBOX/mapping.tsv" || exit 1
+  ) || { /bin/rm -rf "$t"; return 1; }
+  # A rule outside the literal subset is rejected with the rule in the message
+  printf '^/\\.config/.*cache$\n' >> "$t/checkout/home/.stow-local-ignore"
+  git -C "$t/checkout" add . && git -C "$t/checkout" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm regex || { /bin/rm -rf "$t"; return 1; }
+  (
+    export KAISIAN_TESTING=1; . "$SCRIPT"; CHECKOUT_DIR="$t/checkout"; SANDBOX="$t/sandbox"
+    out=$(build_package_map 2>&1)
+    test $? -ne 0 || exit 1
+    assert_contains "$out" 'Unsupported .stow-local-ignore rule' || exit 1
+    assert_contains "$out" '^/\.config/.*cache$' || exit 1
+  )
+  status=$?; /bin/rm -rf "$t"; return "$status"
+}
+
+# Six prompt-* packages all ship dot-config/zsh/prompt.zsh. Only the selected
+# one competes for the target; selecting two of them is a real collision.
+task5_unselected_shared_target_case() {
+  t=$(mktemp -d "$ROOT/task5-shared-target.XXXXXX") || return 1
+  /bin/mkdir -p "$t/checkout/prompt-a/dot-config/zsh" "$t/checkout/prompt-b/dot-config/zsh" "$t/sandbox"
+  printf a > "$t/checkout/prompt-a/dot-config/zsh/prompt.zsh"
+  printf b > "$t/checkout/prompt-b/dot-config/zsh/prompt.zsh"
+  git -C "$t/checkout" init -q
+  git -C "$t/checkout" -c commit.gpgSign=false config user.email test@example.invalid
+  git -C "$t/checkout" -c commit.gpgSign=false config user.name test
+  git -C "$t/checkout" add . && git -C "$t/checkout" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm fixture || { /bin/rm -rf "$t"; return 1; }
+  printf 'prompt-a\ta\ta\nprompt-b\tb\tb\n' > "$t/sandbox/groups.tsv"
+  printf 'prompt-a\n' > "$t/sandbox/selected.txt"
+  (
+    export KAISIAN_TESTING=1; . "$SCRIPT"; CHECKOUT_DIR="$t/checkout"; SANDBOX="$t/sandbox"
+    build_package_map && validate_typed_tree || exit 1
+    # Both packages are still mapped; preflight filters by selection later.
+    test "$(grep -c '^file	' "$SANDBOX/mapping.tsv")" = 2 || exit 1
+    printf 'prompt-a\nprompt-b\n' > "$SANDBOX/selected.txt"
+    ! validate_typed_tree || exit 1
+  )
+  status=$?; /bin/rm -rf "$t"; return "$status"
+}
+
 task5_nonascii_locale_rejection_case() {
   t=$(mktemp -d "$ROOT/task5-locale.XXXXXX") || return 1
   /bin/mkdir -p "$t/sandbox"
@@ -4088,7 +4162,7 @@ run_case 'production main wiring through acquisition and manifest selection' pro
 run_case 'executed command trace contains no forbidden destructive operations' command_trace_forbidden_operations_case
 run_case 'valid manifest parsing produces exact groups.tsv and profiles.tsv' manifest_valid_and_tsv_output_case
 run_case 'invalid manifest syntax, types, schema, and unknown keys fail' manifest_invalid_syntax_and_types_case
-run_case 'package directory alignment matches declared groups exactly' manifest_package_directory_alignment_case
+run_case 'declared groups need real package directories; extra directories are ignored' manifest_package_directory_alignment_case
 run_case 'documented plutil last-duplicate-key behavior' manifest_plutil_duplicate_key_behavior_case
 run_case 'default (no flag) uses the default profile, else all packages; --all resolves all' selection_default_and_all_case
 run_case '--prompt swaps the default profile prompt group' selection_prompt_case
@@ -4118,6 +4192,8 @@ run_case 'subshell lock cleanup safety on assertion failure' lock_cleanup_on_sub
 run_case 'discover_executable does not execute external which, dirname, or basename from PATH' discover_executable_purity_case
 run_case 'nonempty .stow-global-ignore makes probe fail while empty succeeds' stow_nonempty_ignore_probe_failure_case
 run_case 'Task 5 normalized package mapping fixture' task5_mapping_fixture_case
+run_case 'package .stow-local-ignore excludes anchored paths and bare names; other rules are rejected' task5_stow_local_ignore_case
+run_case 'unselected packages may share a target; two selected packages may not' task5_unselected_shared_target_case
 
 task5_preflight_targets_classification_case() {
   t=$(mktemp -d "$ROOT/task5-preflight-class.XXXXXX") || return 1
