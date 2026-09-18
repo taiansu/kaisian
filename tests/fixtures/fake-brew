@@ -1,0 +1,25 @@
+#!/bin/bash
+set -u
+
+log_file="${KAISIAN_BREW_LOG:-}"
+if test -n "$log_file"; then
+  /bin/mkdir -p "$(/usr/bin/dirname "$log_file")" 2>/dev/null || true
+  printf '%s\n' "$*" >> "$log_file"
+fi
+
+if test $# -gt 0 && test "$1" = "install"; then
+  shift
+  bin_dir="${KAISIAN_BREW_BIN_DIR:-}"
+  if test -n "$bin_dir"; then
+    /bin/mkdir -p "$bin_dir" 2>/dev/null || true
+    for pkg in "$@"; do
+      cat << 'EOF' > "$bin_dir/$pkg"
+#!/bin/sh
+exit 0
+EOF
+      /bin/chmod +x "$bin_dir/$pkg"
+    done
+  fi
+fi
+
+exit 0

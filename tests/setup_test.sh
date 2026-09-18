@@ -4,11 +4,13 @@ set -u
 ROOT=$(mktemp -d "${TMPDIR:-/tmp}/kaisian-test.XXXXXX") || exit 1
 ROOT=$(cd -P "$ROOT" && pwd -P)
 trap 'rm -rf -- "$ROOT"' EXIT HUP INT TERM
-SCRIPT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)/setup.sh
-TRACE_LOG="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/tmp/last-command-trace.log"
+SCRIPT=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd -P)/setup.sh
+TRACE_LOG="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd -P)/tmp/last-command-trace.log"
 /bin/mkdir -p "$(dirname "$TRACE_LOG")" 2>/dev/null || true
 : > "$TRACE_LOG"
 export KAISIAN_GIT_TRACE_LOG="$TRACE_LOG"
+export KAISIAN_TSUNPI_EXEC="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd -P)/fixtures/fake-tsunpi"
+export KAISIAN_BREW_EXEC="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd -P)/fixtures/fake-brew"
 export GIT_CONFIG_GLOBAL=/dev/null
 export GIT_CONFIG_NOSYSTEM=1
 export GIT_AUTHOR_NAME="Test User"
@@ -234,11 +236,15 @@ help_without_tools_case() {
   assert_contains "$output" '--interactive'
 }
 
-# 2. --profile/--groups/--interactive/--all reject every pair
+# 2. --prompt/--profile/--groups/--interactive/--all reject every pair
 selection_mutual_exclusion_case() {
   test_home=$(make_home)
   fake_bin=$(make_fake_bin)
   pairs=(
+    "--prompt prompt-pure --profile minimal"
+    "--prompt prompt-pure --groups shell"
+    "--prompt prompt-pure --interactive"
+    "--prompt prompt-pure --all"
     "--profile minimal --groups shell"
     "--profile minimal --interactive"
     "--profile minimal --all"
@@ -250,7 +256,7 @@ selection_mutual_exclusion_case() {
     output=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" $pair 2>&1)
     status=$?
     test "$status" -ne 0 || return 1
-    assert_contains "$output" 'Selection flags (--profile, --groups, --interactive, --all) are mutually exclusive.' || return 1
+    assert_contains "$output" 'Selection flags (--prompt, --profile, --groups, --interactive, --all) are mutually exclusive.' || return 1
   done
   return 0
 }
@@ -271,6 +277,8 @@ unknown_and_missing_values_case() {
 
   # Missing values
   missing_val_pairs=(
+    "--prompt"
+    "--prompt="
     "--profile"
     "--profile="
     "--groups"
@@ -370,17 +378,26 @@ chinese_locale_variants_case() {
   return 0
 }
 
-# 7. normal execution reports every missing prerequisite without installing it
+# 7. prerequisites bootstrap reporting and validation
 missing_prerequisites_case() {
   test_home=$(make_home)
   fake_bin=$(make_fake_bin)
+  # Missing plutil dies
   out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" 2>&1)
   status=$?
   test "$status" -ne 0 || return 1
-  assert_contains "$out" "git" || return 1
-  assert_contains "$out" "stow" || return 1
-  assert_contains "$out" "fzf" || return 1
   assert_contains "$out" "plutil" || return 1
+  ln -s /usr/bin/plutil "$fake_bin/plutil"
+
+  # Under --dry-run, reports bootstrap for brew and missing tools
+  out_dry=$(env -i HOME="$test_home" PATH="$fake_bin" KAISIAN_BREW_EXEC="" /bin/bash "$SCRIPT" --dry-run --dir "$test_home/dotfiles" 2>&1)
+  assert_contains "$out_dry" "Would bootstrap" || return 1
+
+  # Interactive mode requires fzf
+  fake_brew="$(dirname "$SCRIPT")/tests/fixtures/fake-brew"
+  out_fzf=$(env -i HOME="$test_home" PATH="$fake_bin" KAISIAN_BREW_EXEC="$fake_brew" KAISIAN_GIT_EXEC="/bin/sh" KAISIAN_STOW_EXEC="/bin/sh" KAISIAN_FZF_EXEC="" /bin/bash "$SCRIPT" --interactive --dir "$test_home/dotfiles" 2>&1)
+  test $? -ne 0 || return 1
+  assert_contains "$out_fzf" "fzf" || return 1
   return 0
 }
 
@@ -633,6 +650,20 @@ message_key_parity_case() {
       "invalid_targets"
       "backup_root"
       "manual_restore"
+      "invalid_font"
+      "invalid_brew"
+      "invalid_lang"
+      "invalid_feature"
+      "copy_failed"
+      "hotkey_failed"
+      "activate_settings_failed"
+      "warning_prefix"
+      "prompt_conflict"
+      "tsunpi_failed"
+      "bootstrap_failed"
+      "bootstrap_brew_installing"
+      "bootstrap_tools_installing"
+      "bootstrap_dry_run"
     )
     for key in "${keys[@]}"; do
       en_msg=$(LANGUAGE=en message "$key" "test_arg" "test_arg2") || {
@@ -1486,7 +1517,11 @@ manifest_invalid_syntax_and_types_case() {
     assert_manifest_fails '{"schema": 1.5, "groups": [{"name": "shell", "description": {"en": "e", "zh-TW": "z"}}]}' 'schema float' || exit 1
 
     # 5. Schema unsupported version
-    assert_manifest_fails '{"schema": 2, "groups": [{"name": "shell", "description": {"en": "e", "zh-TW": "z"}}]}' 'schema version 2' || exit 1
+    assert_manifest_fails '{"schema": 3, "groups": [{"name": "shell", "description": {"en": "e", "zh-TW": "z"}}]}' 'schema version 3' || exit 1
+    assert_manifest_fails '{"schema": 1, "groups": [{"name": "shell", "kind": "prompt", "description": {"en": "e", "zh-TW": "z"}}]}' 'schema 1 kind' || exit 1
+    assert_manifest_fails '{"schema": 1, "groups": [{"name": "shell", "description": {"en": "e", "zh-TW": "z"}}], "fonts": []}' 'schema 1 fonts' || exit 1
+    assert_manifest_fails '{"schema": 2, "groups": [{"name": "prompt-foo", "kind": "invalid", "description": {"en": "e", "zh-TW": "z"}}]}' 'invalid kind' || exit 1
+    assert_manifest_fails '{"schema": 2, "groups": [{"name": "prompt-foo", "kind": "prompt", "brew": ["nonexistent"], "description": {"en": "e", "zh-TW": "z"}}], "brew": []}' 'undeclared group brew' || exit 1
 
     # 6. Groups not array
     assert_manifest_fails '{"schema": 1, "groups": {}}' 'groups object' || exit 1
@@ -1724,7 +1759,7 @@ EOF
   return 0
 }
 
-# 26. Default (no flag) and --all resolve all packages in manifest order
+# 26. Default (no flag) uses the default profile; --all resolves all packages in manifest order
 selection_default_and_all_case() {
   checkout="$ROOT/checkout_sel_all"
   mkdir -p "$checkout/shell" "$checkout/git" "$checkout/mise" "$checkout/terminal"
@@ -1740,7 +1775,15 @@ selection_default_and_all_case() {
 
     parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
 
-    # 1. No flag (SELECTION_MODE='none')
+    # 1. No flag (SELECTION_MODE='none') => default profile
+    SELECTION_MODE='none' SELECTION_VALUE='' resolve_selection || exit 1
+    expected_selected=$(printf 'shell\ngit\nmise\n')
+    actual_selected=$(cat "$SANDBOX/selected.txt")
+    test "$actual_selected" = "$expected_selected" || exit 1
+    test "$(cat "$SANDBOX/unselected.txt")" = 'terminal' || exit 1
+
+    # 1b. No flag without a default profile => every group
+    /bin/rm -f "$SANDBOX/profiles.tsv"
     SELECTION_MODE='none' SELECTION_VALUE='' resolve_selection || exit 1
     expected_selected=$(printf 'shell\ngit\nmise\nterminal\n')
     actual_selected=$(cat "$SANDBOX/selected.txt")
@@ -1752,6 +1795,45 @@ selection_default_and_all_case() {
     actual_selected=$(cat "$SANDBOX/selected.txt")
     test "$actual_selected" = "$expected_selected" || exit 1
     test ! -s "$SANDBOX/unselected.txt" || exit 1
+
+    cleanup
+    trap - EXIT
+    exit 0
+  ) || return 1
+  return 0
+}
+
+selection_prompt_case() {
+  checkout="$ROOT/checkout_sel_prompt"
+  mkdir -p "$checkout/home" "$checkout/prompt-default" "$checkout/prompt-pure" "$checkout/karabiner"
+  echo '{"profiles":[]}' > "$checkout/karabiner/default.json"
+  cp "$(dirname "$SCRIPT")/tests/fixtures/manifest-v2.json" "$checkout/.kaisian.json"
+
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+    test_home=$(make_home)
+    HOME="$test_home"
+    acquire_lock || exit 1
+    trap 'cleanup' EXIT
+
+    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+
+    # 1. --prompt prompt-pure => default profile with its prompt swapped
+    SELECTION_MODE='prompt' SELECTION_VALUE='prompt-pure' resolve_selection || exit 1
+    test "$(cat "$SANDBOX/selected.txt")" = "$(printf 'home\nprompt-pure\n')" || exit 1
+    test "$(cat "$SANDBOX/unselected.txt")" = 'prompt-default' || exit 1
+
+    # 2. Non-prompt group is rejected
+    out=$(LANGUAGE='en' SELECTION_MODE='prompt' SELECTION_VALUE='home' resolve_selection 2>&1)
+    test $? -ne 0 || exit 1
+    assert_contains "$out" "Unknown prompt group 'home'." || exit 1
+
+    # 3. Missing default profile is rejected
+    /bin/rm -f "$SANDBOX/profiles.tsv"
+    out=$(LANGUAGE='zh-TW' SELECTION_MODE='prompt' SELECTION_VALUE='prompt-pure' resolve_selection 2>&1)
+    test $? -ne 0 || exit 1
+    assert_contains "$out" "manifest 未定義 default 設定檔，無法使用 --prompt。" || exit 1
 
     cleanup
     trap - EXIT
@@ -2207,12 +2289,44 @@ custom_repo_requires_ref_case() {
   # 1. Custom repo without --ref fails
   out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --repo someone/dotfiles 2>&1)
   test $? -ne 0 || return 1
-  assert_contains "$out" "specifying a custom --repo requires an explicit --ref" || return 1
+  assert_contains "$out" "specifying a custom --repo requires an explicit --ref or the OWNER/REPO/tree/REF form" || return 1
 
   # 2. Localized zh-TW failure
   out_zh=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --lang zh-TW --repo someone/dotfiles 2>&1)
   test $? -ne 0 || return 1
-  assert_contains "$out_zh" "指定自訂 --repo 時必須一併指定明確的 --ref" || return 1
+  assert_contains "$out_zh" "指定自訂 --repo 時必須一併指定 --ref，或使用 OWNER/REPO/tree/REF 形式。" || return 1
+
+  return 0
+}
+
+repo_tree_ref_case() {
+  test_home=$(make_home)
+  fake_bin=$(make_fake_bin)
+
+  # 1. Slug and https forms split repository and ref; refs may contain slashes
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+    parse_args --repo someone/dotfiles/tree/feature/x || exit 1
+    test "$REPOSITORY" = 'someone/dotfiles' || exit 1
+    test "$REQUESTED_REF" = 'feature/x' || exit 1
+    test "$(canonicalize_repository "$REPOSITORY")" = 'https://github.com/someone/dotfiles' || exit 1
+
+    parse_args --repo=https://github.com/someone/dotfiles/tree/v1.2 || exit 1
+    test "$REPOSITORY" = 'https://github.com/someone/dotfiles' || exit 1
+    test "$REQUESTED_REF" = 'v1.2' || exit 1
+    exit 0
+  ) || return 1
+
+  # 2. /tree/REF combined with --ref is rejected
+  out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --repo someone/dotfiles/tree/main --ref other 2>&1)
+  test $? -ne 0 || return 1
+  assert_contains "$out" "--repo with /tree/REF cannot be combined with --ref." || return 1
+
+  # 3. Empty ref after /tree/ is rejected
+  out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --repo someone/dotfiles/tree/ 2>&1)
+  test $? -ne 0 || return 1
+  assert_contains "$out" "Invalid or unsupported repository source: someone/dotfiles/tree/" || return 1
 
   return 0
 }
@@ -3563,6 +3677,12 @@ path_poison_ambient_utility_case() {
 exit 0
 EOF
     chmod +x "$fake_tools/fzf"
+    cat << 'EOF' > "$fake_tools/brew"
+#!/bin/bash
+exit 0
+EOF
+    chmod +x "$fake_tools/brew"
+    export KAISIAN_BREW_EXEC="$fake_tools/brew"
 
     remote_repo=$(make_remote_repo)
     chk_dir="$test_home/.dotfiles"
@@ -3719,6 +3839,12 @@ exit 0
 EOF
     chmod +x "$fake_tools/fzf"
 
+    cat << 'EOF' > "$fake_tools/brew"
+#!/bin/bash
+exit 0
+EOF
+    chmod +x "$fake_tools/brew"
+    export KAISIAN_BREW_EXEC="$fake_tools/brew"
     remote_repo=$(make_remote_repo)
     origin_commit=$(git -C "$remote_repo" rev-parse HEAD)
 
@@ -3739,9 +3865,9 @@ EOF
       main --repo taiansu/dotfiles --ref main
     ) || exit 1
 
-    # Assert no target HOME mutation (no links created in HOME root)
-    test ! -L "$test_home/.zshrc" || exit 1
-    test ! -L "$test_home/.gitconfig" || exit 1
+    # Assert stow created links in HOME root
+    test -L "$test_home/.zshrc" || exit 1
+    test -L "$test_home/.gitconfig" || exit 1
 
     # 2. Second run on existing checkout -> updates cleanly
     (
@@ -3760,6 +3886,7 @@ EOF
 
 run_case 'source repository URL and slug canonicalization matrix' source_canonicalization_matrix_case
 run_case 'custom --repo requires explicit --ref' custom_repo_requires_ref_case
+run_case '--repo OWNER/REPO/tree/REF supplies the ref' repo_tree_ref_case
 run_case 'origin ref resolution and branch/tag ambiguity' origin_ref_resolution_and_ambiguity_case
 run_case 'unadvertised 40-hex SHA is rejected before fetch' unadvertised_40_hex_sha_rejection_case
 run_case 'FETCH_HEAD mismatch against EXPECTED_COMMIT_SHA rejection' fetch_head_substituted_mismatch_case
@@ -3960,7 +4087,8 @@ run_case 'valid manifest parsing produces exact groups.tsv and profiles.tsv' man
 run_case 'invalid manifest syntax, types, schema, and unknown keys fail' manifest_invalid_syntax_and_types_case
 run_case 'package directory alignment matches declared groups exactly' manifest_package_directory_alignment_case
 run_case 'documented plutil last-duplicate-key behavior' manifest_plutil_duplicate_key_behavior_case
-run_case 'default (no flag) and --all resolve all packages in manifest order' selection_default_and_all_case
+run_case 'default (no flag) uses the default profile, else all packages; --all resolves all' selection_default_and_all_case
+run_case '--prompt swaps the default profile prompt group' selection_prompt_case
 run_case '--profile selects profile packages in manifest order' selection_profile_case
 run_case '--groups parses comma list, trims whitespace, deduplicates, and resolves in manifest order' selection_groups_case
 run_case 'interactive fzf selection, cancellation, localization, and error semantics' selection_interactive_fzf_case
@@ -5605,11 +5733,11 @@ MOCK_FAIL
 task5_readonly_env_injection_case() {
   (
     res=$(
-      KAISIAN_VERSION='evil' DEFAULT_REPOSITORY='evil/repo' DEFAULT_DOTFILES_COMMIT='0000000000000000000000000000000000000000' KAISIAN_TESTING=1 /bin/bash -c "
+      KAISIAN_VERSION='evil' DEFAULT_REPOSITORY='evil/repo' DEFAULT_DOTFILES_REF='evil' KAISIAN_TESTING=1 /bin/bash -c "
         . '$SCRIPT'
-        test \"\$KAISIAN_VERSION\" = '0.1.0' || exit 1
+        test "\$KAISIAN_VERSION" = '0.2.0' || exit 1
         test \"\$DEFAULT_REPOSITORY\" = 'taiansu/dotfiles' || exit 1
-        test \"\$DEFAULT_DOTFILES_COMMIT\" = '0b3b0c3f206e1f4fb35dac82794a871c5c18f405' || exit 1
+        test \"\$DEFAULT_DOTFILES_REF\" = 'kaisian' || exit 1
         printf 'OK'
       " 2>/dev/null
     )
@@ -5618,7 +5746,882 @@ task5_readonly_env_injection_case() {
   ) || return 1
   return 0
 }
+# Schema 2 parsing: valid manifest, TSV generation, group brew deps
+schema_2_manifest_parsing_case() {
+  checkout="$ROOT/checkout_v2"
+  mkdir -p "$checkout/home" "$checkout/prompt-default" "$checkout/prompt-pure" "$checkout/karabiner"
+  echo '{"profiles":[]}' > "$checkout/karabiner/default.json"
+  cp "$(dirname "$SCRIPT")/tests/fixtures/manifest-v2.json" "$checkout/.kaisian.json"
 
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+    test_home=$(make_home)
+    HOME="$test_home"
+    acquire_lock || exit 1
+    trap 'cleanup' EXIT
+
+    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+
+    test -f "$SANDBOX/groups.tsv" || exit 1
+    test -f "$SANDBOX/prompt_groups.txt" || exit 1
+    test -f "$SANDBOX/fonts.tsv" || exit 1
+    test -f "$SANDBOX/brew.tsv" || exit 1
+    test -f "$SANDBOX/group_brew_deps.tsv" || exit 1
+
+    # Verify prompt_groups.txt
+    prompt_txt=$(cat "$SANDBOX/prompt_groups.txt")
+    assert_contains "$prompt_txt" "prompt-default" || exit 1
+    assert_contains "$prompt_txt" "prompt-pure" || exit 1
+
+    # Verify fonts.tsv
+    fonts_content=$(cat "$SANDBOX/fonts.tsv")
+    assert_contains "$fonts_content" "$(printf 'font-sauce-code-pro-nerd-font\tSauceCodePro NFM')" || exit 1
+
+    # Verify brew.tsv
+    brew_content=$(cat "$SANDBOX/brew.tsv")
+    assert_contains "$brew_content" "$(printf 'ripgrep\t0')" || exit 1
+    assert_contains "$brew_content" "$(printf 'ghostty\t1')" || exit 1
+    assert_contains "$brew_content" "$(printf 'gitstatus\t0')" || exit 1
+
+    # Verify group_brew_deps.tsv
+    deps_content=$(cat "$SANDBOX/group_brew_deps.tsv")
+    assert_contains "$deps_content" "$(printf 'prompt-pure\tgitstatus')" || exit 1
+
+    cleanup
+    trap - EXIT
+    exit 0
+  ) || return 1
+  return 0
+}
+
+# Two prompt groups selected -> prompt_conflict
+prompt_conflict_case() {
+  checkout="$ROOT/checkout_prompt_conflict"
+  mkdir -p "$checkout/home" "$checkout/prompt-default" "$checkout/prompt-pure" "$checkout/karabiner"
+  echo '{"profiles":[]}' > "$checkout/karabiner/default.json"
+  cp "$(dirname "$SCRIPT")/tests/fixtures/manifest-v2.json" "$checkout/.kaisian.json"
+
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+    test_home=$(make_home)
+    HOME="$test_home"
+    acquire_lock || exit 1
+    trap 'cleanup' EXIT
+
+    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+
+    # Select both prompt-default and prompt-pure
+    SELECTION_MODE='groups'
+    SELECTION_VALUE='prompt-default,prompt-pure'
+    out=$(resolve_selection 2>&1)
+    status=$?
+    test "$status" -ne 0 || exit 1
+    assert_contains "$out" "prompt group" || exit 1
+
+    cleanup
+    trap - EXIT
+    exit 0
+  ) || return 1
+  return 0
+}
+
+# CLI unknown options: --font unknown, --brew unknown, --langs unknown
+cli_unknown_options_case() {
+  checkout="$ROOT/checkout_cli_opts"
+  mkdir -p "$checkout/home" "$checkout/prompt-default" "$checkout/prompt-pure" "$checkout/karabiner"
+  echo '{"profiles":[]}' > "$checkout/karabiner/default.json"
+  cp "$(dirname "$SCRIPT")/tests/fixtures/manifest-v2.json" "$checkout/.kaisian.json"
+
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+    test_home=$(make_home)
+    HOME="$test_home"
+    acquire_lock || exit 1
+    trap 'cleanup' EXIT
+
+    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+
+    # 1. Invalid lang
+    out_lang=$(SELECTED_LANGS='-x' validate_langs 2>&1)
+    test $? -ne 0 || exit 1
+    assert_contains "$out_lang" "Invalid language" || exit 1
+
+    # 2. Invalid font
+    SELECTED_FONT='unknown-font-cask'
+    out_font=$(validate_custom_selections 2>&1)
+    test $? -ne 0 || exit 1
+    assert_contains "$out_font" "Invalid font" || exit 1
+    SELECTED_FONT=''
+
+    # 3. Invalid brew
+    SELECTED_BREW='unknown-brew-pkg'
+    out_brew=$(validate_custom_selections 2>&1)
+    test $? -ne 0 || exit 1
+    assert_contains "$out_brew" "Invalid brew" || exit 1
+    SELECTED_BREW=''
+
+    cleanup
+    trap - EXIT
+    exit 0
+  ) || return 1
+  return 0
+}
+
+# Generated Brewfile, mise.toml (elixir -> erlang first), and font file content
+generated_tsunpi_and_font_content_case() {
+  checkout="$ROOT/checkout_generated"
+  mkdir -p "$checkout/home" "$checkout/prompt-default" "$checkout/prompt-pure" "$checkout/karabiner"
+  echo '{"profiles":[]}' > "$checkout/karabiner/default.json"
+  cp "$(dirname "$SCRIPT")/tests/fixtures/manifest-v2.json" "$checkout/.kaisian.json"
+
+  (
+    export KAISIAN_TESTING=1
+    export KAISIAN_TEST_TIME='20260917T120000Z'
+    . "$SCRIPT"
+    test_home=$(make_home)
+    HOME="$test_home"
+    PHYSICAL_HOME="$test_home"
+    STATE_ROOT="$test_home/state"
+    acquire_lock || exit 1
+    trap 'cleanup' EXIT
+
+    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+    SELECTION_MODE='groups'
+    SELECTION_VALUE='home,prompt-pure'
+    resolve_selection || exit 1
+
+    SELECTED_FONT='font-sauce-code-pro-nerd-font'
+    SELECTED_BREW='ripgrep'
+    SELECTED_LANGS='python,elixir,node'
+
+    validate_custom_selections || exit 1
+    write_font_override || exit 1
+    generate_tsunpi_inputs || exit 1
+
+    # Check font override file
+    font_file="$test_home/.config/ghostty/kaisian.conf"
+    test -f "$font_file" || exit 1
+    font_content=$(cat "$font_file")
+    test "$font_content" = 'font-family = "SauceCodePro NFM"' || exit 1
+
+    # Check Brewfile
+    brewfile="$STATE_ROOT/$KAISIAN_TEST_TIME/tsunpi/Brewfile"
+    test -f "$brewfile" || exit 1
+    bf_content=$(cat "$brewfile")
+    assert_contains "$bf_content" 'cask "font-sauce-code-pro-nerd-font"' || exit 1
+    assert_contains "$bf_content" 'brew "ripgrep"' || exit 1
+    # Check gitstatus was auto-included from prompt-pure dependency!
+    assert_contains "$bf_content" 'brew "gitstatus"' || exit 1
+
+    # Check mise.toml
+    mise_file="$STATE_ROOT/$KAISIAN_TEST_TIME/tsunpi/mise.toml"
+    test -f "$mise_file" || exit 1
+    mise_content=$(cat "$mise_file")
+    assert_contains "$mise_content" '[tools]' || exit 1
+    assert_contains "$mise_content" 'python = "latest"' || exit 1
+    assert_contains "$mise_content" 'erlang = "latest"' || exit 1
+    assert_contains "$mise_content" 'elixir = "latest"' || exit 1
+    assert_contains "$mise_content" 'node = "latest"' || exit 1
+
+    # Ensure erlang appears before elixir
+    erlang_line=$(grep -n 'erlang = "latest"' "$mise_file" | cut -d: -f1)
+    elixir_line=$(grep -n 'elixir = "latest"' "$mise_file" | cut -d: -f1)
+    test "$erlang_line" -lt "$elixir_line" || exit 1
+
+    cleanup
+    trap - EXIT
+    exit 0
+  ) || return 1
+  return 0
+}
+
+# Tsunpi execution: fake-tsunpi receives exact args, --no-tsunpi skips it, --dry-run skips it
+tsunpi_execution_and_flags_case() {
+  checkout="$ROOT/checkout_tsunpi_exec"
+  mkdir -p "$checkout/home" "$checkout/prompt-default" "$checkout/prompt-pure" "$checkout/karabiner"
+  echo '{"profiles":[]}' > "$checkout/karabiner/default.json"
+  cp "$(dirname "$SCRIPT")/tests/fixtures/manifest-v2.json" "$checkout/.kaisian.json"
+
+  (
+    export KAISIAN_TESTING=1
+    export KAISIAN_TEST_TIME='20260917T130000Z'
+    tsunpi_log="$ROOT/tsunpi_test.log"
+    export KAISIAN_TSUNPI_LOG="$tsunpi_log"
+    export KAISIAN_TSUNPI_EXEC="$(dirname "$SCRIPT")/tests/fixtures/fake-tsunpi"
+    . "$SCRIPT"
+    test_home=$(make_home)
+    HOME="$test_home"
+    PHYSICAL_HOME="$test_home"
+    STATE_ROOT="$test_home/state"
+    acquire_lock || exit 1
+    trap 'cleanup' EXIT
+
+    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+    SELECTION_MODE='profile'
+    SELECTION_VALUE='default'
+    resolve_selection || exit 1
+
+    # 1. Normal run executes fake-tsunpi with exact arguments
+    generate_tsunpi_inputs || exit 1
+    run_tsunpi || exit 1
+    test -f "$tsunpi_log" || exit 1
+    logged_args=$(cat "$tsunpi_log")
+    expected_brewfile="$STATE_ROOT/$KAISIAN_TEST_TIME/tsunpi/Brewfile"
+    expected_mise="$STATE_ROOT/$KAISIAN_TEST_TIME/tsunpi/mise.toml"
+    assert_contains "$logged_args" "--brewfile $expected_brewfile --mise-config $expected_mise --no-rc --locale en" || exit 1
+
+    # 2. --no-tsunpi skips generation and execution
+    rm -f "$tsunpi_log"
+    NO_TSUNPI=1
+    RUN_TIMESTAMP='20260917T140000Z'
+    generate_tsunpi_inputs || exit 1
+    run_tsunpi || exit 1
+    test ! -e "$tsunpi_log" || exit 1
+    test ! -d "$STATE_ROOT/20260917T140000Z/tsunpi" || exit 1
+    NO_TSUNPI=0
+
+    # 3. --dry-run skips execution
+    rm -f "$tsunpi_log"
+    DRY_RUN=1
+    RUN_TIMESTAMP='20260917T150000Z'
+    out_dry=$(run_tsunpi 2>&1)
+    test ! -e "$tsunpi_log" || exit 1
+    assert_contains "$out_dry" "Would execute tsunpi" || exit 1
+    DRY_RUN=0
+
+    cleanup
+    trap - EXIT
+    exit 0
+  ) || return 1
+  return 0
+}
+
+# Bootstrap with fake brew records `install git stow` only for missing ones
+bootstrap_fake_brew_records_missing_case() {
+  (
+    export KAISIAN_TESTING=1
+    brew_log="$ROOT/brew_test.log"
+    export KAISIAN_BREW_LOG="$brew_log"
+    fake_brew="$(dirname "$SCRIPT")/tests/fixtures/fake-brew"
+    export KAISIAN_BREW_EXEC="$fake_brew"
+    . "$SCRIPT"
+    test_home=$(make_home)
+    HOME="$test_home"
+    acquire_lock || exit 1
+    trap 'cleanup' EXIT
+
+    # 1. Both git and stow missing -> fake-brew records "install git stow"
+    : > "$brew_log"
+    KAISIAN_GIT_EXEC=''
+    KAISIAN_STOW_EXEC=''
+    bootstrap_prerequisites || exit 1
+    test -f "$brew_log" || exit 1
+    rec=$(cat "$brew_log")
+    test "$rec" = "install git stow" || exit 1
+
+    # 2. Git present, stow missing -> fake-brew records "install stow"
+    : > "$brew_log"
+    mock_git=$(mktemp "$ROOT/git.XXXXXX")
+    chmod +x "$mock_git"
+    KAISIAN_GIT_EXEC="$mock_git"
+    KAISIAN_STOW_EXEC=''
+    bootstrap_prerequisites || exit 1
+    rec2=$(cat "$brew_log")
+    test "$rec2" = "install stow" || exit 1
+
+    # 3. Stow present, git missing -> fake-brew records "install git"
+    : > "$brew_log"
+    mock_stow=$(mktemp "$ROOT/stow.XXXXXX")
+    chmod +x "$mock_stow"
+    KAISIAN_GIT_EXEC=''
+    KAISIAN_STOW_EXEC="$mock_stow"
+    bootstrap_prerequisites || exit 1
+    rec3=$(cat "$brew_log")
+    test "$rec3" = "install git" || exit 1
+
+    # 4. Both present -> fake-brew is not invoked
+    : > "$brew_log"
+    KAISIAN_GIT_EXEC="$mock_git"
+    KAISIAN_STOW_EXEC="$mock_stow"
+    bootstrap_prerequisites || exit 1
+    test ! -s "$brew_log" || exit 1
+
+    cleanup
+    trap - EXIT
+    exit 0
+  ) || return 1
+  return 0
+}
+# Feature schema parsing and TSV generation, plus validation failures
+features_manifest_parsing_and_validation_failures_case() {
+  checkout="$ROOT/checkout_features_valid"
+  mkdir -p "$checkout/home" "$checkout/prompt-default" "$checkout/prompt-pure" "$checkout/karabiner"
+  echo '{"default":true}' > "$checkout/karabiner/default.json"
+  cp "$(dirname "$SCRIPT")/tests/fixtures/manifest-v2.json" "$checkout/.kaisian.json"
+
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+    test_home=$(make_home)
+    HOME="$test_home"
+    acquire_lock || exit 1
+    trap 'cleanup' EXIT
+
+    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+
+    test -f "$SANDBOX/features.tsv" || exit 1
+    test -f "$SANDBOX/feature_brew.tsv" || exit 1
+    test -f "$SANDBOX/feature_copy.tsv" || exit 1
+    test -f "$SANDBOX/feature_hotkeys.tsv" || exit 1
+    test -f "$SANDBOX/feature_notes.tsv" || exit 1
+
+    # Verify features.tsv
+    features_txt=$(cat "$SANDBOX/features.tsv")
+    assert_contains "$features_txt" "karabiner-ime" || exit 1
+    assert_contains "$features_txt" "1" || exit 1
+
+    # Verify feature_brew.tsv
+    fb_txt=$(cat "$SANDBOX/feature_brew.tsv")
+    assert_contains "$fb_txt" "$(printf 'karabiner-ime\tkarabiner-elements\t1')" || exit 1
+
+    # Verify feature_copy.tsv
+    fc_txt=$(cat "$SANDBOX/feature_copy.tsv")
+    assert_contains "$fc_txt" "$(printf 'karabiner-ime\tkarabiner/default.json\t.config/karabiner/karabiner.json')" || exit 1
+
+    # Verify feature_hotkeys.tsv
+    fhk_txt=$(cat "$SANDBOX/feature_hotkeys.tsv")
+    assert_contains "$fhk_txt" "$(printf 'karabiner-ime\t60\t1\t32\t49\t1310720')" || exit 1
+    assert_contains "$fhk_txt" "$(printf 'karabiner-ime\t61\t0')" || exit 1
+
+    # Verify feature_notes.tsv
+    fn_txt=$(cat "$SANDBOX/feature_notes.tsv")
+    assert_contains "$fn_txt" "Installs Karabiner-Elements" || exit 1
+    assert_contains "$fn_txt" "會安裝 Karabiner-Elements" || exit 1
+
+    # Validation failure cases:
+    fail_checkout="$ROOT/checkout_features_fail"
+    mkdir -p "$fail_checkout/home" "$fail_checkout/karabiner"
+    echo '{}' > "$fail_checkout/karabiner/default.json"
+
+    test_manifest_failure() {
+      local json_content="$1"
+      local expected_err="$2"
+      printf '%s\n' "$json_content" > "$fail_checkout/.kaisian.json"
+      local out
+      out=$(parse_manifest "$fail_checkout/.kaisian.json" "$fail_checkout" 2>&1)
+      local st=$?
+      test "$st" -ne 0 || return 1
+      assert_contains "$out" "$expected_err" || return 1
+      return 0
+    }
+
+    # 1. features not array
+    test_manifest_failure '{"schema":2,"groups":[{"name":"home","description":{"en":"h","zh-TW":"h"}}],"features":"bad"}' "must be an array" || exit 1
+
+    # 2. feature item not object
+    test_manifest_failure '{"schema":2,"groups":[{"name":"home","description":{"en":"h","zh-TW":"h"}}],"features":["bad"]}' "must be an object" || exit 1
+
+    # 3. feature missing name
+    test_manifest_failure '{"schema":2,"groups":[{"name":"home","description":{"en":"h","zh-TW":"h"}}],"features":[{"description":{"en":"h","zh-TW":"h"}}]}' "missing 'name'" || exit 1
+
+    # 4. feature invalid name
+    test_manifest_failure '{"schema":2,"groups":[{"name":"home","description":{"en":"h","zh-TW":"h"}}],"features":[{"name":"bad name!","description":{"en":"h","zh-TW":"h"}}]}' "invalid feature name" || exit 1
+
+    # 5. feature duplicate name
+    test_manifest_failure '{"schema":2,"groups":[{"name":"home","description":{"en":"h","zh-TW":"h"}}],"features":[{"name":"feat1","description":{"en":"h","zh-TW":"h"}},{"name":"feat1","description":{"en":"h","zh-TW":"h"}}]}' "duplicate feature name" || exit 1
+
+    # 6. feature invalid macos
+    test_manifest_failure '{"schema":2,"groups":[{"name":"home","description":{"en":"h","zh-TW":"h"}}],"features":[{"name":"feat1","macos":"not-bool","description":{"en":"h","zh-TW":"h"}}]}' "must be a boolean" || exit 1
+
+    # 7. feature missing description
+    test_manifest_failure '{"schema":2,"groups":[{"name":"home","description":{"en":"h","zh-TW":"h"}}],"features":[{"name":"feat1"}]}' "missing 'description'" || exit 1
+
+    # 8. feature invalid notes
+    test_manifest_failure '{"schema":2,"groups":[{"name":"home","description":{"en":"h","zh-TW":"h"}}],"features":[{"name":"feat1","description":{"en":"h","zh-TW":"h"},"notes":"not-object"}]}' "must be an object" || exit 1
+
+    # 9. feature brew not array
+    test_manifest_failure '{"schema":2,"groups":[{"name":"home","description":{"en":"h","zh-TW":"h"}}],"features":[{"name":"feat1","description":{"en":"h","zh-TW":"h"},"brew":"not-array"}]}' "must be an array" || exit 1
+
+    # 10. feature brew missing name
+    test_manifest_failure '{"schema":2,"groups":[{"name":"home","description":{"en":"h","zh-TW":"h"}}],"features":[{"name":"feat1","description":{"en":"h","zh-TW":"h"},"brew":[{}]}]}' "missing 'name'" || exit 1
+
+    # 11. feature copy not array
+    test_manifest_failure '{"schema":2,"groups":[{"name":"home","description":{"en":"h","zh-TW":"h"}}],"features":[{"name":"feat1","description":{"en":"h","zh-TW":"h"},"copy":"not-array"}]}' "must be an array" || exit 1
+
+    # 12. feature copy invalid/missing from
+    test_manifest_failure '{"schema":2,"groups":[{"name":"home","description":{"en":"h","zh-TW":"h"}}],"features":[{"name":"feat1","description":{"en":"h","zh-TW":"h"},"copy":[{"from":"nonexistent/file","to":".config/karabiner/karabiner.json"}]}]}' "invalid or missing source" || exit 1
+
+    # 13. feature copy from containing ..
+    test_manifest_failure '{"schema":2,"groups":[{"name":"home","description":{"en":"h","zh-TW":"h"}}],"features":[{"name":"feat1","description":{"en":"h","zh-TW":"h"},"copy":[{"from":"../escape","to":".config/karabiner/karabiner.json"}]}]}' "invalid or missing source" || exit 1
+
+    # 14. feature copy invalid to (leading /)
+    test_manifest_failure '{"schema":2,"groups":[{"name":"home","description":{"en":"h","zh-TW":"h"}}],"features":[{"name":"feat1","description":{"en":"h","zh-TW":"h"},"copy":[{"from":"karabiner/default.json","to":"/etc/evil"}]}]}' "invalid destination" || exit 1
+
+    # 15. feature hotkeys not array
+    test_manifest_failure '{"schema":2,"groups":[{"name":"home","description":{"en":"h","zh-TW":"h"}}],"features":[{"name":"feat1","description":{"en":"h","zh-TW":"h"},"hotkeys":"not-array"}]}' "must be an array" || exit 1
+
+    # 16. feature hotkey missing id
+    test_manifest_failure '{"schema":2,"groups":[{"name":"home","description":{"en":"h","zh-TW":"h"}}],"features":[{"name":"feat1","description":{"en":"h","zh-TW":"h"},"hotkeys":[{"enabled":false}]}]}' "missing 'id'" || exit 1
+
+    # 17. feature hotkey enabled missing params
+    test_manifest_failure '{"schema":2,"groups":[{"name":"home","description":{"en":"h","zh-TW":"h"}}],"features":[{"name":"feat1","description":{"en":"h","zh-TW":"h"},"hotkeys":[{"id":60,"enabled":true}]}]}' "missing required parameters" || exit 1
+
+    # 18. feature unknown key
+    test_manifest_failure '{"schema":2,"groups":[{"name":"home","description":{"en":"h","zh-TW":"h"}}],"features":[{"name":"feat1","description":{"en":"h","zh-TW":"h"},"unknown_key":"evil"}]}' "unknown key in feature" || exit 1
+
+    # 19. schema 1 with features fails with unknown top-level key
+    test_manifest_failure '{"schema":1,"groups":[{"name":"home","description":{"en":"h","zh-TW":"h"}}],"features":[]}' "unknown top-level key" || exit 1
+
+    cleanup
+    trap - EXIT
+    exit 0
+  ) || return 1
+  return 0
+}
+
+# CLI unknown features
+cli_unknown_features_case() {
+  checkout="$ROOT/checkout_cli_feat"
+  mkdir -p "$checkout/home" "$checkout/prompt-default" "$checkout/prompt-pure" "$checkout/karabiner"
+  echo '{"default":true}' > "$checkout/karabiner/default.json"
+  cp "$(dirname "$SCRIPT")/tests/fixtures/manifest-v2.json" "$checkout/.kaisian.json"
+
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+    test_home=$(make_home)
+    HOME="$test_home"
+    acquire_lock || exit 1
+    trap 'cleanup' EXIT
+
+    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+
+    # Unknown feature name
+    SELECTED_FEATURES='unknown-feature-name'
+    out_feat=$(validate_custom_selections 2>&1)
+    test $? -ne 0 || exit 1
+    assert_contains "$out_feat" "Invalid feature" || exit 1
+    assert_contains "$out_feat" "unknown-feature-name" || exit 1
+    SELECTED_FEATURES=''
+
+    # Empty feature part
+    SELECTED_FEATURES='karabiner-ime,'
+    out_empty=$(validate_custom_selections 2>&1)
+    test $? -ne 0 || exit 1
+    assert_contains "$out_empty" "Invalid feature" || exit 1
+    SELECTED_FEATURES=''
+
+    cleanup
+    trap - EXIT
+    exit 0
+  ) || return 1
+  return 0
+}
+
+# Feature copy with existing target gets backed up then copied (mode 600)
+feature_copy_conflict_backup_and_mode_case() {
+  checkout="$ROOT/checkout_feat_copy"
+  mkdir -p "$checkout/home" "$checkout/prompt-default" "$checkout/prompt-pure" "$checkout/karabiner"
+  echo '{"new_version":true}' > "$checkout/karabiner/default.json"
+  echo 'home' > "$checkout/home/home-file"
+  echo 'default' > "$checkout/prompt-default/default-file"
+  echo 'pure' > "$checkout/prompt-pure/pure-file"
+  cp "$(dirname "$SCRIPT")/tests/fixtures/manifest-v2.json" "$checkout/.kaisian.json"
+
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$checkout" init -q
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$checkout" -c commit.gpgSign=false config user.email test@example.invalid
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$checkout" -c commit.gpgSign=false config user.name test
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$checkout" add .
+  GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$checkout" -c commit.gpgSign=false -c core.hooksPath=/dev/null commit -qm fixture
+  (
+    export KAISIAN_TESTING=1
+    export KAISIAN_TEST_TIME='20260918T100000Z'
+    . "$SCRIPT"
+    test_home=$(make_home)
+    HOME="$test_home"
+    PHYSICAL_HOME="$test_home"
+    CHECKOUT_DIR="$checkout"
+    STATE_ROOT="$test_home/state"
+    KAISIAN_STOW_EXEC="/usr/bin/true"
+    acquire_lock || exit 1
+    trap 'cleanup' EXIT
+
+    # Create pre-existing file at target
+    karabiner_target_dir="$test_home/.config/karabiner"
+    mkdir -p "$karabiner_target_dir"
+    echo '{"old_version":true}' > "$karabiner_target_dir/karabiner.json"
+    chmod 644 "$karabiner_target_dir/karabiner.json"
+
+    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+    SELECTION_MODE='groups'
+    SELECTION_VALUE='home'
+    SELECTED_FEATURES='karabiner-ime'
+    ASSUME_YES=1
+
+    resolve_selection || exit 1
+    validate_custom_selections || exit 1
+    build_package_map || exit 1
+    validate_typed_tree || exit 1
+    preflight_targets || exit 1
+
+    # Verify conflict was recorded
+    test -s "$CONFLICTS_FILE" || exit 1
+    conf_content=$(cat "$CONFLICTS_FILE")
+    assert_contains "$conf_content" "$karabiner_target_dir/karabiner.json" || exit 1
+
+    confirm_conflicts || exit 1
+    move_conflicts || exit 1
+    stow_selected_packages || exit 1
+    apply_feature_copies || exit 1
+
+    # Verify old file was backed up
+    backup_file="$BACKUP_ROOT/files/.config/karabiner/karabiner.json"
+    test -f "$backup_file" || exit 1
+    backup_content=$(cat "$backup_file")
+    assert_contains "$backup_content" "old_version" || exit 1
+
+    # Verify target file has new content
+    new_target_file="$karabiner_target_dir/karabiner.json"
+    test -f "$new_target_file" || exit 1
+    test ! -L "$new_target_file" || exit 1
+    new_content=$(cat "$new_target_file")
+    assert_contains "$new_content" "new_version" || exit 1
+
+    # Verify mode is 600 (-rw-------)
+    target_mode=$(/usr/bin/stat -f '%Lp' "$new_target_file" 2>/dev/null)
+    test "$target_mode" = '600' || exit 1
+
+    cleanup
+    trap - EXIT
+    exit 0
+  ) || return 1
+  return 0
+}
+
+# Feature hotkeys call fake-defaults with exact args and fake-activate-settings once
+feature_hotkeys_and_activate_settings_case() {
+  checkout="$ROOT/checkout_feat_hotkeys"
+  mkdir -p "$checkout/home" "$checkout/prompt-default" "$checkout/prompt-pure" "$checkout/karabiner"
+  echo '{"default":true}' > "$checkout/karabiner/default.json"
+  cp "$(dirname "$SCRIPT")/tests/fixtures/manifest-v2.json" "$checkout/.kaisian.json"
+
+  (
+    export KAISIAN_TESTING=1
+    defaults_log="$ROOT/defaults_test.log"
+    activate_log="$ROOT/activate_test.log"
+    : > "$defaults_log"
+    : > "$activate_log"
+    export KAISIAN_DEFAULTS_LOG="$defaults_log"
+    export KAISIAN_ACTIVATE_SETTINGS_LOG="$activate_log"
+    export KAISIAN_DEFAULTS_EXEC="$(dirname "$SCRIPT")/tests/fixtures/fake-defaults"
+    export KAISIAN_ACTIVATE_SETTINGS_EXEC="$(dirname "$SCRIPT")/tests/fixtures/fake-activate-settings"
+
+    . "$SCRIPT"
+    test_home=$(make_home)
+    HOME="$test_home"
+    PHYSICAL_HOME="$test_home"
+    STATE_ROOT="$test_home/state"
+    acquire_lock || exit 1
+    trap 'cleanup' EXIT
+
+    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+    SELECTED_FEATURES='karabiner-ime'
+    validate_custom_selections || exit 1
+
+    # 1. Hotkeys execution with fake-defaults (no existing value for id 61)
+    apply_feature_hotkeys || exit 1
+
+    test -f "$defaults_log" || exit 1
+    d_content=$(cat "$defaults_log")
+    # Verify read was issued
+    assert_contains "$d_content" "read com.apple.symbolichotkeys AppleSymbolicHotKeys" || exit 1
+    # Verify id 60 (enabled=true) exact write
+    assert_contains "$d_content" "write com.apple.symbolichotkeys AppleSymbolicHotKeys -dict-add 60 { enabled = 1; value = { type = standard; parameters = ( 32, 49, 1310720 ); }; }" || exit 1
+    # Verify id 61 (enabled=false) exact write
+    assert_contains "$d_content" "write com.apple.symbolichotkeys AppleSymbolicHotKeys -dict-add 61 { enabled = 0; }" || exit 1
+
+    # Verify activateSettings called exactly once with -u
+    test -f "$activate_log" || exit 1
+    act_lines=$(wc -l < "$activate_log" | tr -d ' ')
+    test "$act_lines" -eq 1 || exit 1
+    assert_contains "$(cat "$activate_log")" "-u" || exit 1
+
+    # 2. Test activateSettings failure emits warning and does not exit with failure
+    export KAISIAN_ACTIVATE_SETTINGS_FAIL=1
+    warn_out=$(apply_feature_hotkeys 2>&1)
+    st=$?
+    test "$st" -eq 0 || exit 1
+    assert_contains "$warn_out" "Warning" || exit 1
+    assert_contains "$warn_out" "activate settings" || exit 1
+    export KAISIAN_ACTIVATE_SETTINGS_FAIL=0
+
+    cleanup
+    trap - EXIT
+    exit 0
+  ) || return 1
+  return 0
+}
+
+# Feature --dry-run performs no writes
+feature_dry_run_performs_no_writes_case() {
+  checkout="$ROOT/checkout_feat_dry"
+  mkdir -p "$checkout/home" "$checkout/prompt-default" "$checkout/prompt-pure" "$checkout/karabiner"
+  echo '{"default":true}' > "$checkout/karabiner/default.json"
+  cp "$(dirname "$SCRIPT")/tests/fixtures/manifest-v2.json" "$checkout/.kaisian.json"
+
+  (
+    export KAISIAN_TESTING=1
+    defaults_log="$ROOT/defaults_dry.log"
+    activate_log="$ROOT/activate_dry.log"
+    : > "$defaults_log"
+    : > "$activate_log"
+    export KAISIAN_DEFAULTS_LOG="$defaults_log"
+    export KAISIAN_ACTIVATE_SETTINGS_LOG="$activate_log"
+    export KAISIAN_DEFAULTS_EXEC="$(dirname "$SCRIPT")/tests/fixtures/fake-defaults"
+    export KAISIAN_ACTIVATE_SETTINGS_EXEC="$(dirname "$SCRIPT")/tests/fixtures/fake-activate-settings"
+
+    . "$SCRIPT"
+    test_home=$(make_home)
+    HOME="$test_home"
+    PHYSICAL_HOME="$test_home"
+    STATE_ROOT="$test_home/state"
+    DRY_RUN=1
+    acquire_lock || exit 1
+    trap 'cleanup' EXIT
+
+    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+    SELECTED_FEATURES='karabiner-ime'
+    validate_custom_selections || exit 1
+
+    copy_out=$(apply_feature_copies 2>&1)
+    assert_contains "$copy_out" "Would copy" || exit 1
+    assert_contains "$copy_out" ".config/karabiner/karabiner.json" || exit 1
+
+    hk_out=$(apply_feature_hotkeys 2>&1)
+    assert_contains "$hk_out" "Would configure symbolic hotkey" || exit 1
+
+    # Verify no file written
+    test ! -e "$test_home/.config/karabiner/karabiner.json" || exit 1
+
+    # Verify fake-defaults write was NOT executed
+    if test -f "$defaults_log"; then
+      assert_contains "$(cat "$defaults_log")" "write" && exit 1
+    fi
+
+    # Verify activateSettings was NOT executed
+    test ! -s "$activate_log" || exit 1
+
+    cleanup
+    trap - EXIT
+    exit 0
+  ) || return 1
+  return 0
+}
+
+# Feature notes printed in selected locale
+feature_notes_locale_case() {
+  checkout="$ROOT/checkout_feat_notes"
+  mkdir -p "$checkout/home" "$checkout/prompt-default" "$checkout/prompt-pure" "$checkout/karabiner"
+  echo '{"default":true}' > "$checkout/karabiner/default.json"
+  cp "$(dirname "$SCRIPT")/tests/fixtures/manifest-v2.json" "$checkout/.kaisian.json"
+
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+    test_home=$(make_home)
+    HOME="$test_home"
+    acquire_lock || exit 1
+    trap 'cleanup' EXIT
+
+    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+    SELECTED_FEATURES='karabiner-ime'
+    validate_custom_selections || exit 1
+
+    # en
+    LANGUAGE='en'
+    out_en=$(print_feature_notes)
+    assert_contains "$out_en" "Installs Karabiner-Elements" || exit 1
+
+    # zh-TW
+    LANGUAGE='zh-TW'
+    out_zh=$(print_feature_notes)
+    assert_contains "$out_zh" "會安裝 Karabiner-Elements" || exit 1
+
+    cleanup
+    trap - EXIT
+    exit 0
+  ) || return 1
+  return 0
+}
+
+# Brewfile contains cask "karabiner-elements" when feature selected
+feature_brewfile_cask_inclusion_case() {
+  checkout="$ROOT/checkout_feat_bf"
+  mkdir -p "$checkout/home" "$checkout/prompt-default" "$checkout/prompt-pure" "$checkout/karabiner"
+  echo '{"default":true}' > "$checkout/karabiner/default.json"
+  cp "$(dirname "$SCRIPT")/tests/fixtures/manifest-v2.json" "$checkout/.kaisian.json"
+
+  (
+    export KAISIAN_TESTING=1
+    export KAISIAN_TEST_TIME='20260918T110000Z'
+    . "$SCRIPT"
+    test_home=$(make_home)
+    HOME="$test_home"
+    PHYSICAL_HOME="$test_home"
+    STATE_ROOT="$test_home/state"
+    acquire_lock || exit 1
+    trap 'cleanup' EXIT
+
+    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+    SELECTION_MODE='profile'
+    SELECTION_VALUE='default'
+    resolve_selection || exit 1
+
+    # 1. With karabiner-ime selected
+    SELECTED_FEATURES='karabiner-ime'
+    validate_custom_selections || exit 1
+    generate_tsunpi_inputs || exit 1
+
+    brewfile="$STATE_ROOT/$KAISIAN_TEST_TIME/tsunpi/Brewfile"
+    test -f "$brewfile" || exit 1
+    bf_content=$(cat "$brewfile")
+    assert_contains "$bf_content" 'cask "karabiner-elements"' || exit 1
+
+    # 2. Without karabiner-ime selected
+    SELECTED_FEATURES=''
+    RUN_TIMESTAMP='20260918T120000Z'
+    validate_custom_selections || exit 1
+    generate_tsunpi_inputs || exit 1
+
+    brewfile2="$STATE_ROOT/$RUN_TIMESTAMP/tsunpi/Brewfile"
+    test -f "$brewfile2" || exit 1
+    bf2_content=$(cat "$brewfile2")
+    if assert_contains "$bf2_content" 'karabiner-elements'; then
+      exit 1
+    fi
+
+    cleanup
+    trap - EXIT
+    exit 0
+  ) || return 1
+  return 0
+}
+
+custom_langs_and_validation_case() {
+  checkout="$ROOT/checkout_custom_langs"
+  mkdir -p "$checkout/home" "$checkout/prompt-default" "$checkout/prompt-pure" "$checkout/karabiner"
+  echo '{"profiles":[]}' > "$checkout/karabiner/default.json"
+  cp "$(dirname "$SCRIPT")/tests/fixtures/manifest-v2.json" "$checkout/.kaisian.json"
+
+  (
+    export KAISIAN_TESTING=1
+    export KAISIAN_TEST_TIME='20260917T120000Z'
+    . "$SCRIPT"
+    test_home=$(make_home)
+    HOME="$test_home"
+    PHYSICAL_HOME="$test_home"
+    STATE_ROOT="$test_home/state"
+    acquire_lock || exit 1
+    trap 'cleanup' EXIT
+
+    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+    SELECTION_MODE='groups'
+    SELECTION_VALUE='home,prompt-default'
+    resolve_selection || exit 1
+
+    # 1. Valid custom langs: zig,deno accepted and appears in mise.toml
+    SELECTED_LANGS='zig,deno'
+    validate_langs || exit 1
+    generate_tsunpi_inputs || exit 1
+
+    mise_file="$STATE_ROOT/$KAISIAN_TEST_TIME/tsunpi/mise.toml"
+    test -f "$mise_file" || exit 1
+    mise_content=$(cat "$mise_file")
+    assert_contains "$mise_content" 'zig = "latest"' || exit 1
+    assert_contains "$mise_content" 'deno = "latest"' || exit 1
+
+    # 2. Dedupe: zig,deno,zig normalizes to zig,deno
+    SELECTED_LANGS='zig,deno,zig'
+    validate_langs || exit 1
+    test "$SELECTED_LANGS" = 'zig,deno' || exit 1
+
+    # 3. Invalid lang: Zig (uppercase) dies invalid_lang
+    out_upper=$(SELECTED_LANGS='Zig' validate_langs 2>&1)
+    test $? -ne 0 || exit 1
+    assert_contains "$out_upper" "Invalid language" || exit 1
+
+    # 4. Invalid lang: a..b dies invalid_lang
+    out_dots=$(SELECTED_LANGS='a..b' validate_langs 2>&1)
+    test $? -ne 0 || exit 1
+    assert_contains "$out_dots" "Invalid language" || exit 1
+
+    # 5. Invalid lang: -x dies invalid_lang
+    out_dash=$(SELECTED_LANGS='-x' validate_langs 2>&1)
+    test $? -ne 0 || exit 1
+    assert_contains "$out_dash" "Invalid language" || exit 1
+
+    # 6. Invalid lang: 65-char name dies invalid_lang
+    long_65=$(printf 'a%64s' '' | tr ' ' 'b')
+    test "${#long_65}" -eq 65 || exit 1
+    out_long=$(SELECTED_LANGS="$long_65" validate_langs 2>&1)
+    test $? -ne 0 || exit 1
+    assert_contains "$out_long" "Invalid language" || exit 1
+
+    cleanup
+    trap - EXIT
+    exit 0
+  ) || return 1
+  return 0
+}
+
+manifest_preview_shape_violations_case() {
+  checkout="$ROOT/checkout_preview_violations"
+  mkdir -p "$checkout/home" "$checkout/prompt-default" "$checkout/prompt-pure" "$checkout/karabiner"
+  echo '{"profiles":[]}' > "$checkout/karabiner/default.json"
+
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+    test_home=$(make_home)
+    HOME="$test_home"
+    acquire_lock || exit 1
+    trap 'cleanup' EXIT
+
+    test_manifest_fails() {
+      json_content=$1
+      label=$2
+      printf '%s\n' "$json_content" > "$SANDBOX/test_manifest.json"
+      out=$(parse_manifest "$SANDBOX/test_manifest.json" "$checkout" 2>&1)
+      status=$?
+      if test "$status" -eq 0; then
+        printf 'Expected manifest to fail for %s but it passed\n' "$label" >&2
+        return 1
+      fi
+      assert_contains "$out" "Invalid manifest" || {
+        printf 'Output missing "Invalid manifest" for %s: %s\n' "$label" "$out" >&2
+        return 1
+      }
+      return 0
+    }
+
+    # 1. Segment missing text
+    test_manifest_fails '{"schema": 2, "groups": [{"name": "home", "description": {"en": "e", "zh-TW": "z"}}, {"name": "prompt-default", "kind": "prompt", "preview": [[{"color": "blue"}]], "description": {"en": "e", "zh-TW": "z"}}]}' 'segment missing text' || exit 1
+
+    # 2. Unknown segment key
+    test_manifest_fails '{"schema": 2, "groups": [{"name": "home", "description": {"en": "e", "zh-TW": "z"}}, {"name": "prompt-default", "kind": "prompt", "preview": [[{"text": "hi", "unknown_key": "val"}]], "description": {"en": "e", "zh-TW": "z"}}]}' 'unknown segment key' || exit 1
+
+    # 3. Non-array line
+    test_manifest_fails '{"schema": 2, "groups": [{"name": "home", "description": {"en": "e", "zh-TW": "z"}}, {"name": "prompt-default", "kind": "prompt", "preview": ["not-an-array"], "description": {"en": "e", "zh-TW": "z"}}]}' 'non-array line' || exit 1
+
+    cleanup
+    trap - EXIT
+    exit 0
+  ) || return 1
+  return 0
+}
 run_case 'Task 5 preflight target classification and exact conflict planning' task5_preflight_targets_classification_case
 run_case 'Task 5 preflight target rejection for symlink parents and special nodes' task5_preflight_targets_rejection_case
 run_case 'Task 5 preflight unselected package filtering' task5_preflight_selection_filtering_case
@@ -5631,5 +6634,20 @@ run_case 'Task 5 backup prefix validation and reservation safety' task5_backup_p
 run_case 'Task 5 TOCTOU pre-mutation rejection for parent swaps, FIFOs, symlink target swaps, and backup ancestors' task5_toctou_premutation_rejection_case
 run_case 'Task 5 partial failure preservation and manual restore guidance' task5_partial_failure_and_preservation_case
 run_case 'Task 5 readonly constants environment injection immunity' task5_readonly_env_injection_case
+run_case 'schema 2 manifest parsing and dependency catalog validation' schema_2_manifest_parsing_case
+run_case 'two prompt groups selected triggers prompt_conflict' prompt_conflict_case
+run_case 'cli unknown options --font, --brew, and --langs fail' cli_unknown_options_case
+run_case 'generated Brewfile, mise.toml, and font file content' generated_tsunpi_and_font_content_case
+run_case 'tsunpi execution and flags handling' tsunpi_execution_and_flags_case
+run_case 'bootstrap fake brew records install git stow only for missing ones' bootstrap_fake_brew_records_missing_case
+run_case 'schema 2 features manifest parsing and validation failures' features_manifest_parsing_and_validation_failures_case
+run_case 'cli unknown features fail' cli_unknown_features_case
+run_case 'feature copy destination conflict backup and permission mode 600' feature_copy_conflict_backup_and_mode_case
+run_case 'feature hotkeys and activate settings execution' feature_hotkeys_and_activate_settings_case
+run_case 'feature dry run performs no writes' feature_dry_run_performs_no_writes_case
+run_case 'feature notes printed in selected locale' feature_notes_locale_case
+run_case 'feature brewfile cask inclusion when feature selected' feature_brewfile_cask_inclusion_case
+run_case 'custom --langs validation, deduplication, and mise generation' custom_langs_and_validation_case
+run_case 'manifest preview shape violations fail' manifest_preview_shape_violations_case
 printf '%s passed; %s failed\n' "$PASS" "$FAIL"
 test "$FAIL" -eq 0

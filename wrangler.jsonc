@@ -1,0 +1,6 @@
+{
+  "name": "kaisian",
+  "main": "worker.js",
+  "compatibility_date": "2026-09-05",
+  "rules": [{ "type": "Text", "globs": ["**/*.html"] }]
+}

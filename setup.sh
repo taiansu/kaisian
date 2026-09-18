@@ -1,9 +1,9 @@
 #!/bin/bash
 set -u
 
-readonly KAISIAN_VERSION='0.1.0'
+readonly KAISIAN_VERSION='0.2.0'
 readonly DEFAULT_REPOSITORY='taiansu/dotfiles'
-readonly DEFAULT_DOTFILES_COMMIT='0b3b0c3f206e1f4fb35dac82794a871c5c18f405'
+readonly DEFAULT_DOTFILES_REF='kaisian'
 
 LANGUAGE='en'
 PHYSICAL_HOME=''
@@ -16,7 +16,7 @@ ASSUME_YES=0
 SELECTION_MODE='none'
 SELECTION_VALUE=''
 REPOSITORY="$DEFAULT_REPOSITORY"
-REQUESTED_REF="$DEFAULT_DOTFILES_COMMIT"
+REQUESTED_REF="$DEFAULT_DOTFILES_REF"
 CANONICAL_REPO=''
 RESOLVED_FETCH_REF=''
 RESOLVED_COMMIT=''
@@ -27,7 +27,13 @@ GIT_EXEC=''
 STOW_EXEC=''
 FZF_EXEC=''
 PLUTIL_EXEC=''
-
+BREW_EXEC=''
+SELECTED_FONT=''
+SELECTED_BREW=''
+SELECTED_LANGS=''
+SELECTED_FEATURES=''
+NO_TSUNPI=0
+RUN_TIMESTAMP=''
 MAPPING_FILE=''
 CONFLICTS_FILE=''
 STOW_IGNORE_FILE=''
@@ -482,6 +488,68 @@ preflight_targets() {
     has_control_char "$dst_mode" && return 1
     printf '%s\t%s\t%s\t%s\t%s\n' "$dst" "$dst_dev" "$dst_ino" "$dst_type" "$dst_mode" >> "$IDENTITIES_FILE" || return 1
   done < "$MAPPING_FILE"
+
+  if test -f "$SANDBOX/selected_features.txt" && test -f "$SANDBOX/feature_copy.tsv"; then
+    while IFS= read -r sel_feat || test -n "$sel_feat"; do
+      test -n "$sel_feat" || continue
+      while IFS='	' read -r c_feat c_from c_to || test -n "$c_feat"; do
+        test "$c_feat" = "$sel_feat" || continue
+        test -n "$c_to" || continue
+
+        dst="$PHYSICAL_HOME/$c_to"
+        case "$dst" in
+          "$PHYSICAL_HOME"/*) ;;
+          *) return 1 ;;
+        esac
+
+        for guard in "$canon_checkout" "$STATE_ROOT" "$canon_lock" "$canon_sandbox" "$BACKUP_ROOT"; do
+          test -n "$guard" || continue
+          paths_overlap "$dst" "$guard" && return 1
+        done
+
+        physical_parent_safe "$dst" || return 1
+
+        if test ! -e "$dst" && test ! -L "$dst"; then
+          continue
+        fi
+
+        if test -e "$dst" && test ! -L "$dst" && test ! -f "$dst" && test ! -d "$dst"; then
+          return 1
+        fi
+
+        backup="$BACKUP_ROOT/files/$c_to"
+
+        bk_ancestor_check="$backup"
+        while test "$bk_ancestor_check" != '/' && test -n "$bk_ancestor_check"; do
+          if test -L "$bk_ancestor_check"; then return 1; fi
+          if test -e "$bk_ancestor_check" && test ! -d "$bk_ancestor_check"; then return 1; fi
+          bk_ancestor_check=${bk_ancestor_check%/*}
+          test -n "$bk_ancestor_check" || bk_ancestor_check='/'
+        done
+
+        dst_dev=$(stat_dev "$dst") || return 1
+        test -n "$dst_dev" || return 1
+        backup_ancestor=$(nearest_existing "$backup")
+        backup_dev=$(stat_dev "$backup_ancestor") || return 1
+        test -n "$backup_dev" || return 1
+        test "$dst_dev" = "$backup_dev" || return 1
+
+        if ! /usr/bin/grep -F -e "$(printf '%s\t' "$dst")" "$CONFLICTS_FILE" 2>/dev/null; then
+          printf '%s\t%s\n' "$dst" "$backup" >> "$CONFLICTS_FILE" || return 1
+          dst_ino=$(/usr/bin/stat -f '%i' "$dst" 2>/dev/null) || return 1
+          test -n "$dst_ino" || return 1
+          has_control_char "$dst_ino" && return 1
+          dst_type=$(/usr/bin/stat -f '%HT' "$dst" 2>/dev/null) || return 1
+          test -n "$dst_type" || return 1
+          has_control_char "$dst_type" && return 1
+          dst_mode=$(/usr/bin/stat -f '%p' "$dst" 2>/dev/null) || return 1
+          test -n "$dst_mode" || return 1
+          has_control_char "$dst_mode" && return 1
+          printf '%s\t%s\t%s\t%s\t%s\n' "$dst" "$dst_dev" "$dst_ino" "$dst_type" "$dst_mode" >> "$IDENTITIES_FILE" || return 1
+        fi
+      done < "$SANDBOX/feature_copy.tsv"
+    done < "$SANDBOX/selected_features.txt"
+  fi
   return 0
 }
 
@@ -884,16 +952,25 @@ move_conflicts() {
 }
 
 usage() {
+  printf '%s\n' \
 'setup.sh [OPTIONS]
 
-Selection, exactly zero or one:
+Selection, exactly zero or one (none: the default profile from the manifest):
+  --prompt NAME
   --profile NAME
   --groups GROUPS
   --interactive
   --all
 
+Customization (optional):
+  --font CASK
+  --brew PKG[,PKG...]
+  --langs LANG[,LANG...]
+  --features NAME[,NAME...]
+  --no-tsunpi
+
 Source and execution:
-  --repo URL|OWNER/REPO
+  --repo URL|OWNER/REPO[/tree/REF]
   --ref REF
   --dir PATH
   --lang en|zh-TW
@@ -935,7 +1012,7 @@ message_en() {
     missing_tools) printf 'Missing required commands: %s' "${1-}" ;;
     unsupported_os) printf 'Kaisian requires macOS (Darwin).' ;;
     no_tty) printf 'A controlling terminal is required.' ;;
-    selection_conflict) printf 'Selection flags (--profile, --groups, --interactive, --all) are mutually exclusive.' ;;
+    selection_conflict) printf 'Selection flags (--prompt, --profile, --groups, --interactive, --all) are mutually exclusive.' ;;
     unknown_argument) printf 'Unknown argument: %s' "${1-}" ;;
     missing_option_value) printf "Option '%s' requires a non-empty value." "${1-}" ;;
     invalid_language) printf "Invalid language '%s'. Supported: en, zh-TW." "${1-}" ;;
@@ -981,10 +1058,79 @@ message_en() {
         profile_unknown_group) printf "Invalid manifest: profile '%s' references unknown group '%s'." "${2-}" "${3-}" ;;
         profile_duplicate_group) printf "Invalid manifest: profile '%s' contains duplicate group '%s'." "${2-}" "${3-}" ;;
         profile_unknown_key) printf "Invalid manifest: unknown key in 'profiles'." ;;
+        group_invalid_kind) printf "Invalid manifest: group %s invalid 'kind'." "${2-}" ;;
+        fonts_not_array) printf "Invalid manifest: 'fonts' must be an array." ;;
+        font_not_object) printf 'Invalid manifest: font item %s must be an object.' "${2-}" ;;
+        font_missing_cask) printf "Invalid manifest: font %s missing 'cask'." "${2-}" ;;
+        font_invalid_cask) printf "Invalid manifest: invalid font cask '%s'." "${2-}" ;;
+        font_duplicate_cask) printf "Invalid manifest: duplicate font cask '%s'." "${2-}" ;;
+        font_missing_family) printf "Invalid manifest: font %s missing 'family'." "${2-}" ;;
+        font_empty_family) printf "Invalid manifest: font %s family cannot be empty." "${2-}" ;;
+        font_control_char) printf "Invalid manifest: font %s family contains control/tab/newline characters." "${2-}" ;;
+        font_missing_description) printf "Invalid manifest: font %s missing 'description'." "${2-}" ;;
+        font_unknown_key) printf 'Invalid manifest: unknown key in font %s.' "${2-}" ;;
+        brew_not_array) printf "Invalid manifest: 'brew' must be an array." ;;
+        brew_not_object) printf 'Invalid manifest: brew item %s must be an object.' "${2-}" ;;
+        brew_missing_name) printf "Invalid manifest: brew item %s missing 'name'." "${2-}" ;;
+        brew_invalid_name) printf "Invalid manifest: invalid brew name '%s'." "${2-}" ;;
+        brew_duplicate_name) printf "Invalid manifest: duplicate brew name '%s'." "${2-}" ;;
+        brew_invalid_cask) printf "Invalid manifest: brew item %s 'cask' must be a boolean." "${2-}" ;;
+        brew_missing_description) printf "Invalid manifest: brew item %s missing 'description'." "${2-}" ;;
+        brew_unknown_key) printf 'Invalid manifest: unknown key in brew item %s.' "${2-}" ;;
+        group_invalid_brew) printf "Invalid manifest: group %s invalid 'brew' dependencies." "${2-}" ;;
+        group_unknown_brew) printf "Invalid manifest: group %s references undeclared brew dependency '%s'." "${2-}" "${3-}" ;;
+        group_preview_not_array) printf "Invalid manifest: group %s 'preview' must be an array." "${2-}" ;;
+        group_preview_line_not_array) printf "Invalid manifest: group %s preview line %s must be an array." "${2-}" "${3-}" ;;
+        group_preview_segment_not_object) printf "Invalid manifest: group %s preview line %s segment %s must be an object." "${2-}" "${3-}" "${4-}" ;;
+        group_preview_segment_missing_text) printf "Invalid manifest: group %s preview line %s segment %s missing 'text'." "${2-}" "${3-}" "${4-}" ;;
+        group_preview_segment_invalid_text) printf "Invalid manifest: group %s preview line %s segment %s 'text' must be a string." "${2-}" "${3-}" "${4-}" ;;
+        group_preview_segment_invalid_color) printf "Invalid manifest: group %s preview line %s segment %s 'color' must be a string." "${2-}" "${3-}" "${4-}" ;;
+        group_preview_segment_invalid_bg) printf "Invalid manifest: group %s preview line %s segment %s 'bg' must be a string." "${2-}" "${3-}" "${4-}" ;;
+        group_preview_segment_unknown_key) printf "Invalid manifest: unknown key in group %s preview line %s segment %s." "${2-}" "${3-}" "${4-}" ;;
+        font_invalid_preview) printf "Invalid manifest: font %s 'preview' must be a string." "${2-}" ;;
+        features_not_array) printf "Invalid manifest: 'features' must be an array." ;;
+        feature_not_object) printf 'Invalid manifest: feature item %s must be an object.' "${2-}" ;;
+        feature_missing_name) printf "Invalid manifest: feature %s missing 'name'." "${2-}" ;;
+        feature_invalid_name) printf "Invalid manifest: invalid feature name '%s'." "${2-}" ;;
+        feature_duplicate_name) printf "Invalid manifest: duplicate feature name '%s'." "${2-}" ;;
+        feature_invalid_macos) printf "Invalid manifest: feature %s 'macos' must be a boolean." "${2-}" ;;
+        feature_missing_description) printf "Invalid manifest: feature %s missing 'description'." "${2-}" ;;
+        feature_invalid_notes) printf "Invalid manifest: feature %s 'notes' must be an object." "${2-}" ;;
+        notes_not_object) printf "Invalid manifest: feature %s 'notes' must be an object." "${2-}" ;;
+        notes_missing_en) printf "Invalid manifest: feature %s notes missing 'en'." "${2-}" ;;
+        notes_missing_zhtw) printf "Invalid manifest: feature %s notes missing 'zh-TW'." "${2-}" ;;
+        notes_empty_en) printf "Invalid manifest: feature %s notes.en cannot be empty." "${2-}" ;;
+        notes_empty_zhtw) printf "Invalid manifest: feature %s notes.zh-TW cannot be empty." "${2-}" ;;
+        notes_control_char) printf "Invalid manifest: feature %s notes contains control/tab/newline characters." "${2-}" ;;
+        notes_unknown_key) printf "Invalid manifest: unknown key in feature %s notes." "${2-}" ;;
+        feature_brew_not_array) printf "Invalid manifest: feature %s 'brew' must be an array." "${2-}" ;;
+        feature_brew_not_object) printf 'Invalid manifest: feature %s brew item %s must be an object.' "${2-}" "${3-}" ;;
+        feature_brew_missing_name) printf "Invalid manifest: feature %s brew item %s missing 'name'." "${2-}" "${3-}" ;;
+        feature_brew_invalid_name) printf "Invalid manifest: feature %s invalid brew name '%s'." "${2-}" "${3-}" ;;
+        feature_brew_invalid_cask) printf "Invalid manifest: feature %s brew item %s 'cask' must be a boolean." "${2-}" "${3-}" ;;
+        feature_brew_unknown_key) printf 'Invalid manifest: unknown key in feature %s brew item %s.' "${2-}" "${3-}" ;;
+        feature_copy_not_array) printf "Invalid manifest: feature %s 'copy' must be an array." "${2-}" ;;
+        feature_copy_not_object) printf 'Invalid manifest: feature %s copy item %s must be an object.' "${2-}" "${3-}" ;;
+        feature_copy_missing_from) printf "Invalid manifest: feature %s copy item %s missing 'from'." "${2-}" "${3-}" ;;
+        feature_copy_invalid_from) printf "Invalid manifest: feature %s copy item %s invalid or missing source '%s'." "${2-}" "${3-}" "${4-}" ;;
+        feature_copy_missing_to) printf "Invalid manifest: feature %s copy item %s missing 'to'." "${2-}" "${3-}" ;;
+        feature_copy_invalid_to) printf "Invalid manifest: feature %s copy item %s invalid destination '%s'." "${2-}" "${3-}" "${4-}" ;;
+        feature_copy_unknown_key) printf 'Invalid manifest: unknown key in feature %s copy item %s.' "${2-}" "${3-}" ;;
+        feature_hotkeys_not_array) printf "Invalid manifest: feature %s 'hotkeys' must be an array." "${2-}" ;;
+        feature_hotkey_not_object) printf 'Invalid manifest: feature %s hotkey item %s must be an object.' "${2-}" "${3-}" ;;
+        feature_hotkey_missing_id) printf "Invalid manifest: feature %s hotkey item %s missing 'id'." "${2-}" "${3-}" ;;
+        feature_hotkey_invalid_id) printf "Invalid manifest: feature %s hotkey item %s 'id' must be an integer." "${2-}" "${3-}" ;;
+        feature_hotkey_invalid_enabled) printf "Invalid manifest: feature %s hotkey item %s 'enabled' must be a boolean." "${2-}" "${3-}" ;;
+        feature_hotkey_missing_params) printf "Invalid manifest: feature %s hotkey item %s missing required parameters (ascii, keycode, modifiers)." "${2-}" "${3-}" ;;
+        feature_hotkey_invalid_param) printf "Invalid manifest: feature %s hotkey item %s parameter '%s' must be an integer." "${2-}" "${3-}" "${4-}" ;;
+        feature_hotkey_unknown_key) printf 'Invalid manifest: unknown key in feature %s hotkey item %s.' "${2-}" "${3-}" ;;
+        feature_unknown_key) printf 'Invalid manifest: unknown key in feature %s.' "${2-}" ;;
         *) printf 'Invalid manifest: %s' "${1-}" ;;
       esac
       ;;
     unknown_profile) printf "Unknown profile '%s'." "${1-}" ;;
+    unknown_prompt) printf "Unknown prompt group '%s'." "${1-}" ;;
+    no_default_profile) printf 'The manifest defines no default profile; --prompt cannot be used.' ;;
     unknown_group) printf "Unknown group '%s'." "${1-}" ;;
     empty_group_selection) printf 'Group selection cannot be empty.' ;;
     empty_selection) printf 'No packages selected.' ;;
@@ -998,7 +1144,8 @@ message_en() {
       esac
       ;;
     invalid_repository) printf 'Invalid or unsupported repository source: %s' "${1-}" ;;
-    custom_repo_requires_ref) printf 'specifying a custom --repo requires an explicit --ref' ;;
+    custom_repo_requires_ref) printf 'specifying a custom --repo requires an explicit --ref or the OWNER/REPO/tree/REF form' ;;
+    repo_tree_ref_conflict) printf '%s' '--repo with /tree/REF cannot be combined with --ref.' ;;
     invalid_ref) printf 'Invalid git reference: %s' "${1-}" ;;
     ambiguous_ref) printf "Reference '%s' is ambiguous on origin (matches both branch and tag)." "${1-}" ;;
     ref_not_found) printf "Reference '%s' was not found on remote origin." "${1-}" ;;
@@ -1012,6 +1159,20 @@ message_en() {
     invalid_targets) printf 'Targets contain unsafe paths, overlaps, or cross-device conflicts.' ;;
     backup_root) printf 'Backup root: %s' "${1-}" ;;
     manual_restore) printf 'Restore manually with: mv %s %s' "${1-}" "${2-}" ;;
+    invalid_font) printf "Invalid font '%s'. It is not declared in the manifest." "${1-}" ;;
+    invalid_brew) printf "Invalid brew package '%s'. It is not declared in the manifest." "${1-}" ;;
+    invalid_lang) printf "Invalid language '%s'." "${1-}" ;;
+    invalid_feature) printf "Invalid feature '%s'. It is not declared in the manifest." "${1-}" ;;
+    copy_failed) printf "Failed to copy feature file '%s' (%s)." "${1-}" "${2-}" ;;
+    hotkey_failed) printf "Failed to configure symbolic hotkey '%s' (%s)." "${1-}" "${2-}" ;;
+    activate_settings_failed) printf 'Failed to activate settings. Please log out and log back in for hotkey changes to take effect.' ;;
+    warning_prefix) printf 'Warning' ;;
+    prompt_conflict) printf 'Multiple prompt groups selected. At most one prompt group may be selected.' ;;
+    tsunpi_failed) printf 'Tsunpi execution failed (%s).' "${1-}" ;;
+    bootstrap_failed) printf 'Bootstrap failed: %s' "${1-}" ;;
+    bootstrap_brew_installing) printf 'Installing Homebrew...' ;;
+    bootstrap_tools_installing) printf 'Installing missing tools: %s' "${1-}" ;;
+    bootstrap_dry_run) printf 'Would bootstrap: %s' "${1-}" ;;
     *) return 64 ;;
   esac
 }
@@ -1024,7 +1185,7 @@ message_zh_tw() {
     missing_tools) printf '缺少必要指令：%s' "${1-}" ;;
     unsupported_os) printf 'Kaisian 僅支援 macOS (Darwin)。' ;;
     no_tty) printf '此操作需要可控制的終端機。' ;;
-    selection_conflict) printf '選取選項（--profile, --groups, --interactive, --all）不可同時使用。' ;;
+    selection_conflict) printf '選取選項（--prompt, --profile, --groups, --interactive, --all）不可同時使用。' ;;
     unknown_argument) printf '未知的參數：%s' "${1-}" ;;
     missing_option_value) printf '選項「%s」需要非空值。' "${1-}" ;;
     invalid_language) printf '不支援的語言「%s」。僅支援：en, zh-TW。' "${1-}" ;;
@@ -1070,10 +1231,79 @@ message_zh_tw() {
         profile_unknown_group) printf '無效的 manifest：設定檔「%s」引用了未知的群組「%s」。' "${2-}" "${3-}" ;;
         profile_duplicate_group) printf '無效的 manifest：設定檔「%s」包含重複的群組「%s」。' "${2-}" "${3-}" ;;
         profile_unknown_key) printf '無效的 manifest：「profiles」包含未知鍵值。' ;;
+        group_invalid_kind) printf '無效的 manifest：群組 %s 的「kind」無效。' "${2-}" ;;
+        fonts_not_array) printf '無效的 manifest：「fonts」必須是陣列。' ;;
+        font_not_object) printf '無效的 manifest：字型項目 %s 必須是物件。' "${2-}" ;;
+        font_missing_cask) printf '無效的 manifest：字型 %s 缺少「cask」。' "${2-}" ;;
+        font_invalid_cask) printf '無效的 manifest：無效的字型 cask「%s」。' "${2-}" ;;
+        font_duplicate_cask) printf '無效的 manifest：重複的字型 cask「%s」。' "${2-}" ;;
+        font_missing_family) printf '無效的 manifest：字型 %s 缺少「family」。' "${2-}" ;;
+        font_empty_family) printf '無效的 manifest：字型 %s 的 family 不能為空。' "${2-}" ;;
+        font_control_char) printf '無效的 manifest：字型 %s 的 family 包含控制字元、Tab 或換行。' "${2-}" ;;
+        font_missing_description) printf '無效的 manifest：字型 %s 缺少「description」。' "${2-}" ;;
+        font_unknown_key) printf '無效的 manifest：字型 %s 包含未知鍵值。' "${2-}" ;;
+        brew_not_array) printf '無效的 manifest：「brew」必須是陣列。' ;;
+        brew_not_object) printf '無效的 manifest：brew 項目 %s 必須是物件。' "${2-}" ;;
+        brew_missing_name) printf '無效的 manifest：brew 項目 %s 缺少「name」。' "${2-}" ;;
+        brew_invalid_name) printf '無效的 manifest：無效的 brew 名稱「%s」。' "${2-}" ;;
+        brew_duplicate_name) printf '無效的 manifest：重複的 brew 名稱「%s」。' "${2-}" ;;
+        brew_invalid_cask) printf '無效的 manifest：brew 項目 %s 的「cask」必須是布林值。' "${2-}" ;;
+        brew_missing_description) printf '無效的 manifest：brew 項目 %s 缺少「description」。' "${2-}" ;;
+        brew_unknown_key) printf '無效的 manifest：brew 項目 %s 包含未知鍵值。' "${2-}" ;;
+        group_invalid_brew) printf '無效的 manifest：群組 %s 的「brew」相依項目無效。' "${2-}" ;;
+        group_unknown_brew) printf '無效的 manifest：群組 %s 引用了未宣告的 brew 相依項目「%s」。' "${2-}" "${3-}" ;;
+        group_preview_not_array) printf '無效的 manifest：群組 %s 的「preview」必須是陣列。' "${2-}" ;;
+        group_preview_line_not_array) printf '無效的 manifest：群組 %s preview 第 %s 行必須是陣列。' "${2-}" "${3-}" ;;
+        group_preview_segment_not_object) printf '無效的 manifest：群組 %s preview 第 %s 行第 %s 個片段必須是物件。' "${2-}" "${3-}" "${4-}" ;;
+        group_preview_segment_missing_text) printf '無效的 manifest：群組 %s preview 第 %s 行第 %s 個片段缺少「text」。' "${2-}" "${3-}" "${4-}" ;;
+        group_preview_segment_invalid_text) printf '無效的 manifest：群組 %s preview 第 %s 行第 %s 個片段的「text」必須是字串。' "${2-}" "${3-}" "${4-}" ;;
+        group_preview_segment_invalid_color) printf '無效的 manifest：群組 %s preview 第 %s 行第 %s 個片段的「color」必須是字串。' "${2-}" "${3-}" "${4-}" ;;
+        group_preview_segment_invalid_bg) printf '無效的 manifest：群組 %s preview 第 %s 行第 %s 個片段的「bg」必須是字串。' "${2-}" "${3-}" "${4-}" ;;
+        group_preview_segment_unknown_key) printf '無效的 manifest：群組 %s preview 第 %s 行第 %s 個片段包含未知鍵值。' "${2-}" "${3-}" "${4-}" ;;
+        font_invalid_preview) printf '無效的 manifest：字型 %s 的「preview」必須是字串。' "${2-}" ;;
+        features_not_array) printf '無效的 manifest：「features」必須是陣列。' ;;
+        feature_not_object) printf '無效的 manifest：feature 項目 %s 必須是物件。' "${2-}" ;;
+        feature_missing_name) printf '無效的 manifest：feature %s 缺少「name」。' "${2-}" ;;
+        feature_invalid_name) printf '無效的 manifest：無效的 feature 名稱「%s」。' "${2-}" ;;
+        feature_duplicate_name) printf '無效的 manifest：重複的 feature 名稱「%s」。' "${2-}" ;;
+        feature_invalid_macos) printf '無效的 manifest：feature %s 的「macos」必須是布林值。' "${2-}" ;;
+        feature_missing_description) printf '無效的 manifest：feature %s 缺少「description」。' "${2-}" ;;
+        feature_invalid_notes) printf '無效的 manifest：feature %s 的「notes」必須是物件。' "${2-}" ;;
+        notes_not_object) printf '無效的 manifest：feature %s 的「notes」必須是物件。' "${2-}" ;;
+        notes_missing_en) printf '無效的 manifest：feature %s 的 notes 缺少「en」。' "${2-}" ;;
+        notes_missing_zhtw) printf '無效的 manifest：feature %s 的 notes 缺少「zh-TW」。' "${2-}" ;;
+        notes_empty_en) printf '無效的 manifest：feature %s 的 notes.en 不能為空。' "${2-}" ;;
+        notes_empty_zhtw) printf '無效的 manifest：feature %s 的 notes.zh-TW 不能為空。' "${2-}" ;;
+        notes_control_char) printf '無效的 manifest：feature %s 的 notes 包含控制字元、Tab 或換行。' "${2-}" ;;
+        notes_unknown_key) printf '無效的 manifest：feature %s 的 notes 包含未知鍵值。' "${2-}" ;;
+        feature_brew_not_array) printf '無效的 manifest：feature %s 的「brew」必須是陣列。' "${2-}" ;;
+        feature_brew_not_object) printf '無效的 manifest：feature %s 的 brew 項目 %s 必須是物件。' "${2-}" "${3-}" ;;
+        feature_brew_missing_name) printf '無效的 manifest：feature %s 的 brew 項目 %s 缺少「name」。' "${2-}" "${3-}" ;;
+        feature_brew_invalid_name) printf '無效的 manifest：feature %s 包含無效的 brew 名稱「%s」。' "${2-}" "${3-}" ;;
+        feature_brew_invalid_cask) printf '無效的 manifest：feature %s 的 brew 項目 %s 的「cask」必須是布林值。' "${2-}" "${3-}" ;;
+        feature_brew_unknown_key) printf '無效的 manifest：feature %s 的 brew 項目 %s 包含未知鍵值。' "${2-}" "${3-}" ;;
+        feature_copy_not_array) printf '無效的 manifest：feature %s 的「copy」必須是陣列。' "${2-}" ;;
+        feature_copy_not_object) printf '無效的 manifest：feature %s 的 copy 項目 %s 必須是物件。' "${2-}" "${3-}" ;;
+        feature_copy_missing_from) printf '無效的 manifest：feature %s 的 copy 項目 %s 缺少「from」。' "${2-}" "${3-}" ;;
+        feature_copy_invalid_from) printf '無效的 manifest：feature %s 的 copy 項目 %s 來源無效或不存在「%s」。' "${2-}" "${3-}" "${4-}" ;;
+        feature_copy_missing_to) printf '無效的 manifest：feature %s 的 copy 項目 %s 缺少「to」。' "${2-}" "${3-}" ;;
+        feature_copy_invalid_to) printf '無效的 manifest：feature %s 的 copy 項目 %s 目的端路徑無效「%s」。' "${2-}" "${3-}" "${4-}" ;;
+        feature_copy_unknown_key) printf '無效的 manifest：feature %s 的 copy 項目 %s 包含未知鍵值。' "${2-}" "${3-}" ;;
+        feature_hotkeys_not_array) printf '無效的 manifest：feature %s 的「hotkeys」必須是陣列。' "${2-}" ;;
+        feature_hotkey_not_object) printf '無效的 manifest：feature %s 的 hotkey 項目 %s 必須是物件。' "${2-}" "${3-}" ;;
+        feature_hotkey_missing_id) printf '無效的 manifest：feature %s 的 hotkey 項目 %s 缺少「id」。' "${2-}" "${3-}" ;;
+        feature_hotkey_invalid_id) printf '無效的 manifest：feature %s 的 hotkey 項目 %s 的「id」必須是整數。' "${2-}" "${3-}" ;;
+        feature_hotkey_invalid_enabled) printf '無效的 manifest：feature %s 的 hotkey 項目 %s 的「enabled」必須是布林值。' "${2-}" "${3-}" ;;
+        feature_hotkey_missing_params) printf '無效的 manifest：feature %s 的 hotkey 項目 %s 缺少必要參數（ascii, keycode, modifiers）。' "${2-}" "${3-}" ;;
+        feature_hotkey_invalid_param) printf '無效的 manifest：feature %s 的 hotkey 項目 %s 的參數「%s」必須是整數。' "${2-}" "${3-}" "${4-}" ;;
+        feature_hotkey_unknown_key) printf '無效的 manifest：feature %s 的 hotkey 項目 %s 包含未知鍵值。' "${2-}" "${3-}" ;;
+        feature_unknown_key) printf '無效的 manifest：feature %s 包含未知鍵值。' "${2-}" ;;
         *) printf '無效的 manifest：%s' "${1-}" ;;
       esac
       ;;
     unknown_profile) printf '未知的設定檔「%s」。' "${1-}" ;;
+    unknown_prompt) printf '未知的提示字元群組「%s」。' "${1-}" ;;
+    no_default_profile) printf 'manifest 未定義 default 設定檔，無法使用 --prompt。' ;;
     unknown_group) printf '未知的群組「%s」。' "${1-}" ;;
     empty_group_selection) printf '群組選取不能為空。' ;;
     empty_selection) printf '未選取任何套件。' ;;
@@ -1087,7 +1317,8 @@ message_zh_tw() {
       esac
       ;;
     invalid_repository) printf '無效或不支援的儲存庫來源：%s' "${1-}" ;;
-    custom_repo_requires_ref) printf '指定自訂 --repo 時必須一併指定明確的 --ref' ;;
+    custom_repo_requires_ref) printf '指定自訂 --repo 時必須一併指定 --ref，或使用 OWNER/REPO/tree/REF 形式。' ;;
+    repo_tree_ref_conflict) printf '%s' '--repo 的 /tree/REF 與 --ref 不可同時使用。' ;;
     invalid_ref) printf '無效的 Git 參照：%s' "${1-}" ;;
     ambiguous_ref) printf '來源上的參照「%s」具歧義（同時符合分支與標籤）。' "${1-}" ;;
     ref_not_found) printf '在遠端來源找不到參照「%s」。' "${1-}" ;;
@@ -1101,6 +1332,20 @@ message_zh_tw() {
     invalid_targets) printf '目標包含不安全路徑、重疊或跨裝置衝突。' ;;
     backup_root) printf '備份根目錄：%s' "${1-}" ;;
     manual_restore) printf '手動還原指令：mv %s %s' "${1-}" "${2-}" ;;
+    invalid_font) printf '無效的字型「%s」。未在 manifest 中宣告。' "${1-}" ;;
+    invalid_brew) printf '無效的 Homebrew 套件「%s」。未在 manifest 中宣告。' "${1-}" ;;
+    invalid_lang) printf '無效的語言「%s」。' "${1-}" ;;
+    invalid_feature) printf '無效的 feature「%s」。未在 manifest 中宣告。' "${1-}" ;;
+    copy_failed) printf '複製 feature 檔案失敗「%s」（%s）。' "${1-}" "${2-}" ;;
+    hotkey_failed) printf '設定快捷鍵失敗「%s」（%s）。' "${1-}" "${2-}" ;;
+    activate_settings_failed) printf '無法套用設定。請登出並重新登入以讓快捷鍵變更生效。' ;;
+    warning_prefix) printf '警告' ;;
+    prompt_conflict) printf '選取了多個提示字元群組。最多只能選取一個提示字元群組。' ;;
+    tsunpi_failed) printf 'Tsunpi 執行失敗（%s）。' "${1-}" ;;
+    bootstrap_failed) printf '引導安裝失敗：%s' "${1-}" ;;
+    bootstrap_brew_installing) printf '正在安裝 Homebrew...' ;;
+    bootstrap_tools_installing) printf '正在安裝缺少工具：%s' "${1-}" ;;
+    bootstrap_dry_run) printf '將會引導安裝：%s' "${1-}" ;;
     *) return 64 ;;
   esac
 }
@@ -1117,6 +1362,51 @@ die() {
   msg=$(message "$@" 2>/dev/null) || msg="$*"
   printf '%s: %s\n' "$err_pfx" "$msg" >&2
   exit 1
+}
+
+trim_whitespace() {
+  var=$1
+  while case "$var" in [[:space:]]*) var="${var#[[:space:]]}"; true ;; *) false ;; esac; do :; done
+  while case "$var" in *[[:space:]]) var="${var%[[:space:]]}"; true ;; *) false ;; esac; do :; done
+  printf '%s' "$var"
+}
+
+validate_langs() {
+  test -n "$SELECTED_LANGS" || return 0
+  cur="$SELECTED_LANGS"
+  deduped_langs=''
+  seen_langs=''
+  while :; do
+    has_more=0
+    case "$cur" in
+      *,*)
+        part="${cur%%,*}"
+        cur="${cur#*,}"
+        has_more=1
+        ;;
+      *)
+        part="$cur"
+        cur=''
+        ;;
+    esac
+    trimmed=$(trim_whitespace "$part")
+    test -n "$trimmed" || die invalid_lang '<empty>'
+    is_valid_lang "$trimmed" || die invalid_lang "$trimmed"
+    case " $seen_langs " in
+      *" $trimmed "*) ;;
+      *)
+        if test -z "$seen_langs"; then
+          seen_langs="$trimmed"
+          deduped_langs="$trimmed"
+        else
+          seen_langs="$seen_langs $trimmed"
+          deduped_langs="$deduped_langs,$trimmed"
+        fi
+        ;;
+    esac
+    test "$has_more" -eq 0 && break
+  done
+  SELECTED_LANGS="$deduped_langs"
 }
 
 parse_args() {
@@ -1142,6 +1432,7 @@ parse_args() {
   selection_count=0
   repo_explicit=0
   ref_explicit=0
+  tree_ref=''
   while test $# -gt 0; do
     arg=$1
     shift
@@ -1149,6 +1440,19 @@ parse_args() {
       -h|--help)
         usage
         exit 0
+        ;;
+      --prompt|--prompt=*)
+        if test "$arg" = '--prompt'; then
+          test $# -gt 0 || die missing_option_value '--prompt'
+          val=$1
+          shift
+        else
+          val=${arg#--prompt=}
+        fi
+        test -n "$val" || die missing_option_value '--prompt'
+        SELECTION_MODE='prompt'
+        SELECTION_VALUE="$val"
+        selection_count=$((selection_count + 1))
         ;;
       --profile|--profile=*)
         if test "$arg" = '--profile'; then
@@ -1195,6 +1499,13 @@ parse_args() {
           val=${arg#--repo=}
         fi
         test -n "$val" || die missing_option_value '--repo'
+        case "$val" in
+          */tree/*)
+            tree_ref=${val#*/tree/}
+            test -n "$tree_ref" || die invalid_repository "$val"
+            val=${val%%/tree/*}
+            ;;
+        esac
         REPOSITORY="$val"
         repo_explicit=1
         ;;
@@ -1235,6 +1546,53 @@ parse_args() {
           *) die invalid_language "$val" ;;
         esac
         ;;
+      --font|--font=*)
+        if test "$arg" = '--font'; then
+          test $# -gt 0 || die missing_option_value '--font'
+          val=$1
+          shift
+        else
+          val=${arg#--font=}
+        fi
+        test -n "$val" || die missing_option_value '--font'
+        SELECTED_FONT="$val"
+        ;;
+      --brew|--brew=*)
+        if test "$arg" = '--brew'; then
+          test $# -gt 0 || die missing_option_value '--brew'
+          val=$1
+          shift
+        else
+          val=${arg#--brew=}
+        fi
+        test -n "$val" || die missing_option_value '--brew'
+        SELECTED_BREW="$val"
+        ;;
+      --langs|--langs=*)
+        if test "$arg" = '--langs'; then
+          test $# -gt 0 || die missing_option_value '--langs'
+          val=$1
+          shift
+        else
+          val=${arg#--langs=}
+        fi
+        test -n "$val" || die missing_option_value '--langs'
+        SELECTED_LANGS="$val"
+        ;;
+      --features|--features=*)
+        if test "$arg" = '--features'; then
+          test $# -gt 0 || die missing_option_value '--features'
+          val=$1
+          shift
+        else
+          val=${arg#--features=}
+        fi
+        test -n "$val" || die missing_option_value '--features'
+        SELECTED_FEATURES="$val"
+        ;;
+      --no-tsunpi)
+        NO_TSUNPI=1
+        ;;
       --dry-run)
         DRY_RUN=1
         ;;
@@ -1251,11 +1609,18 @@ parse_args() {
     die selection_conflict
   fi
 
+  if test -n "$tree_ref"; then
+    test "$ref_explicit" -eq 0 || die repo_tree_ref_conflict
+    REQUESTED_REF="$tree_ref"
+    ref_explicit=1
+  fi
+
   if test "$repo_explicit" -eq 1 && test "$ref_explicit" -eq 0; then
     if test "$REPOSITORY" != "$DEFAULT_REPOSITORY"; then
       die custom_repo_requires_ref
     fi
   fi
+  validate_langs
 }
 
 validate_home() {
@@ -1592,25 +1957,144 @@ run_stow() {
   )
 }
 
+get_tool_exec() {
+  tool_name=$1
+  case "$tool_name" in
+    git)
+      if test -n "${KAISIAN_GIT_EXEC-}"; then
+        printf '%s\n' "$KAISIAN_GIT_EXEC"
+        return 0
+      elif test "${KAISIAN_GIT_EXEC+x}" = 'x'; then
+        return 1
+      fi
+      ;;
+    stow)
+      if test -n "${KAISIAN_STOW_EXEC-}"; then
+        printf '%s\n' "$KAISIAN_STOW_EXEC"
+        return 0
+      elif test "${KAISIAN_STOW_EXEC+x}" = 'x'; then
+        return 1
+      fi
+      ;;
+    fzf)
+      if test -n "${KAISIAN_FZF_EXEC-}"; then
+        printf '%s\n' "$KAISIAN_FZF_EXEC"
+        return 0
+      elif test "${KAISIAN_FZF_EXEC+x}" = 'x'; then
+        return 1
+      fi
+      ;;
+    plutil)
+      if test -n "${KAISIAN_PLUTIL_EXEC-}"; then
+        printf '%s\n' "$KAISIAN_PLUTIL_EXEC"
+        return 0
+      elif test "${KAISIAN_PLUTIL_EXEC+x}" = 'x'; then
+        return 1
+      fi
+      ;;
+    brew)
+      if test -n "${KAISIAN_BREW_EXEC-}"; then
+        printf '%s\n' "$KAISIAN_BREW_EXEC"
+        return 0
+      elif test "${KAISIAN_BREW_EXEC+x}" = 'x'; then
+        return 1
+      fi
+      ;;
+  esac
+  raw=$(discover_executable "$tool_name") && {
+    printf '%s\n' "$raw"
+    return 0
+  }
+  case "$tool_name" in
+    brew)
+      if test -f '/opt/homebrew/bin/brew' && test -x '/opt/homebrew/bin/brew'; then
+        printf '/opt/homebrew/bin/brew\n'
+        return 0
+      elif test -f '/usr/local/bin/brew' && test -x '/usr/local/bin/brew'; then
+        printf '/usr/local/bin/brew\n'
+        return 0
+      fi
+      ;;
+  esac
+  return 1
+}
+
+bootstrap_prerequisites() {
+  # 1. Discover or bootstrap Homebrew
+  BREW_EXEC=$(get_tool_exec brew) || true
+  if test -z "$BREW_EXEC"; then
+    if test "$DRY_RUN" -eq 1; then
+      msg=$(message bootstrap_dry_run "Homebrew" 2>/dev/null) || msg="Would bootstrap: Homebrew"
+      printf '%s\n' "$msg"
+    else
+      if test -n "${KAISIAN_BREW_INSTALLER-}"; then
+        eval "$KAISIAN_BREW_INSTALLER" || die bootstrap_failed 'Homebrew installation failed'
+      else
+        /bin/bash -c "$(/usr/bin/curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || die bootstrap_failed 'Homebrew installation failed'
+      fi
+      if test -d '/opt/homebrew/bin'; then
+        PATH="/opt/homebrew/bin:$PATH"
+        export PATH
+      fi
+      if test -d '/usr/local/bin'; then
+        PATH="/usr/local/bin:$PATH"
+        export PATH
+      fi
+      BREW_EXEC=$(get_tool_exec brew) || die bootstrap_failed 'Homebrew executable not found after installation'
+    fi
+  fi
+
+  # 2. Discover git and stow
+  GIT_EXEC=$(get_tool_exec git) || true
+  STOW_EXEC=$(get_tool_exec stow) || true
+
+  missing_pkgs=''
+  if test -z "$GIT_EXEC"; then
+    missing_pkgs='git'
+  fi
+  if test -z "$STOW_EXEC"; then
+    if test -z "$missing_pkgs"; then
+      missing_pkgs='stow'
+    else
+      missing_pkgs="$missing_pkgs stow"
+    fi
+  fi
+
+  if test -n "$missing_pkgs"; then
+    if test "$DRY_RUN" -eq 1; then
+      msg=$(message bootstrap_dry_run "brew install $missing_pkgs" 2>/dev/null) || msg="Would bootstrap: brew install $missing_pkgs"
+      printf '%s\n' "$msg"
+    else
+      test -n "$BREW_EXEC" || die bootstrap_failed "Homebrew is required to install: $missing_pkgs"
+      "$BREW_EXEC" install $missing_pkgs || die bootstrap_failed "brew install $missing_pkgs failed"
+      if test "${KAISIAN_GIT_EXEC+x}" = 'x' && test -z "$KAISIAN_GIT_EXEC"; then
+        KAISIAN_GIT_EXEC="$BREW_EXEC"
+      fi
+      if test "${KAISIAN_STOW_EXEC+x}" = 'x' && test -z "$KAISIAN_STOW_EXEC"; then
+        KAISIAN_STOW_EXEC="$BREW_EXEC"
+      fi
+      GIT_EXEC=$(get_tool_exec git) || die bootstrap_failed 'git executable not found after installation'
+      STOW_EXEC=$(get_tool_exec stow) || die bootstrap_failed 'stow executable not found after installation'
+    fi
+  fi
+}
+
 require_prerequisites() {
   os_name=$(/usr/bin/uname -s 2>/dev/null) || die unsupported_os
   test "$os_name" = 'Darwin' || die unsupported_os
 
-  missing=''
-  if ! GIT_EXEC=$(discover_executable git); then
-    missing='git'
+  PLUTIL_EXEC=$(get_tool_exec plutil) || die missing_tools 'plutil'
+
+  bootstrap_prerequisites
+
+  if test "$SELECTION_MODE" = 'interactive'; then
+    FZF_EXEC=$(get_tool_exec fzf) || die missing_tools 'fzf'
+  else
+    FZF_EXEC=$(get_tool_exec fzf 2>/dev/null || true)
   fi
-  if ! STOW_EXEC=$(discover_executable stow); then
-    if test -z "$missing"; then missing='stow'; else missing="$missing, stow"; fi
-  fi
-  if ! FZF_EXEC=$(discover_executable fzf); then
-    if test -z "$missing"; then missing='fzf'; else missing="$missing, fzf"; fi
-  fi
-  if ! PLUTIL_EXEC=$(discover_executable plutil); then
-    if test -z "$missing"; then missing='plutil'; else missing="$missing, plutil"; fi
-  fi
-  if test -n "$missing"; then
-    die missing_tools "$missing"
+
+  if test "$DRY_RUN" -eq 1 && test -z "$STOW_EXEC"; then
+    return 0
   fi
 
   probe_src="$SANDBOX/stow-probe-src"
@@ -2490,12 +2974,6 @@ initialize_repository() {
   RESOLVED_COMMIT=$(run_git -C "$chk_dir" rev-parse --verify "FETCH_HEAD^{commit}" 2>/dev/null) || die git_operation_failed 'failed to peel FETCH_HEAD'
   test "$RESOLVED_COMMIT" = "$EXPECTED_COMMIT_SHA" || die git_operation_failed "fetched commit mismatch: $RESOLVED_COMMIT != $EXPECTED_COMMIT_SHA"
 
-  if test "$REPOSITORY" = "$DEFAULT_REPOSITORY" && test -n "$DEFAULT_DOTFILES_COMMIT"; then
-    if test "$REQUESTED_REF" = "$DEFAULT_DOTFILES_COMMIT"; then
-      test "$RESOLVED_COMMIT" = "$DEFAULT_DOTFILES_COMMIT" || die git_operation_failed "default commit mismatch: $RESOLVED_COMMIT != $DEFAULT_DOTFILES_COMMIT"
-    fi
-  fi
-
   validate_submodules_spec "$chk_dir" "$RESOLVED_COMMIT"
 
   validate_git_admin "$chk_dir"
@@ -2535,12 +3013,6 @@ update_repository() {
   RESOLVED_COMMIT=$(run_git -C "$chk_dir" rev-parse --verify "FETCH_HEAD^{commit}" 2>/dev/null) || die git_operation_failed 'failed to peel FETCH_HEAD'
   test "$RESOLVED_COMMIT" = "$EXPECTED_COMMIT_SHA" || die git_operation_failed "fetched commit mismatch: $RESOLVED_COMMIT != $EXPECTED_COMMIT_SHA"
 
-  if test "$REPOSITORY" = "$DEFAULT_REPOSITORY" && test -n "$DEFAULT_DOTFILES_COMMIT"; then
-    if test "$REQUESTED_REF" = "$DEFAULT_DOTFILES_COMMIT"; then
-      test "$RESOLVED_COMMIT" = "$DEFAULT_DOTFILES_COMMIT" || die git_operation_failed "default commit mismatch: $RESOLVED_COMMIT != $DEFAULT_DOTFILES_COMMIT"
-    fi
-  fi
-
   validate_submodules_spec "$chk_dir" "$RESOLVED_COMMIT"
   run_git -C "$chk_dir" checkout --detach "$RESOLVED_COMMIT" -- >/dev/null 2>&1 || die git_operation_failed 'git checkout failed'
   initialize_submodules "$chk_dir"
@@ -2553,10 +3025,29 @@ update_repository() {
 }
 
 
+is_valid_ascii_token() {
+  case "$1" in
+    *[!A-Za-z0-9._@+-]*|"") return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 is_valid_name() {
   case "$1" in
     [!abcdefghijklmnopqrstuvwxyz]* | *[!abcdefghijklmnopqrstuvwxyz0123456789_-]*) return 1 ;;
     "") return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+is_valid_lang() {
+  token=$1
+  test -n "$token" || return 1
+  test ${#token} -le 64 || return 1
+  case "$token" in
+    *..*) return 1 ;;
+    [!abcdefghijklmnopqrstuvwxyz0123456789]*) return 1 ;;
+    *[!abcdefghijklmnopqrstuvwxyz0123456789._@+-]*) return 1 ;;
     *) return 0 ;;
   esac
 }
@@ -2571,12 +3062,6 @@ has_control_char() {
   )
 }
 
-trim_whitespace() {
-  local var=$1
-  while case "$var" in [[:space:]]*) var="${var#[[:space:]]}"; true ;; *) false ;; esac; do :; done
-  while case "$var" in *[[:space:]]) var="${var%[[:space:]]}"; true ;; *) false ;; esac; do :; done
-  printf '%s' "$var"
-}
 
 parse_manifest() {
   manifest=${1-}
@@ -2619,12 +3104,34 @@ parse_manifest() {
 
   groups_type=$("$plutil_bin" -type root.groups "$wrapper_xml" 2>/dev/null || true)
   test -n "$groups_type" || die invalid_manifest missing_groups
-
   has_profiles=0
   profiles_type=$("$plutil_bin" -type root.profiles "$wrapper_xml" 2>/dev/null || true)
   if test -n "$profiles_type"; then
     has_profiles=1
   fi
+
+  has_fonts=0
+  fonts_type=$("$plutil_bin" -type root.fonts "$wrapper_xml" 2>/dev/null || true)
+  if test -n "$fonts_type"; then
+    has_fonts=1
+  fi
+
+  has_brew=0
+  brew_type=$("$plutil_bin" -type root.brew "$wrapper_xml" 2>/dev/null || true)
+  if test -n "$brew_type"; then
+    has_brew=1
+  fi
+
+  has_features=0
+  features_type=$("$plutil_bin" -type root.features "$wrapper_xml" 2>/dev/null || true)
+  if test -n "$features_type"; then
+    has_features=1
+  fi
+
+  # 3. Schema validation
+  test "$schema_type" = 'integer' || die invalid_manifest schema_not_integer
+  schema_val=$("$plutil_bin" -extract schema raw "$manifest" 2>/dev/null || true)
+  test "$schema_val" = '1' || test "$schema_val" = '2' || die invalid_manifest unsupported_schema "$schema_val"
 
   # Unknown top-level key check via plutil residual validation
   root_check_xml="$SANDBOX/manifest_root_check.xml"
@@ -2634,15 +3141,20 @@ parse_manifest() {
   if test "$has_profiles" -eq 1; then
     "$plutil_bin" -remove root.profiles "$root_check_xml" 2>/dev/null || true
   fi
+  if test "$schema_val" = '2'; then
+    if test "$has_fonts" -eq 1; then
+      "$plutil_bin" -remove root.fonts "$root_check_xml" 2>/dev/null || true
+    fi
+    if test "$has_brew" -eq 1; then
+      "$plutil_bin" -remove root.brew "$root_check_xml" 2>/dev/null || true
+    fi
+    if test "$has_features" -eq 1; then
+      "$plutil_bin" -remove root.features "$root_check_xml" 2>/dev/null || true
+    fi
+  fi
   residual_root=$("$plutil_bin" -extract root json -o - "$root_check_xml" 2>/dev/null || true)
   test "$residual_root" = '{}' || die invalid_manifest unknown_top_key "$residual_root"
   /bin/rm -f "$root_check_xml" 2>/dev/null || true
-
-  # 3. Schema validation
-  test "$schema_type" = 'integer' || die invalid_manifest schema_not_integer
-  schema_val=$("$plutil_bin" -extract schema raw "$manifest" 2>/dev/null || true)
-  test "$schema_val" = '1' || die invalid_manifest unsupported_schema "$schema_val"
-
   # 4. Groups validation
   test "$groups_type" = 'array' || die invalid_manifest groups_not_array
   group_count=$("$plutil_bin" -extract groups raw "$manifest" 2>/dev/null || true)
@@ -2651,9 +3163,27 @@ parse_manifest() {
     *) die invalid_manifest groups_not_array ;;
   esac
   test "$group_count" -gt 0 || die invalid_manifest empty_groups
-
   groups_tsv="$SANDBOX/groups.tsv"
   : > "$groups_tsv"
+  prompt_groups_txt="$SANDBOX/prompt_groups.txt"
+  : > "$prompt_groups_txt"
+  fonts_tsv="$SANDBOX/fonts.tsv"
+  : > "$fonts_tsv"
+  brew_tsv="$SANDBOX/brew.tsv"
+  : > "$brew_tsv"
+  group_brew_deps_tsv="$SANDBOX/group_brew_deps.tsv"
+: > "$group_brew_deps_tsv"
+  features_tsv="$SANDBOX/features.tsv"
+  : > "$features_tsv"
+  feature_brew_tsv="$SANDBOX/feature_brew.tsv"
+  : > "$feature_brew_tsv"
+  feature_copy_tsv="$SANDBOX/feature_copy.tsv"
+  : > "$feature_copy_tsv"
+  feature_hotkeys_tsv="$SANDBOX/feature_hotkeys.tsv"
+  : > "$feature_hotkeys_tsv"
+  feature_notes_tsv="$SANDBOX/feature_notes.tsv"
+  : > "$feature_notes_tsv"
+  seen_feature_copy_dirs=''
   seen_group_names=''
 
   i=0
@@ -2666,24 +3196,133 @@ parse_manifest() {
     # Verify required keys in group
     gname_type=$("$plutil_bin" -type "groups.$i.name" "$manifest" 2>/dev/null || true)
     test -n "$gname_type" || die invalid_manifest group_missing_name "$i"
-
     gdesc_type=$("$plutil_bin" -type "groups.$i.description" "$manifest" 2>/dev/null || true)
     test -n "$gdesc_type" || die invalid_manifest group_missing_description "$i"
+    # Name validation
+    test "$gname_type" = 'string' || die invalid_manifest group_invalid_name "$i"
+    gname=$("$plutil_bin" -extract "groups.$i.name" raw "$manifest" 2>/dev/null || true)
+    if test "$schema_val" = '1'; then
+      is_valid_name "$gname" || die invalid_manifest group_invalid_name "$gname"
+    else
+      is_valid_ascii_token "$gname" || die invalid_manifest group_invalid_name "$gname"
+    fi
+
+    # Check kind
+    has_kind=$("$plutil_bin" -type "groups.$i.kind" "$manifest" 2>/dev/null || true)
+    kind_val=''
+    if test -n "$has_kind"; then
+      if test "$schema_val" = '1'; then
+        :
+      else
+        test "$has_kind" = 'string' || die invalid_manifest group_invalid_kind "$i"
+        kind_val=$("$plutil_bin" -extract "groups.$i.kind" raw "$manifest" 2>/dev/null || true)
+        test "$kind_val" = 'prompt' || die invalid_manifest group_invalid_kind "$i"
+      fi
+    fi
+
+    # Check brew dependencies
+    has_group_brew=$("$plutil_bin" -type "groups.$i.brew" "$manifest" 2>/dev/null || true)
+    if test -n "$has_group_brew"; then
+      if test "$schema_val" = '1'; then
+        :
+      else
+        test "$has_group_brew" = 'array' || die invalid_manifest group_invalid_brew "$i"
+        gb_count=$("$plutil_bin" -extract "groups.$i.brew" raw "$manifest" 2>/dev/null || true)
+        case "$gb_count" in
+          [0-9]*) ;;
+          *) die invalid_manifest group_invalid_brew "$i" ;;
+        esac
+        l=0
+        while test "$l" -lt "$gb_count"; do
+          gb_item_type=$("$plutil_bin" -type "groups.$i.brew.$l" "$manifest" 2>/dev/null || true)
+          test "$gb_item_type" = 'string' || die invalid_manifest group_invalid_brew "$i"
+          gb_item=$("$plutil_bin" -extract "groups.$i.brew.$l" raw "$manifest" 2>/dev/null || true)
+          is_valid_ascii_token "$gb_item" || die invalid_manifest group_invalid_brew "$i"
+          printf '%s\t%s\n' "$gname" "$gb_item" >> "$group_brew_deps_tsv"
+          l=$((l + 1))
+        done
+      fi
+    fi
+
+    # Check preview
+    has_group_preview=$("$plutil_bin" -type "groups.$i.preview" "$manifest" 2>/dev/null || true)
+    if test -n "$has_group_preview"; then
+      if test "$schema_val" = '1'; then
+        :
+      else
+        test "$has_group_preview" = 'array' || die invalid_manifest group_preview_not_array "$i"
+        gp_count=$("$plutil_bin" -extract "groups.$i.preview" raw "$manifest" 2>/dev/null || true)
+        case "$gp_count" in
+          [0-9]*) ;;
+          *) die invalid_manifest group_preview_not_array "$i" ;;
+        esac
+        l_idx=0
+        while test "$l_idx" -lt "$gp_count"; do
+          line_type=$("$plutil_bin" -type "groups.$i.preview.$l_idx" "$manifest" 2>/dev/null || true)
+          test "$line_type" = 'array' || die invalid_manifest group_preview_line_not_array "$i" "$l_idx"
+          seg_count=$("$plutil_bin" -extract "groups.$i.preview.$l_idx" raw "$manifest" 2>/dev/null || true)
+          case "$seg_count" in
+            [0-9]*) ;;
+            *) die invalid_manifest group_preview_line_not_array "$i" "$l_idx" ;;
+          esac
+          s_idx=0
+          while test "$s_idx" -lt "$seg_count"; do
+            seg_type=$("$plutil_bin" -type "groups.$i.preview.$l_idx.$s_idx" "$manifest" 2>/dev/null || true)
+            test "$seg_type" = 'dictionary' || die invalid_manifest group_preview_segment_not_object "$i" "$l_idx" "$s_idx"
+
+            text_type=$("$plutil_bin" -type "groups.$i.preview.$l_idx.$s_idx.text" "$manifest" 2>/dev/null || true)
+            test -n "$text_type" || die invalid_manifest group_preview_segment_missing_text "$i" "$l_idx" "$s_idx"
+            test "$text_type" = 'string' || die invalid_manifest group_preview_segment_invalid_text "$i" "$l_idx" "$s_idx"
+
+            color_type=$("$plutil_bin" -type "groups.$i.preview.$l_idx.$s_idx.color" "$manifest" 2>/dev/null || true)
+            if test -n "$color_type"; then
+              test "$color_type" = 'string' || die invalid_manifest group_preview_segment_invalid_color "$i" "$l_idx" "$s_idx"
+            fi
+
+            bg_type=$("$plutil_bin" -type "groups.$i.preview.$l_idx.$s_idx.bg" "$manifest" 2>/dev/null || true)
+            if test -n "$bg_type"; then
+              test "$bg_type" = 'string' || die invalid_manifest group_preview_segment_invalid_bg "$i" "$l_idx" "$s_idx"
+            fi
+
+            seg_check_xml="$SANDBOX/seg_check_${i}_${l_idx}_${s_idx}.xml"
+            /bin/cp "$manifest_xml" "$seg_check_xml"
+            "$plutil_bin" -remove "groups.$i.preview.$l_idx.$s_idx.text" "$seg_check_xml" 2>/dev/null || true
+            if test -n "$color_type"; then
+              "$plutil_bin" -remove "groups.$i.preview.$l_idx.$s_idx.color" "$seg_check_xml" 2>/dev/null || true
+            fi
+            if test -n "$bg_type"; then
+              "$plutil_bin" -remove "groups.$i.preview.$l_idx.$s_idx.bg" "$seg_check_xml" 2>/dev/null || true
+            fi
+            residual_seg=$("$plutil_bin" -extract "groups.$i.preview.$l_idx.$s_idx" json -o - "$seg_check_xml" 2>/dev/null || true)
+            test "$residual_seg" = '{}' || die invalid_manifest group_preview_segment_unknown_key "$i" "$l_idx" "$s_idx"
+            /bin/rm -f "$seg_check_xml" 2>/dev/null || true
+
+            s_idx=$((s_idx + 1))
+          done
+          l_idx=$((l_idx + 1))
+        done
+      fi
+    fi
 
     # Residual unknown-key check on group
     group_check_xml="$SANDBOX/group_check_$i.xml"
     /bin/cp "$manifest_xml" "$group_check_xml"
     "$plutil_bin" -remove "groups.$i.name" "$group_check_xml" 2>/dev/null || true
     "$plutil_bin" -remove "groups.$i.description" "$group_check_xml" 2>/dev/null || true
+    if test "$schema_val" = '2'; then
+      if test -n "$has_kind"; then
+        "$plutil_bin" -remove "groups.$i.kind" "$group_check_xml" 2>/dev/null || true
+      fi
+      if test -n "$has_group_brew"; then
+        "$plutil_bin" -remove "groups.$i.brew" "$group_check_xml" 2>/dev/null || true
+      fi
+      if test -n "$has_group_preview"; then
+        "$plutil_bin" -remove "groups.$i.preview" "$group_check_xml" 2>/dev/null || true
+      fi
+    fi
     residual_group=$("$plutil_bin" -extract "groups.$i" json -o - "$group_check_xml" 2>/dev/null || true)
     test "$residual_group" = '{}' || die invalid_manifest group_unknown_key "$i"
     /bin/rm -f "$group_check_xml" 2>/dev/null || true
-
-    # Name validation
-    test "$gname_type" = 'string' || die invalid_manifest group_invalid_name "$i"
-    gname=$("$plutil_bin" -extract "groups.$i.name" raw "$manifest" 2>/dev/null || true)
-    is_valid_name "$gname" || die invalid_manifest group_invalid_name "$gname"
-
     case " $seen_group_names " in
       *" $gname "*) die invalid_manifest group_duplicate_name "$gname" ;;
     esac
@@ -2725,25 +3364,13 @@ parse_manifest() {
     test -n "$raw_desc_zh" || die invalid_manifest description_empty_zhtw "$i"
     has_control_char "$raw_desc_zh" && die invalid_manifest description_control_char "$i"
 
+    if test "$kind_val" = 'prompt'; then
+      printf '%s\n' "$gname" >> "$prompt_groups_txt"
+    fi
     printf '%s\t%s\t%s\n' "$gname" "$raw_desc_en" "$raw_desc_zh" >> "$groups_tsv"
     i=$((i + 1))
   done
 
-  # 5. Package directory alignment
-  for g in $seen_group_names; do
-    test -d "$checkout_dir/$g" && test ! -L "$checkout_dir/$g" || die invalid_manifest missing_package_dir "$g"
-  done
-
-  for entry in "$checkout_dir"/*; do
-    test -e "$entry" || continue
-    if test -d "$entry" && test ! -L "$entry"; then
-      entry_name="${entry##*/}"
-      case " $seen_group_names " in
-        *" $entry_name "*) ;;
-        *) die invalid_manifest undeclared_package_dir "$entry_name" ;;
-      esac
-    fi
-  done
 
   # 6. Profiles validation
   profiles_tsv="$SANDBOX/profiles.tsv"
@@ -2808,6 +3435,533 @@ parse_manifest() {
     test "$residual_prof" = '{}' || die invalid_manifest profile_unknown_key
     /bin/rm -f "$prof_check_xml" 2>/dev/null || true
   fi
+  # 7. Fonts validation (schema 2)
+  if test "$schema_val" = '2' && test "$has_fonts" -eq 1; then
+    test "$fonts_type" = 'array' || die invalid_manifest fonts_not_array
+    font_count=$("$plutil_bin" -extract fonts raw "$manifest" 2>/dev/null || true)
+    case "$font_count" in
+      [0-9]*) ;;
+      *) die invalid_manifest fonts_not_array ;;
+    esac
+
+    seen_font_casks=''
+    k=0
+    while test "$k" -lt "$font_count"; do
+      ftype=$("$plutil_bin" -type "fonts.$k" "$manifest" 2>/dev/null || true)
+      test "$ftype" = 'dictionary' || die invalid_manifest font_not_object "$k"
+
+      cask_type=$("$plutil_bin" -type "fonts.$k.cask" "$manifest" 2>/dev/null || true)
+      test -n "$cask_type" || die invalid_manifest font_missing_cask "$k"
+      test "$cask_type" = 'string' || die invalid_manifest font_invalid_cask "$k"
+      fcask=$("$plutil_bin" -extract "fonts.$k.cask" raw "$manifest" 2>/dev/null || true)
+      is_valid_ascii_token "$fcask" || die invalid_manifest font_invalid_cask "$fcask"
+
+      case " $seen_font_casks " in
+        *" $fcask "*) die invalid_manifest font_duplicate_cask "$fcask" ;;
+      esac
+      if test -z "$seen_font_casks"; then
+        seen_font_casks="$fcask"
+      else
+        seen_font_casks="$seen_font_casks $fcask"
+      fi
+
+      has_font_preview=$("$plutil_bin" -type "fonts.$k.preview" "$manifest" 2>/dev/null || true)
+      if test -n "$has_font_preview"; then
+        test "$has_font_preview" = 'string' || die invalid_manifest font_invalid_preview "$k"
+      fi
+      family_type=$("$plutil_bin" -type "fonts.$k.family" "$manifest" 2>/dev/null || true)
+      test -n "$family_type" || die invalid_manifest font_missing_family "$k"
+      test "$family_type" = 'string' || die invalid_manifest font_empty_family "$k"
+      ffamily=$("$plutil_bin" -extract "fonts.$k.family" raw "$manifest" 2>/dev/null; printf 'x')
+      ffamily=${ffamily%x}
+      ffamily=${ffamily%"$nl"}
+      test -n "$ffamily" || die invalid_manifest font_empty_family "$k"
+      has_control_char "$ffamily" && die invalid_manifest font_control_char "$k"
+      case "$ffamily" in
+        *'	'*) die invalid_manifest font_control_char "$k" ;;
+      esac
+
+      fdesc_type=$("$plutil_bin" -type "fonts.$k.description" "$manifest" 2>/dev/null || true)
+      test -n "$fdesc_type" || die invalid_manifest font_missing_description "$k"
+      test "$fdesc_type" = 'dictionary' || die invalid_manifest description_not_object "$k"
+
+      fen_type=$("$plutil_bin" -type "fonts.$k.description.en" "$manifest" 2>/dev/null || true)
+      test -n "$fen_type" || die invalid_manifest description_missing_en "$k"
+      fzhtw_type=$("$plutil_bin" -type "fonts.$k.description.zh-TW" "$manifest" 2>/dev/null || true)
+      test -n "$fzhtw_type" || die invalid_manifest description_missing_zhtw "$k"
+
+      font_check_xml="$SANDBOX/font_check_$k.xml"
+      /bin/cp "$manifest_xml" "$font_check_xml"
+      "$plutil_bin" -remove "fonts.$k.cask" "$font_check_xml" 2>/dev/null || true
+      "$plutil_bin" -remove "fonts.$k.family" "$font_check_xml" 2>/dev/null || true
+      if test -n "$has_font_preview"; then
+        "$plutil_bin" -remove "fonts.$k.preview" "$font_check_xml" 2>/dev/null || true
+      fi
+      "$plutil_bin" -remove "fonts.$k.description.en" "$font_check_xml" 2>/dev/null || true
+      "$plutil_bin" -remove "fonts.$k.description.zh-TW" "$font_check_xml" 2>/dev/null || true
+      residual_fdesc=$("$plutil_bin" -extract "fonts.$k.description" json -o - "$font_check_xml" 2>/dev/null || true)
+      test "$residual_fdesc" = '{}' || die invalid_manifest description_unknown_key "$k"
+      "$plutil_bin" -remove "fonts.$k.description" "$font_check_xml" 2>/dev/null || true
+      residual_font=$("$plutil_bin" -extract "fonts.$k" json -o - "$font_check_xml" 2>/dev/null || true)
+      test "$residual_font" = '{}' || die invalid_manifest font_unknown_key "$k"
+      /bin/rm -f "$font_check_xml" 2>/dev/null || true
+
+      test "$fen_type" = 'string' || die invalid_manifest description_empty_en "$k"
+      raw_fen=$("$plutil_bin" -extract "fonts.$k.description.en" raw "$manifest" 2>/dev/null; printf 'x')
+      raw_fen=${raw_fen%x}
+      raw_fen=${raw_fen%"$nl"}
+      test -n "$raw_fen" || die invalid_manifest description_empty_en "$k"
+      has_control_char "$raw_fen" && die invalid_manifest description_control_char "$k"
+
+      test "$fzhtw_type" = 'string' || die invalid_manifest description_empty_zhtw "$k"
+      raw_fzh=$("$plutil_bin" -extract "fonts.$k.description.zh-TW" raw "$manifest" 2>/dev/null; printf 'x')
+      raw_fzh=${raw_fzh%x}
+      raw_fzh=${raw_fzh%"$nl"}
+      test -n "$raw_fzh" || die invalid_manifest description_empty_zhtw "$k"
+      has_control_char "$raw_fzh" && die invalid_manifest description_control_char "$k"
+
+      printf '%s\t%s\n' "$fcask" "$ffamily" >> "$fonts_tsv"
+      k=$((k + 1))
+    done
+  fi
+
+  # 8. Brew validation (schema 2)
+  if test "$schema_val" = '2' && test "$has_brew" -eq 1; then
+    test "$brew_type" = 'array' || die invalid_manifest brew_not_array
+    brew_count=$("$plutil_bin" -extract brew raw "$manifest" 2>/dev/null || true)
+    case "$brew_count" in
+      [0-9]*) ;;
+      *) die invalid_manifest brew_not_array ;;
+    esac
+
+    seen_brew_names=''
+    m=0
+    while test "$m" -lt "$brew_count"; do
+      btype=$("$plutil_bin" -type "brew.$m" "$manifest" 2>/dev/null || true)
+      test "$btype" = 'dictionary' || die invalid_manifest brew_not_object "$m"
+
+      bname_type=$("$plutil_bin" -type "brew.$m.name" "$manifest" 2>/dev/null || true)
+      test -n "$bname_type" || die invalid_manifest brew_missing_name "$m"
+      test "$bname_type" = 'string' || die invalid_manifest brew_invalid_name "$m"
+      bname=$("$plutil_bin" -extract "brew.$m.name" raw "$manifest" 2>/dev/null || true)
+      is_valid_ascii_token "$bname" || die invalid_manifest brew_invalid_name "$bname"
+
+      case " $seen_brew_names " in
+        *" $bname "*) die invalid_manifest brew_duplicate_name "$bname" ;;
+      esac
+      if test -z "$seen_brew_names"; then
+        seen_brew_names="$bname"
+      else
+        seen_brew_names="$seen_brew_names $bname"
+      fi
+
+      cask_val=0
+      bcask_type=$("$plutil_bin" -type "brew.$m.cask" "$manifest" 2>/dev/null || true)
+      if test -n "$bcask_type"; then
+        test "$bcask_type" = 'bool' || test "$bcask_type" = 'boolean' || die invalid_manifest brew_invalid_cask "$m"
+        raw_cask=$("$plutil_bin" -extract "brew.$m.cask" raw "$manifest" 2>/dev/null || true)
+        if test "$raw_cask" = 'true' || test "$raw_cask" = '1'; then
+          cask_val=1
+        fi
+      fi
+
+      bdesc_type=$("$plutil_bin" -type "brew.$m.description" "$manifest" 2>/dev/null || true)
+      test -n "$bdesc_type" || die invalid_manifest brew_missing_description "$m"
+      test "$bdesc_type" = 'dictionary' || die invalid_manifest description_not_object "$m"
+
+      ben_type=$("$plutil_bin" -type "brew.$m.description.en" "$manifest" 2>/dev/null || true)
+      test -n "$ben_type" || die invalid_manifest description_missing_en "$m"
+      bzhtw_type=$("$plutil_bin" -type "brew.$m.description.zh-TW" "$manifest" 2>/dev/null || true)
+      test -n "$bzhtw_type" || die invalid_manifest description_missing_zhtw "$m"
+
+      brew_check_xml="$SANDBOX/brew_check_$m.xml"
+      /bin/cp "$manifest_xml" "$brew_check_xml"
+      "$plutil_bin" -remove "brew.$m.name" "$brew_check_xml" 2>/dev/null || true
+      if test -n "$bcask_type"; then
+        "$plutil_bin" -remove "brew.$m.cask" "$brew_check_xml" 2>/dev/null || true
+      fi
+      "$plutil_bin" -remove "brew.$m.description.en" "$brew_check_xml" 2>/dev/null || true
+      "$plutil_bin" -remove "brew.$m.description.zh-TW" "$brew_check_xml" 2>/dev/null || true
+      residual_bdesc=$("$plutil_bin" -extract "brew.$m.description" json -o - "$brew_check_xml" 2>/dev/null || true)
+      test "$residual_bdesc" = '{}' || die invalid_manifest description_unknown_key "$m"
+      "$plutil_bin" -remove "brew.$m.description" "$brew_check_xml" 2>/dev/null || true
+      residual_brew=$("$plutil_bin" -extract "brew.$m" json -o - "$brew_check_xml" 2>/dev/null || true)
+      test "$residual_brew" = '{}' || die invalid_manifest brew_unknown_key "$m"
+      /bin/rm -f "$brew_check_xml" 2>/dev/null || true
+
+      test "$ben_type" = 'string' || die invalid_manifest description_empty_en "$m"
+      raw_ben=$("$plutil_bin" -extract "brew.$m.description.en" raw "$manifest" 2>/dev/null; printf 'x')
+      raw_ben=${raw_ben%x}
+      raw_ben=${raw_ben%"$nl"}
+      test -n "$raw_ben" || die invalid_manifest description_empty_en "$m"
+      has_control_char "$raw_ben" && die invalid_manifest description_control_char "$m"
+
+      test "$bzhtw_type" = 'string' || die invalid_manifest description_empty_zhtw "$m"
+      raw_bzh=$("$plutil_bin" -extract "brew.$m.description.zh-TW" raw "$manifest" 2>/dev/null; printf 'x')
+      raw_bzh=${raw_bzh%x}
+      raw_bzh=${raw_bzh%"$nl"}
+      test -n "$raw_bzh" || die invalid_manifest description_empty_zhtw "$m"
+      has_control_char "$raw_bzh" && die invalid_manifest description_control_char "$m"
+
+      printf '%s\t%s\n' "$bname" "$cask_val" >> "$brew_tsv"
+      m=$((m + 1))
+    done
+  fi
+  # 9. Validate group brew dependencies against catalog (schema 2)
+  if test "$schema_val" = '2' && test -f "$group_brew_deps_tsv"; then
+    while IFS='	' read -r dep_gname dep_bname || test -n "$dep_gname"; do
+      test -n "$dep_gname" && test -n "$dep_bname" || continue
+      found_catalog_brew=0
+      if test -f "$brew_tsv"; then
+        while IFS='	' read -r bcat_name bcat_cask || test -n "$bcat_name"; do
+          if test "$bcat_name" = "$dep_bname"; then
+            found_catalog_brew=1
+            break
+          fi
+        done < "$brew_tsv"
+      fi
+      test "$found_catalog_brew" -eq 1 || die invalid_manifest group_unknown_brew "$dep_gname" "$dep_bname"
+    done < "$group_brew_deps_tsv"
+  fi
+
+  # 10. Features validation (schema 2)
+  if test "$schema_val" = '2' && test "$has_features" -eq 1; then
+    test "$features_type" = 'array' || die invalid_manifest features_not_array
+    feature_count=$("$plutil_bin" -extract features raw "$manifest" 2>/dev/null || true)
+    case "$feature_count" in
+      [0-9]*) ;;
+      *) die invalid_manifest features_not_array ;;
+    esac
+
+    seen_feature_names=''
+    fn_idx=0
+    while test "$fn_idx" -lt "$feature_count"; do
+      ftype=$("$plutil_bin" -type "features.$fn_idx" "$manifest" 2>/dev/null || true)
+      test "$ftype" = 'dictionary' || die invalid_manifest feature_not_object "$fn_idx"
+
+      fname_type=$("$plutil_bin" -type "features.$fn_idx.name" "$manifest" 2>/dev/null || true)
+      test -n "$fname_type" || die invalid_manifest feature_missing_name "$fn_idx"
+      test "$fname_type" = 'string' || die invalid_manifest feature_invalid_name "$fn_idx"
+      fname=$("$plutil_bin" -extract "features.$fn_idx.name" raw "$manifest" 2>/dev/null || true)
+      is_valid_ascii_token "$fname" || die invalid_manifest feature_invalid_name "$fname"
+
+      case " $seen_feature_names " in
+        *" $fname "*) die invalid_manifest feature_duplicate_name "$fname" ;;
+      esac
+      if test -z "$seen_feature_names"; then
+        seen_feature_names="$fname"
+      else
+        seen_feature_names="$seen_feature_names $fname"
+      fi
+
+      f_macos=0
+      fmacos_type=$("$plutil_bin" -type "features.$fn_idx.macos" "$manifest" 2>/dev/null || true)
+      if test -n "$fmacos_type"; then
+        test "$fmacos_type" = 'bool' || test "$fmacos_type" = 'boolean' || die invalid_manifest feature_invalid_macos "$fname"
+        raw_macos=$("$plutil_bin" -extract "features.$fn_idx.macos" raw "$manifest" 2>/dev/null || true)
+        if test "$raw_macos" = 'true' || test "$raw_macos" = '1'; then
+          f_macos=1
+        fi
+      fi
+
+      fdesc_type=$("$plutil_bin" -type "features.$fn_idx.description" "$manifest" 2>/dev/null || true)
+      test -n "$fdesc_type" || die invalid_manifest feature_missing_description "$fname"
+      test "$fdesc_type" = 'dictionary' || die invalid_manifest description_not_object "$fname"
+
+      fden_type=$("$plutil_bin" -type "features.$fn_idx.description.en" "$manifest" 2>/dev/null || true)
+      test -n "$fden_type" || die invalid_manifest description_missing_en "$fname"
+      fdzhtw_type=$("$plutil_bin" -type "features.$fn_idx.description.zh-TW" "$manifest" 2>/dev/null || true)
+      test -n "$fdzhtw_type" || die invalid_manifest description_missing_zhtw "$fname"
+
+      test "$fden_type" = 'string' || die invalid_manifest description_empty_en "$fname"
+      raw_fden=$("$plutil_bin" -extract "features.$fn_idx.description.en" raw "$manifest" 2>/dev/null; printf 'x')
+      raw_fden=${raw_fden%x}
+      raw_fden=${raw_fden%"$nl"}
+      test -n "$raw_fden" || die invalid_manifest description_empty_en "$fname"
+      has_control_char "$raw_fden" && die invalid_manifest description_control_char "$fname"
+
+      test "$fdzhtw_type" = 'string' || die invalid_manifest description_empty_zhtw "$fname"
+      raw_fdzh=$("$plutil_bin" -extract "features.$fn_idx.description.zh-TW" raw "$manifest" 2>/dev/null; printf 'x')
+      raw_fdzh=${raw_fdzh%x}
+      raw_fdzh=${raw_fdzh%"$nl"}
+      test -n "$raw_fdzh" || die invalid_manifest description_empty_zhtw "$fname"
+      has_control_char "$raw_fdzh" && die invalid_manifest description_control_char "$fname"
+
+      has_fnotes=0
+      raw_fnen=''
+      raw_fnzh=''
+      fnotes_type=$("$plutil_bin" -type "features.$fn_idx.notes" "$manifest" 2>/dev/null || true)
+      if test -n "$fnotes_type"; then
+        has_fnotes=1
+        test "$fnotes_type" = 'dictionary' || die invalid_manifest feature_invalid_notes "$fname"
+        fnen_type=$("$plutil_bin" -type "features.$fn_idx.notes.en" "$manifest" 2>/dev/null || true)
+        test -n "$fnen_type" || die invalid_manifest notes_missing_en "$fname"
+        fnzhtw_type=$("$plutil_bin" -type "features.$fn_idx.notes.zh-TW" "$manifest" 2>/dev/null || true)
+        test -n "$fnzhtw_type" || die invalid_manifest notes_missing_zhtw "$fname"
+
+        test "$fnen_type" = 'string' || die invalid_manifest notes_empty_en "$fname"
+        raw_fnen=$("$plutil_bin" -extract "features.$fn_idx.notes.en" raw "$manifest" 2>/dev/null; printf 'x')
+        raw_fnen=${raw_fnen%x}
+        raw_fnen=${raw_fnen%"$nl"}
+        test -n "$raw_fnen" || die invalid_manifest notes_empty_en "$fname"
+        has_control_char "$raw_fnen" && die invalid_manifest notes_control_char "$fname"
+
+        test "$fnzhtw_type" = 'string' || die invalid_manifest notes_empty_zhtw "$fname"
+        raw_fnzh=$("$plutil_bin" -extract "features.$fn_idx.notes.zh-TW" raw "$manifest" 2>/dev/null; printf 'x')
+        raw_fnzh=${raw_fnzh%x}
+        raw_fnzh=${raw_fnzh%"$nl"}
+        test -n "$raw_fnzh" || die invalid_manifest notes_empty_zhtw "$fname"
+        has_control_char "$raw_fnzh" && die invalid_manifest notes_control_char "$fname"
+      fi
+
+      has_fbrew=0
+      fbrew_type=$("$plutil_bin" -type "features.$fn_idx.brew" "$manifest" 2>/dev/null || true)
+      if test -n "$fbrew_type"; then
+        has_fbrew=1
+        test "$fbrew_type" = 'array' || die invalid_manifest feature_brew_not_array "$fname"
+        fbrew_cnt=$("$plutil_bin" -extract "features.$fn_idx.brew" raw "$manifest" 2>/dev/null || true)
+        case "$fbrew_cnt" in
+          [0-9]*) ;;
+          *) die invalid_manifest feature_brew_not_array "$fname" ;;
+        esac
+        fb_i=0
+        while test "$fb_i" -lt "$fbrew_cnt"; do
+          fb_type=$("$plutil_bin" -type "features.$fn_idx.brew.$fb_i" "$manifest" 2>/dev/null || true)
+          test "$fb_type" = 'dictionary' || die invalid_manifest feature_brew_not_object "$fname" "$fb_i"
+
+          fb_name_type=$("$plutil_bin" -type "features.$fn_idx.brew.$fb_i.name" "$manifest" 2>/dev/null || true)
+          test -n "$fb_name_type" || die invalid_manifest feature_brew_missing_name "$fname" "$fb_i"
+          test "$fb_name_type" = 'string' || die invalid_manifest feature_brew_invalid_name "$fname" "$fb_i"
+          fb_name=$("$plutil_bin" -extract "features.$fn_idx.brew.$fb_i.name" raw "$manifest" 2>/dev/null || true)
+          is_valid_ascii_token "$fb_name" || die invalid_manifest feature_brew_invalid_name "$fname" "$fb_name"
+
+          fb_cask=0
+          fb_cask_type=$("$plutil_bin" -type "features.$fn_idx.brew.$fb_i.cask" "$manifest" 2>/dev/null || true)
+          if test -n "$fb_cask_type"; then
+            test "$fb_cask_type" = 'bool' || test "$fb_cask_type" = 'boolean' || die invalid_manifest feature_brew_invalid_cask "$fname" "$fb_i"
+            raw_fbcask=$("$plutil_bin" -extract "features.$fn_idx.brew.$fb_i.cask" raw "$manifest" 2>/dev/null || true)
+            if test "$raw_fbcask" = 'true' || test "$raw_fbcask" = '1'; then
+              fb_cask=1
+            fi
+          fi
+
+          fb_check_xml="$SANDBOX/fb_check_${fn_idx}_${fb_i}.xml"
+          /bin/cp "$manifest_xml" "$fb_check_xml"
+          "$plutil_bin" -remove "features.$fn_idx.brew.$fb_i.name" "$fb_check_xml" 2>/dev/null || true
+          if test -n "$fb_cask_type"; then
+            "$plutil_bin" -remove "features.$fn_idx.brew.$fb_i.cask" "$fb_check_xml" 2>/dev/null || true
+          fi
+          residual_fb=$("$plutil_bin" -extract "features.$fn_idx.brew.$fb_i" json -o - "$fb_check_xml" 2>/dev/null || true)
+          test "$residual_fb" = '{}' || die invalid_manifest feature_brew_unknown_key "$fname" "$fb_i"
+          /bin/rm -f "$fb_check_xml" 2>/dev/null || true
+
+          printf '%s\t%s\t%s\n' "$fname" "$fb_name" "$fb_cask" >> "$feature_brew_tsv"
+          fb_i=$((fb_i + 1))
+        done
+      fi
+
+      has_fcopy=0
+      fcopy_type=$("$plutil_bin" -type "features.$fn_idx.copy" "$manifest" 2>/dev/null || true)
+      if test -n "$fcopy_type"; then
+        has_fcopy=1
+        test "$fcopy_type" = 'array' || die invalid_manifest feature_copy_not_array "$fname"
+        fcopy_cnt=$("$plutil_bin" -extract "features.$fn_idx.copy" raw "$manifest" 2>/dev/null || true)
+        case "$fcopy_cnt" in
+          [0-9]*) ;;
+          *) die invalid_manifest feature_copy_not_array "$fname" ;;
+        esac
+        fc_i=0
+        while test "$fc_i" -lt "$fcopy_cnt"; do
+          fc_type=$("$plutil_bin" -type "features.$fn_idx.copy.$fc_i" "$manifest" 2>/dev/null || true)
+          test "$fc_type" = 'dictionary' || die invalid_manifest feature_copy_not_object "$fname" "$fc_i"
+
+          fc_from_type=$("$plutil_bin" -type "features.$fn_idx.copy.$fc_i.from" "$manifest" 2>/dev/null || true)
+          test -n "$fc_from_type" || die invalid_manifest feature_copy_missing_from "$fname" "$fc_i"
+          test "$fc_from_type" = 'string' || die invalid_manifest feature_copy_invalid_from "$fname" "$fc_i"
+          fc_from=$("$plutil_bin" -extract "features.$fn_idx.copy.$fc_i.from" raw "$manifest" 2>/dev/null || true)
+
+          test -n "$fc_from" || die invalid_manifest feature_copy_invalid_from "$fname" '<empty>'
+          has_control_char "$fc_from" && die invalid_manifest feature_copy_invalid_from "$fname" "$fc_from"
+          case "$fc_from" in
+            /*|..|*/..|../*|*/../*) die invalid_manifest feature_copy_invalid_from "$fname" "$fc_from" ;;
+          esac
+          src_file="$checkout_dir/$fc_from"
+          test -f "$src_file" && test ! -d "$src_file" || die invalid_manifest feature_copy_invalid_from "$fname" "$fc_from"
+
+          fc_to_type=$("$plutil_bin" -type "features.$fn_idx.copy.$fc_i.to" "$manifest" 2>/dev/null || true)
+          test -n "$fc_to_type" || die invalid_manifest feature_copy_missing_to "$fname" "$fc_i"
+          test "$fc_to_type" = 'string' || die invalid_manifest feature_copy_invalid_to "$fname" "$fc_i"
+          fc_to=$("$plutil_bin" -extract "features.$fn_idx.copy.$fc_i.to" raw "$manifest" 2>/dev/null || true)
+
+          test -n "$fc_to" || die invalid_manifest feature_copy_invalid_to "$fname" '<empty>'
+          has_control_char "$fc_to" && die invalid_manifest feature_copy_invalid_to "$fname" "$fc_to"
+          case "$fc_to" in
+            /*|..|*/..|../*|*/../*) die invalid_manifest feature_copy_invalid_to "$fname" "$fc_to" ;;
+          esac
+
+          fc_top="${fc_from%%/*}"
+          if test -n "$fc_top"; then
+            case " $seen_feature_copy_dirs " in
+              *" $fc_top "*) ;;
+              *) seen_feature_copy_dirs="$seen_feature_copy_dirs $fc_top" ;;
+            esac
+          fi
+
+          fc_check_xml="$SANDBOX/fc_check_${fn_idx}_${fc_i}.xml"
+          /bin/cp "$manifest_xml" "$fc_check_xml"
+          "$plutil_bin" -remove "features.$fn_idx.copy.$fc_i.from" "$fc_check_xml" 2>/dev/null || true
+          "$plutil_bin" -remove "features.$fn_idx.copy.$fc_i.to" "$fc_check_xml" 2>/dev/null || true
+          residual_fc=$("$plutil_bin" -extract "features.$fn_idx.copy.$fc_i" json -o - "$fc_check_xml" 2>/dev/null || true)
+          test "$residual_fc" = '{}' || die invalid_manifest feature_copy_unknown_key "$fname" "$fc_i"
+          /bin/rm -f "$fc_check_xml" 2>/dev/null || true
+
+          printf '%s\t%s\t%s\n' "$fname" "$fc_from" "$fc_to" >> "$feature_copy_tsv"
+          fc_i=$((fc_i + 1))
+        done
+      fi
+
+      has_fhotkeys=0
+      fhk_type=$("$plutil_bin" -type "features.$fn_idx.hotkeys" "$manifest" 2>/dev/null || true)
+      if test -n "$fhk_type"; then
+        has_fhotkeys=1
+        test "$fhk_type" = 'array' || die invalid_manifest feature_hotkeys_not_array "$fname"
+        fhk_cnt=$("$plutil_bin" -extract "features.$fn_idx.hotkeys" raw "$manifest" 2>/dev/null || true)
+        case "$fhk_cnt" in
+          [0-9]*) ;;
+          *) die invalid_manifest feature_hotkeys_not_array "$fname" ;;
+        esac
+        fhk_i=0
+        while test "$fhk_i" -lt "$fhk_cnt"; do
+          hk_type=$("$plutil_bin" -type "features.$fn_idx.hotkeys.$fhk_i" "$manifest" 2>/dev/null || true)
+          test "$hk_type" = 'dictionary' || die invalid_manifest feature_hotkey_not_object "$fname" "$fhk_i"
+
+          hk_id_type=$("$plutil_bin" -type "features.$fn_idx.hotkeys.$fhk_i.id" "$manifest" 2>/dev/null || true)
+          test -n "$hk_id_type" || die invalid_manifest feature_hotkey_missing_id "$fname" "$fhk_i"
+          test "$hk_id_type" = 'integer' || die invalid_manifest feature_hotkey_invalid_id "$fname" "$fhk_i"
+          hk_id=$("$plutil_bin" -extract "features.$fn_idx.hotkeys.$fhk_i.id" raw "$manifest" 2>/dev/null || true)
+          case "$hk_id" in
+            +-*[0-9]*|[0-9]*) ;;
+            *) die invalid_manifest feature_hotkey_invalid_id "$fname" "$fhk_i" ;;
+          esac
+
+          hk_en_type=$("$plutil_bin" -type "features.$fn_idx.hotkeys.$fhk_i.enabled" "$manifest" 2>/dev/null || true)
+          test -n "$hk_en_type" || die invalid_manifest feature_hotkey_invalid_enabled "$fname" "$fhk_i"
+          test "$hk_en_type" = 'bool' || test "$hk_en_type" = 'boolean' || die invalid_manifest feature_hotkey_invalid_enabled "$fname" "$fhk_i"
+          raw_hken=$("$plutil_bin" -extract "features.$fn_idx.hotkeys.$fhk_i.enabled" raw "$manifest" 2>/dev/null || true)
+          hk_enabled=0
+          if test "$raw_hken" = 'true' || test "$raw_hken" = '1'; then
+            hk_enabled=1
+          fi
+
+          hk_ascii=''
+          hk_keycode=''
+          hk_modifiers=''
+          has_ascii=0
+          has_kc=0
+          has_mod=0
+
+          hk_ascii_type=$("$plutil_bin" -type "features.$fn_idx.hotkeys.$fhk_i.ascii" "$manifest" 2>/dev/null || true)
+          if test -n "$hk_ascii_type"; then
+            has_ascii=1
+            test "$hk_ascii_type" = 'integer' || die invalid_manifest feature_hotkey_invalid_param "$fname" "$fhk_i" "ascii"
+            hk_ascii=$("$plutil_bin" -extract "features.$fn_idx.hotkeys.$fhk_i.ascii" raw "$manifest" 2>/dev/null || true)
+          fi
+
+          hk_kc_type=$("$plutil_bin" -type "features.$fn_idx.hotkeys.$fhk_i.keycode" "$manifest" 2>/dev/null || true)
+          if test -n "$hk_kc_type"; then
+            has_kc=1
+            test "$hk_kc_type" = 'integer' || die invalid_manifest feature_hotkey_invalid_param "$fname" "$fhk_i" "keycode"
+            hk_keycode=$("$plutil_bin" -extract "features.$fn_idx.hotkeys.$fhk_i.keycode" raw "$manifest" 2>/dev/null || true)
+          fi
+
+          hk_mod_type=$("$plutil_bin" -type "features.$fn_idx.hotkeys.$fhk_i.modifiers" "$manifest" 2>/dev/null || true)
+          if test -n "$hk_mod_type"; then
+            has_mod=1
+            test "$hk_mod_type" = 'integer' || die invalid_manifest feature_hotkey_invalid_param "$fname" "$fhk_i" "modifiers"
+            hk_modifiers=$("$plutil_bin" -extract "features.$fn_idx.hotkeys.$fhk_i.modifiers" raw "$manifest" 2>/dev/null || true)
+          fi
+
+          if test "$hk_enabled" -eq 1; then
+            test "$has_ascii" -eq 1 && test "$has_kc" -eq 1 && test "$has_mod" -eq 1 || die invalid_manifest feature_hotkey_missing_params "$fname" "$fhk_i"
+          fi
+
+          fhk_check_xml="$SANDBOX/fhk_check_${fn_idx}_${fhk_i}.xml"
+          /bin/cp "$manifest_xml" "$fhk_check_xml"
+          "$plutil_bin" -remove "features.$fn_idx.hotkeys.$fhk_i.id" "$fhk_check_xml" 2>/dev/null || true
+          "$plutil_bin" -remove "features.$fn_idx.hotkeys.$fhk_i.enabled" "$fhk_check_xml" 2>/dev/null || true
+          if test "$has_ascii" -eq 1; then
+            "$plutil_bin" -remove "features.$fn_idx.hotkeys.$fhk_i.ascii" "$fhk_check_xml" 2>/dev/null || true
+          fi
+          if test "$has_kc" -eq 1; then
+            "$plutil_bin" -remove "features.$fn_idx.hotkeys.$fhk_i.keycode" "$fhk_check_xml" 2>/dev/null || true
+          fi
+          if test "$has_mod" -eq 1; then
+            "$plutil_bin" -remove "features.$fn_idx.hotkeys.$fhk_i.modifiers" "$fhk_check_xml" 2>/dev/null || true
+          fi
+          residual_fhk=$("$plutil_bin" -extract "features.$fn_idx.hotkeys.$fhk_i" json -o - "$fhk_check_xml" 2>/dev/null || true)
+          test "$residual_fhk" = '{}' || die invalid_manifest feature_hotkey_unknown_key "$fname" "$fhk_i"
+          /bin/rm -f "$fhk_check_xml" 2>/dev/null || true
+
+          printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$fname" "$hk_id" "$hk_enabled" "$hk_ascii" "$hk_keycode" "$hk_modifiers" >> "$feature_hotkeys_tsv"
+          fhk_i=$((fhk_i + 1))
+        done
+      fi
+
+      feat_check_xml="$SANDBOX/feat_check_$fn_idx.xml"
+      /bin/cp "$manifest_xml" "$feat_check_xml"
+      "$plutil_bin" -remove "features.$fn_idx.name" "$feat_check_xml" 2>/dev/null || true
+      if test -n "$fmacos_type"; then
+        "$plutil_bin" -remove "features.$fn_idx.macos" "$feat_check_xml" 2>/dev/null || true
+      fi
+      "$plutil_bin" -remove "features.$fn_idx.description.en" "$feat_check_xml" 2>/dev/null || true
+      "$plutil_bin" -remove "features.$fn_idx.description.zh-TW" "$feat_check_xml" 2>/dev/null || true
+      residual_fdesc=$("$plutil_bin" -extract "features.$fn_idx.description" json -o - "$feat_check_xml" 2>/dev/null || true)
+      test "$residual_fdesc" = '{}' || die invalid_manifest description_unknown_key "$fname"
+      "$plutil_bin" -remove "features.$fn_idx.description" "$feat_check_xml" 2>/dev/null || true
+
+      if test "$has_fnotes" -eq 1; then
+        "$plutil_bin" -remove "features.$fn_idx.notes.en" "$feat_check_xml" 2>/dev/null || true
+        "$plutil_bin" -remove "features.$fn_idx.notes.zh-TW" "$feat_check_xml" 2>/dev/null || true
+        residual_fnotes=$("$plutil_bin" -extract "features.$fn_idx.notes" json -o - "$feat_check_xml" 2>/dev/null || true)
+        test "$residual_fnotes" = '{}' || die invalid_manifest notes_unknown_key "$fname"
+        "$plutil_bin" -remove "features.$fn_idx.notes" "$feat_check_xml" 2>/dev/null || true
+        printf '%s\t%s\t%s\n' "$fname" "$raw_fnen" "$raw_fnzh" >> "$feature_notes_tsv"
+      fi
+
+      if test "$has_fbrew" -eq 1; then
+        "$plutil_bin" -remove "features.$fn_idx.brew" "$feat_check_xml" 2>/dev/null || true
+      fi
+      if test "$has_fcopy" -eq 1; then
+        "$plutil_bin" -remove "features.$fn_idx.copy" "$feat_check_xml" 2>/dev/null || true
+      fi
+      if test "$has_fhotkeys" -eq 1; then
+        "$plutil_bin" -remove "features.$fn_idx.hotkeys" "$feat_check_xml" 2>/dev/null || true
+      fi
+
+      residual_feat=$("$plutil_bin" -extract "features.$fn_idx" json -o - "$feat_check_xml" 2>/dev/null || true)
+      test "$residual_feat" = '{}' || die invalid_manifest feature_unknown_key "$fname"
+      /bin/rm -f "$feat_check_xml" 2>/dev/null || true
+
+      printf '%s\t%s\t%s\t%s\n' "$fname" "$f_macos" "$raw_fden" "$raw_fdzh" >> "$features_tsv"
+      fn_idx=$((fn_idx + 1))
+    done
+  fi
+
+  # 11. Package directory alignment
+  for g in $seen_group_names; do
+    test -d "$checkout_dir/$g" && test ! -L "$checkout_dir/$g" || die invalid_manifest missing_package_dir "$g"
+  done
+
+  for entry in "$checkout_dir"/*; do
+    test -e "$entry" || continue
+    if test -d "$entry" && test ! -L "$entry"; then
+      entry_name="${entry##*/}"
+      case " $seen_group_names $seen_feature_copy_dirs " in
+        *" $entry_name "*) ;;
+        *) die invalid_manifest undeclared_package_dir "$entry_name" ;;
+      esac
+    fi
+  done
 }
 
 select_interactively() {
@@ -2915,44 +4069,78 @@ select_interactively() {
   done < "$SANDBOX/groups.tsv"
 }
 
+lookup_profile_groups() {
+  test -f "$SANDBOX/profiles.tsv" || return 1
+  while IFS='	' read -r pname pgroups || test -n "$pname"; do
+    if test "$pname" = "$1"; then
+      printf '%s\n' "$pgroups"
+      return 0
+    fi
+  done < "$SANDBOX/profiles.tsv"
+  return 1
+}
+
+is_prompt_group() {
+  test -f "$SANDBOX/prompt_groups.txt" || return 1
+  while IFS= read -r pgrp || test -n "$pgrp"; do
+    test "$pgrp" = "$1" && return 0
+  done < "$SANDBOX/prompt_groups.txt"
+  return 1
+}
+
+select_all_groups() {
+  : > "$SANDBOX/selected.txt"
+  : > "$SANDBOX/unselected.txt"
+  while IFS='	' read -r gname desc_en desc_zh || test -n "$gname"; do
+    test -n "$gname" || continue
+    printf '%s\n' "$gname" >> "$SANDBOX/selected.txt"
+  done < "$SANDBOX/groups.tsv"
+}
+
+# Writes selected/unselected in manifest order from a space-separated group set.
+write_selection_set() {
+  : > "$SANDBOX/selected.txt"
+  : > "$SANDBOX/unselected.txt"
+  while IFS='	' read -r gname desc_en desc_zh || test -n "$gname"; do
+    test -n "$gname" || continue
+    case " $1 " in
+      *" $gname "*) printf '%s\n' "$gname" >> "$SANDBOX/selected.txt" ;;
+      *) printf '%s\n' "$gname" >> "$SANDBOX/unselected.txt" ;;
+    esac
+  done < "$SANDBOX/groups.tsv"
+}
+
 resolve_selection() {
   test -n "$SANDBOX" || die lock_failed "$SANDBOX"
   test -f "$SANDBOX/groups.tsv" || die invalid_manifest groups_not_found
 
   case "$SELECTION_MODE" in
-    none|all)
-      : > "$SANDBOX/selected.txt"
-      : > "$SANDBOX/unselected.txt"
-      while IFS='	' read -r gname desc_en desc_zh || test -n "$gname"; do
-        test -n "$gname" || continue
-        printf '%s\n' "$gname" >> "$SANDBOX/selected.txt"
-      done < "$SANDBOX/groups.tsv"
+    none)
+      if profile_groups=$(lookup_profile_groups 'default'); then
+        write_selection_set "$profile_groups"
+      else
+        select_all_groups
+      fi
+      ;;
+    all)
+      select_all_groups
       ;;
     profile)
       test -n "$SELECTION_VALUE" || die missing_option_value '--profile'
-      test -f "$SANDBOX/profiles.tsv" || die unknown_profile "$SELECTION_VALUE"
+      profile_groups=$(lookup_profile_groups "$SELECTION_VALUE") || die unknown_profile "$SELECTION_VALUE"
+      write_selection_set "$profile_groups"
+      ;;
+    prompt)
+      test -n "$SELECTION_VALUE" || die missing_option_value '--prompt'
+      profile_groups=$(lookup_profile_groups 'default') || die no_default_profile
+      is_prompt_group "$SELECTION_VALUE" || die unknown_prompt "$SELECTION_VALUE"
 
-      profile_groups=''
-      found_profile=0
-      while IFS='	' read -r pname pgroups || test -n "$pname"; do
-        if test "$pname" = "$SELECTION_VALUE"; then
-          profile_groups="$pgroups"
-          found_profile=1
-          break
-        fi
-      done < "$SANDBOX/profiles.tsv"
-
-      test "$found_profile" -eq 1 || die unknown_profile "$SELECTION_VALUE"
-
-      : > "$SANDBOX/selected.txt"
-      : > "$SANDBOX/unselected.txt"
-      while IFS='	' read -r gname desc_en desc_zh || test -n "$gname"; do
-        test -n "$gname" || continue
-        case " $profile_groups " in
-          *" $gname "*) printf '%s\n' "$gname" >> "$SANDBOX/selected.txt" ;;
-          *) printf '%s\n' "$gname" >> "$SANDBOX/unselected.txt" ;;
-        esac
-      done < "$SANDBOX/groups.tsv"
+      selected_set="$SELECTION_VALUE"
+      for gname in $profile_groups; do
+        is_prompt_group "$gname" && continue
+        selected_set="$selected_set $gname"
+      done
+      write_selection_set "$selected_set"
       ;;
     groups)
       test -n "$SELECTION_VALUE" || die missing_option_value '--groups'
@@ -3023,6 +4211,525 @@ resolve_selection() {
       die selection_conflict
       ;;
   esac
+
+  if test -f "$SANDBOX/prompt_groups.txt" && test -s "$SANDBOX/prompt_groups.txt"; then
+    prompt_sel_count=0
+    while IFS= read -r sel || test -n "$sel"; do
+      test -n "$sel" || continue
+      while IFS= read -r pgrp || test -n "$pgrp"; do
+        if test "$sel" = "$pgrp"; then
+          prompt_sel_count=$((prompt_sel_count + 1))
+          break
+        fi
+      done < "$SANDBOX/prompt_groups.txt"
+    done < "$SANDBOX/selected.txt"
+    test "$prompt_sel_count" -le 1 || die prompt_conflict
+  fi
+}
+validate_custom_selections() {
+  if test -n "$SELECTED_FONT"; then
+    found_font=0
+    if test -f "$SANDBOX/fonts.tsv"; then
+      while IFS='	' read -r fcask ffamily || test -n "$fcask"; do
+        if test "$fcask" = "$SELECTED_FONT"; then
+          found_font=1
+          break
+        fi
+      done < "$SANDBOX/fonts.tsv"
+    fi
+    test "$found_font" -eq 1 || die invalid_font "$SELECTED_FONT"
+  fi
+
+  if test -n "$SELECTED_BREW"; then
+    cur="$SELECTED_BREW"
+    while :; do
+      has_more=0
+      case "$cur" in
+        *,*)
+          part="${cur%%,*}"
+          cur="${cur#*,}"
+          has_more=1
+          ;;
+        *)
+          part="$cur"
+          cur=''
+          ;;
+      esac
+      trimmed=$(trim_whitespace "$part")
+      test -n "$trimmed" || die invalid_brew '<empty>'
+      found_brew=0
+      if test -f "$SANDBOX/brew.tsv"; then
+        while IFS='	' read -r bname bcask || test -n "$bname"; do
+          if test "$bname" = "$trimmed"; then
+            found_brew=1
+            break
+          fi
+        done < "$SANDBOX/brew.tsv"
+      fi
+      test "$found_brew" -eq 1 || die invalid_brew "$trimmed"
+      test "$has_more" -eq 0 && break
+    done
+  fi
+
+  selected_features_file="$SANDBOX/selected_features.txt"
+  : > "$selected_features_file"
+  if test -n "$SELECTED_FEATURES"; then
+    cur="$SELECTED_FEATURES"
+    while :; do
+      has_more=0
+      case "$cur" in
+        *,*)
+          part="${cur%%,*}"
+          cur="${cur#*,}"
+          has_more=1
+          ;;
+        *)
+          part="$cur"
+          cur=''
+          ;;
+      esac
+      trimmed=$(trim_whitespace "$part")
+      test -n "$trimmed" || die invalid_feature '<empty>'
+      found_feature=0
+      if test -f "$SANDBOX/features.tsv"; then
+        while IFS='	' read -r fname fmacos fden fdzh || test -n "$fname"; do
+          if test "$fname" = "$trimmed"; then
+            found_feature=1
+            break
+          fi
+        done < "$SANDBOX/features.tsv"
+      fi
+      test "$found_feature" -eq 1 || die invalid_feature "$trimmed"
+      if ! /usr/bin/grep -F -x -q -e "$trimmed" "$selected_features_file" 2>/dev/null; then
+        printf '%s\n' "$trimmed" >> "$selected_features_file"
+      fi
+      test "$has_more" -eq 0 && break
+    done
+  fi
+}
+
+stow_selected_packages() {
+  test -f "$SANDBOX/selected.txt" || return 0
+  test -s "$SANDBOX/selected.txt" || return 0
+
+  pkgs=''
+  while IFS= read -r pkg || test -n "$pkg"; do
+    test -n "$pkg" || continue
+    if test -z "$pkgs"; then
+      pkgs="$pkg"
+    else
+      pkgs="$pkgs $pkg"
+    fi
+  done < "$SANDBOX/selected.txt"
+  test -n "$pkgs" || return 0
+
+  if test "$DRY_RUN" -eq 1; then
+    printf 'Would stow packages: %s\n' "$pkgs"
+    return 0
+  fi
+
+  # shellcheck disable=SC2086
+  run_stow -d "$CHECKOUT_DIR" -t "$PHYSICAL_HOME" --dotfiles --no-folding $pkgs || die unsupported_stow 'stow execution failed'
+}
+
+write_font_override() {
+  test -n "$SELECTED_FONT" || return 0
+
+  font_family=''
+  if test -f "$SANDBOX/fonts.tsv"; then
+    while IFS='	' read -r fcask ffamily || test -n "$fcask"; do
+      if test "$fcask" = "$SELECTED_FONT"; then
+        font_family="$ffamily"
+        break
+      fi
+    done < "$SANDBOX/fonts.tsv"
+  fi
+  test -n "$font_family" || die invalid_font "$SELECTED_FONT"
+
+  if test "$DRY_RUN" -eq 1; then
+    printf 'Would write font override %s/.config/ghostty/kaisian.conf: font-family = "%s"\n' "$PHYSICAL_HOME" "$font_family"
+    return 0
+  fi
+
+  ghostty_dir="$PHYSICAL_HOME/.config/ghostty"
+  /bin/mkdir -p "$ghostty_dir" 2>/dev/null || die invalid_targets "failed to create $ghostty_dir"
+  font_conf="$ghostty_dir/kaisian.conf"
+  /bin/rm -f "$font_conf" 2>/dev/null || true
+  ( umask 022 && printf 'font-family = "%s"\n' "$font_family" > "$font_conf" ) || die invalid_targets "failed to write $font_conf"
+  /bin/chmod 644 "$font_conf" 2>/dev/null || true
+}
+
+apply_feature_copies() {
+  test -f "$SANDBOX/selected_features.txt" || return 0
+  test -f "$SANDBOX/feature_copy.tsv" || return 0
+  test -s "$SANDBOX/selected_features.txt" || return 0
+  test -s "$SANDBOX/feature_copy.tsv" || return 0
+
+  while IFS= read -r sel_feat || test -n "$sel_feat"; do
+    test -n "$sel_feat" || continue
+    while IFS='	' read -r fname fc_from fc_to || test -n "$fname"; do
+      test "$fname" = "$sel_feat" || continue
+      test -n "$fc_from" && test -n "$fc_to" || continue
+
+      src_file="$CHECKOUT_DIR/$fc_from"
+      dst_file="$PHYSICAL_HOME/$fc_to"
+
+      if test "$DRY_RUN" -eq 1; then
+        printf 'Would copy %s to %s\n' "$src_file" "$dst_file"
+      else
+        dst_dir="${dst_file%/*}"
+        if test ! -d "$dst_dir"; then
+          /bin/mkdir -p "$dst_dir" 2>/dev/null || die copy_failed "$fc_to" "failed to create directory"
+        fi
+        if test -L "$dst_file"; then
+          /bin/rm -f "$dst_file" 2>/dev/null || true
+        fi
+        /bin/cp -f "$src_file" "$dst_file" 2>/dev/null || die copy_failed "$fc_to" "failed to copy file"
+        test -f "$dst_file" && test ! -L "$dst_file" || die copy_failed "$fc_to" "destination is not a regular file"
+        case "$fc_to" in
+          .config/karabiner/*|.config/karabiner)
+            /bin/chmod 600 "$dst_file" 2>/dev/null || die copy_failed "$fc_to" "failed to chmod"
+            ;;
+          *)
+            /bin/chmod 644 "$dst_file" 2>/dev/null || die copy_failed "$fc_to" "failed to chmod"
+            ;;
+        esac
+      fi
+    done < "$SANDBOX/feature_copy.tsv"
+  done < "$SANDBOX/selected_features.txt"
+}
+
+apply_feature_hotkeys() {
+  test -f "$SANDBOX/selected_features.txt" || return 0
+  test -f "$SANDBOX/feature_hotkeys.tsv" || return 0
+  test -s "$SANDBOX/selected_features.txt" || return 0
+  test -s "$SANDBOX/feature_hotkeys.tsv" || return 0
+
+  defaults_bin='/usr/bin/defaults'
+  if test "${KAISIAN_TESTING-0}" = '1' && test -n "${KAISIAN_DEFAULTS_EXEC-}"; then
+    defaults_bin="$KAISIAN_DEFAULTS_EXEC"
+  elif test -n "${KAISIAN_DEFAULTS_EXEC-}"; then
+    defaults_bin="$KAISIAN_DEFAULTS_EXEC"
+  fi
+
+  activate_settings_bin='/System/Library/PrivateFrameworks/SystemAdministration.framework/Resources/activateSettings'
+  if test "${KAISIAN_TESTING-0}" = '1' && test -n "${KAISIAN_ACTIVATE_SETTINGS_EXEC-}"; then
+    activate_settings_bin="$KAISIAN_ACTIVATE_SETTINGS_EXEC"
+  elif test -n "${KAISIAN_ACTIVATE_SETTINGS_EXEC-}"; then
+    activate_settings_bin="$KAISIAN_ACTIVATE_SETTINGS_EXEC"
+  fi
+
+  applied_any_hotkey=0
+  existing_hotkeys=''
+  read_existing=0
+
+  while IFS= read -r sel_feat || test -n "$sel_feat"; do
+    test -n "$sel_feat" || continue
+    while IFS='	' read -r fname hk_id hk_enabled hk_ascii hk_keycode hk_modifiers || test -n "$fname"; do
+      test "$fname" = "$sel_feat" || continue
+      test -n "$hk_id" || continue
+
+      applied_any_hotkey=1
+
+      if test "$hk_enabled" -eq 1; then
+        dict_val="{ enabled = 1; value = { type = standard; parameters = ( $hk_ascii, $hk_keycode, $hk_modifiers ); }; }"
+      else
+        if test -n "$hk_ascii" && test -n "$hk_keycode" && test -n "$hk_modifiers"; then
+          dict_val="{ enabled = 0; value = { type = standard; parameters = ( $hk_ascii, $hk_keycode, $hk_modifiers ); }; }"
+        else
+          if test "$read_existing" -eq 0; then
+            existing_hotkeys=$("$defaults_bin" read com.apple.symbolichotkeys AppleSymbolicHotKeys 2>/dev/null || true)
+            read_existing=1
+          fi
+
+          existing_params=''
+          if test -n "$existing_hotkeys"; then
+            existing_params=$(printf '%s\n' "$existing_hotkeys" | /usr/bin/awk -v id="$hk_id" '
+              $1 == id && $2 == "=" { in_id = 1; depth = 0; next }
+              in_id {
+                if ($0 ~ /\{/) depth++
+                if ($0 ~ /parameters[[:space:]]*=/) in_params = 1
+                if (in_params && $0 ~ /[0-9]+/) {
+                  gsub(/[^0-9]/, "", $0)
+                  if (length($0) > 0) params = (params ? params ", " : "") $0
+                }
+                if (in_params && $0 ~ /\)/) in_params = 0
+                if ($0 ~ /\}/) {
+                  depth--
+                  if (depth <= 0) { in_id = 0 }
+                }
+              }
+              END { print params }
+            ')
+          fi
+
+          if test -n "$existing_params"; then
+            dict_val="{ enabled = 0; value = { type = standard; parameters = ( $existing_params ); }; }"
+          else
+            dict_val="{ enabled = 0; }"
+          fi
+        fi
+      fi
+
+      if test "$DRY_RUN" -eq 1; then
+        printf 'Would configure symbolic hotkey %s: %s\n' "$hk_id" "$dict_val"
+      else
+        "$defaults_bin" write com.apple.symbolichotkeys AppleSymbolicHotKeys -dict-add "$hk_id" "$dict_val" 2>/dev/null || die hotkey_failed "$hk_id" "defaults write failed"
+      fi
+    done < "$SANDBOX/feature_hotkeys.tsv"
+  done < "$SANDBOX/selected_features.txt"
+
+  if test "$applied_any_hotkey" -eq 1 && test "$DRY_RUN" -eq 0; then
+    if ! "$activate_settings_bin" -u 2>/dev/null; then
+      warn_pfx=$(message warning_prefix 2>/dev/null) || warn_pfx='Warning'
+      warn_msg=$(message activate_settings_failed 2>/dev/null) || warn_msg='Failed to activate settings. Please log out and log back in for hotkey changes to take effect.'
+      printf '%s: %s\n' "$warn_pfx" "$warn_msg" >&2
+    fi
+  fi
+}
+
+generate_tsunpi_inputs() {
+  test "$NO_TSUNPI" -eq 0 || return 0
+
+  if test -z "$RUN_TIMESTAMP"; then
+    if test "${KAISIAN_TESTING-0}" = '1' && test -n "${KAISIAN_TEST_TIME-}"; then
+      RUN_TIMESTAMP="$KAISIAN_TEST_TIME"
+    else
+      RUN_TIMESTAMP=$(/bin/date -u '+%Y%m%dT%H%M%SZ')
+    fi
+  fi
+
+  tsunpi_dir="$STATE_ROOT/$RUN_TIMESTAMP/tsunpi"
+  brewfile_path="$tsunpi_dir/Brewfile"
+  mise_config_path="$tsunpi_dir/mise.toml"
+
+  if test "$DRY_RUN" -eq 1; then
+    printf 'Would generate %s and %s\n' "$brewfile_path" "$mise_config_path"
+    return 0
+  fi
+
+  /bin/mkdir -p "$tsunpi_dir" 2>/dev/null || die invalid_targets "failed to create $tsunpi_dir"
+
+  # 1. Brewfile
+  : > "$brewfile_path"
+  seen_emitted_brew=''
+  # Font cask if selected
+  if test -n "$SELECTED_FONT"; then
+    printf 'cask "%s"\n' "$SELECTED_FONT" >> "$brewfile_path"
+    seen_emitted_brew="$SELECTED_FONT"
+  fi
+  # Gather brew items: CLI selections + selected group dependencies
+  all_brew_items=''
+
+  # CLI selections
+  if test -n "$SELECTED_BREW"; then
+    cur="$SELECTED_BREW"
+    while :; do
+      has_more=0
+      case "$cur" in
+        *,*)
+          part="${cur%%,*}"
+          cur="${cur#*,}"
+          has_more=1
+          ;;
+        *)
+          part="$cur"
+          cur=''
+          ;;
+      esac
+      trimmed=$(trim_whitespace "$part")
+      if test -n "$trimmed"; then
+        case " $all_brew_items " in
+          *" $trimmed "*) ;;
+          *)
+            if test -z "$all_brew_items"; then
+              all_brew_items="$trimmed"
+            else
+              all_brew_items="$all_brew_items $trimmed"
+            fi
+            ;;
+        esac
+      fi
+      test "$has_more" -eq 0 && break
+    done
+  fi
+
+  # Group brew dependencies for selected groups
+  if test -f "$SANDBOX/group_brew_deps.tsv" && test -f "$SANDBOX/selected.txt"; then
+    while IFS= read -r sel_grp || test -n "$sel_grp"; do
+      test -n "$sel_grp" || continue
+      while IFS='	' read -r dep_grp dep_pkg || test -n "$dep_grp"; do
+        if test "$dep_grp" = "$sel_grp" && test -n "$dep_pkg"; then
+          case " $all_brew_items " in
+            *" $dep_pkg "*) ;;
+            *)
+              if test -z "$all_brew_items"; then
+                all_brew_items="$dep_pkg"
+              else
+                all_brew_items="$all_brew_items $dep_pkg"
+              fi
+              ;;
+          esac
+        fi
+      done < "$SANDBOX/group_brew_deps.tsv"
+    done < "$SANDBOX/selected.txt"
+  fi
+
+  # Emit brew / cask lines
+  for item in $all_brew_items; do
+    case " $seen_emitted_brew " in
+      *" $item "*) ;;
+      *)
+        seen_emitted_brew="$seen_emitted_brew $item"
+        is_cask=0
+        if test -f "$SANDBOX/brew.tsv"; then
+          while IFS='	' read -r bname bcask || test -n "$bname"; do
+            if test "$bname" = "$item"; then
+              test "$bcask" = '1' && is_cask=1
+              break
+            fi
+          done < "$SANDBOX/brew.tsv"
+        fi
+        if test "$is_cask" -eq 1; then
+          printf 'cask "%s"\n' "$item" >> "$brewfile_path"
+        else
+          printf 'brew "%s"\n' "$item" >> "$brewfile_path"
+        fi
+        ;;
+    esac
+  done
+
+  # Feature brew dependencies
+  if test -f "$SANDBOX/feature_brew.tsv" && test -f "$SANDBOX/selected_features.txt"; then
+    while IFS= read -r sel_feat || test -n "$sel_feat"; do
+      test -n "$sel_feat" || continue
+      while IFS='	' read -r ffeat fpkg fcask || test -n "$ffeat"; do
+        if test "$ffeat" = "$sel_feat" && test -n "$fpkg"; then
+          case " $seen_emitted_brew " in
+            *" $fpkg "*) ;;
+            *)
+              seen_emitted_brew="$seen_emitted_brew $fpkg"
+              if test "$fcask" = '1'; then
+                printf 'cask "%s"\n' "$fpkg" >> "$brewfile_path"
+              else
+                printf 'brew "%s"\n' "$fpkg" >> "$brewfile_path"
+              fi
+              ;;
+          esac
+        fi
+      done < "$SANDBOX/feature_brew.tsv"
+    done < "$SANDBOX/selected_features.txt"
+  fi
+  /bin/chmod 644 "$brewfile_path" 2>/dev/null || true
+
+  # 2. mise.toml
+  printf '[tools]\n' > "$mise_config_path"
+  if test -n "$SELECTED_LANGS"; then
+    cur="$SELECTED_LANGS"
+    seen_mise_tools=''
+    while :; do
+      has_more=0
+      case "$cur" in
+        *,*)
+          part="${cur%%,*}"
+          cur="${cur#*,}"
+          has_more=1
+          ;;
+        *)
+          part="$cur"
+          cur=''
+          ;;
+      esac
+      trimmed=$(trim_whitespace "$part")
+      if test -n "$trimmed"; then
+        if test "$trimmed" = 'elixir'; then
+          case " $seen_mise_tools " in
+            *" erlang "*) ;;
+            *)
+              seen_mise_tools="$seen_mise_tools erlang"
+              printf 'erlang = "latest"\n' >> "$mise_config_path"
+              ;;
+          esac
+          case " $seen_mise_tools " in
+            *" elixir "*) ;;
+            *)
+              seen_mise_tools="$seen_mise_tools elixir"
+              printf 'elixir = "latest"\n' >> "$mise_config_path"
+              ;;
+          esac
+        else
+          case " $seen_mise_tools " in
+            *" $trimmed "*) ;;
+            *)
+              seen_mise_tools="$seen_mise_tools $trimmed"
+              printf '%s = "latest"\n' "$trimmed" >> "$mise_config_path"
+              ;;
+          esac
+        fi
+      fi
+      test "$has_more" -eq 0 && break
+    done
+  fi
+  /bin/chmod 644 "$mise_config_path" 2>/dev/null || true
+}
+
+run_tsunpi() {
+  test "$NO_TSUNPI" -eq 0 || return 0
+
+  if test -z "$RUN_TIMESTAMP"; then
+    if test "${KAISIAN_TESTING-0}" = '1' && test -n "${KAISIAN_TEST_TIME-}"; then
+      RUN_TIMESTAMP="$KAISIAN_TEST_TIME"
+    else
+      RUN_TIMESTAMP=$(/bin/date -u '+%Y%m%dT%H%M%SZ')
+    fi
+  fi
+
+  tsunpi_dir="$STATE_ROOT/$RUN_TIMESTAMP/tsunpi"
+  brewfile_path="$tsunpi_dir/Brewfile"
+  mise_config_path="$tsunpi_dir/mise.toml"
+
+  loc='en'
+  case "$LANGUAGE" in
+    zh-TW|zh_TW) loc='zh-TW' ;;
+    *) loc='en' ;;
+  esac
+
+  if test "$DRY_RUN" -eq 1; then
+    printf 'Would execute tsunpi with: --brewfile %s --mise-config %s --no-rc --locale %s\n' "$brewfile_path" "$mise_config_path" "$loc"
+    return 0
+  fi
+
+  if test -n "${KAISIAN_TSUNPI_EXEC-}"; then
+    "$KAISIAN_TSUNPI_EXEC" --brewfile "$brewfile_path" --mise-config "$mise_config_path" --no-rc --locale "$loc" || die tsunpi_failed "$?"
+  else
+    /usr/bin/curl -fsSL https://tsunpi.phx.tw | /bin/bash -s -- --brewfile "$brewfile_path" --mise-config "$mise_config_path" --no-rc --locale "$loc" || die tsunpi_failed "$?"
+  fi
+}
+
+print_feature_notes() {
+  test -f "$SANDBOX/selected_features.txt" || return 0
+  test -f "$SANDBOX/feature_notes.tsv" || return 0
+  test -s "$SANDBOX/selected_features.txt" || return 0
+  test -s "$SANDBOX/feature_notes.tsv" || return 0
+
+  while IFS= read -r sel_feat || test -n "$sel_feat"; do
+    test -n "$sel_feat" || continue
+    while IFS='	' read -r fname notes_en notes_zh || test -n "$fname"; do
+      test "$fname" = "$sel_feat" || continue
+      case "$LANGUAGE" in
+        zh-TW|zh_TW)
+          if test -n "$notes_zh"; then
+            printf '%s\n' "$notes_zh"
+          fi
+          ;;
+        *)
+          if test -n "$notes_en"; then
+            printf '%s\n' "$notes_en"
+          fi
+          ;;
+      esac
+    done < "$SANDBOX/feature_notes.tsv"
+  done < "$SANDBOX/selected_features.txt"
 }
 
 main() {
@@ -3049,15 +4756,22 @@ main() {
 
   parse_manifest "$CHECKOUT_DIR/.kaisian.json" "$CHECKOUT_DIR"
   resolve_selection
+  validate_custom_selections
   build_package_map || die invalid_package_tree
   validate_typed_tree || die invalid_package_tree
   preflight_targets || die invalid_targets
   confirm_conflicts || exit 1
   test "${CONFIRMED-0}" -eq 1 || return 0
   move_conflicts || exit 1
+  stow_selected_packages
+  write_font_override
+  apply_feature_copies
+  apply_feature_hotkeys
+  generate_tsunpi_inputs
+  run_tsunpi
+  print_feature_notes
   return 0
 }
-
 if test "${KAISIAN_TESTING-0}" != 1; then
   main "$@"
 fi

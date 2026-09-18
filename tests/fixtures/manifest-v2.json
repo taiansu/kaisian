@@ -1,0 +1,132 @@
+{
+  "schema": 2,
+  "groups": [
+    {
+      "name": "home",
+      "description": {
+        "en": "Home configuration",
+        "zh-TW": "家目錄設定"
+      }
+    },
+    {
+      "name": "prompt-default",
+      "kind": "prompt",
+      "preview": [
+        [
+          {
+            "text": "~/p/kaisian",
+            "color": "blue"
+          },
+          {
+            "text": " [main]",
+            "color": "#7aa2f7",
+            "bg": "#1f2335"
+          }
+        ],
+        [
+          {
+            "text": "$ ",
+            "color": "green"
+          },
+          {
+            "text": "echo hello",
+            "color": "white"
+          }
+        ]
+      ],
+      "description": {
+        "en": "Default prompt",
+        "zh-TW": "預設提示字元"
+      }
+    },
+    {
+      "name": "prompt-pure",
+      "kind": "prompt",
+      "brew": ["gitstatus"],
+      "description": {
+        "en": "Pure prompt",
+        "zh-TW": "Pure 提示字元"
+      }
+    }
+  ],
+  "profiles": {
+    "default": [
+      "home",
+      "prompt-default"
+    ]
+  },
+  "fonts": [
+    {
+      "cask": "font-sauce-code-pro-nerd-font",
+      "family": "SauceCodePro NFM",
+      "preview": "Source Code Pro",
+      "description": {
+        "en": "Sauce Code Pro Nerd Font",
+        "zh-TW": "Sauce Code Pro Nerd Font"
+      }
+    }
+  ],
+  "brew": [
+    {
+      "name": "ripgrep",
+      "description": {
+        "en": "Search tool",
+        "zh-TW": "搜尋工具"
+      }
+    },
+    {
+      "name": "ghostty",
+      "cask": true,
+      "description": {
+        "en": "Terminal emulator",
+        "zh-TW": "終端機模擬器"
+      }
+    },
+    {
+      "name": "gitstatus",
+      "description": {
+        "en": "Async git status daemon",
+        "zh-TW": "非同步 git 狀態 daemon"
+      }
+    }
+  ],
+  "features": [
+    {
+      "name": "karabiner-ime",
+      "macos": true,
+      "brew": [
+        {
+          "name": "karabiner-elements",
+          "cask": true
+        }
+      ],
+      "copy": [
+        {
+          "from": "karabiner/default.json",
+          "to": ".config/karabiner/karabiner.json"
+        }
+      ],
+      "hotkeys": [
+        {
+          "id": 60,
+          "enabled": true,
+          "ascii": 32,
+          "keycode": 49,
+          "modifiers": 1310720
+        },
+        {
+          "id": 61,
+          "enabled": false
+        }
+      ],
+      "description": {
+        "en": "Caps Lock as IME switch: tap to switch between ABC and your last-used input method; hold as Control. Left Control held emits Control+Option. Sets macOS 'previous input source' to ⌃⌥Space (⌘Space stays free for Spotlight/Raycast).",
+        "zh-TW": "Caps Lock 當輸入法切換鍵:輕點在 ABC 與上次使用的輸入法間切換,長按當 Control。長按左 Control 送出 Control+Option。macOS「選擇上一個輸入法」改為 ⌃⌥Space(⌘Space 留給 Spotlight/Raycast)。"
+      },
+      "notes": {
+        "en": "Installs Karabiner-Elements. After setup you must open Karabiner-Elements once and approve its driver extension and Input Monitoring in System Settings. With three or more input sources, Caps Lock toggles between ABC and the most recently used one.",
+        "zh-TW": "會安裝 Karabiner-Elements。安裝後需開啟 Karabiner-Elements 一次,並在系統設定核准驅動程式延伸功能與輸入監控。若有三個以上輸入法,Caps Lock 會在 ABC 與最近使用的輸入法間切換。"
+      }
+    }
+  ]
+}

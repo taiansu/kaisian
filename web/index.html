@@ -1,0 +1,1356 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>kaisian — Set up your Mac</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #ebe7e4;
+      --paper-bg: #f4f0ec;
+      --panel: #f4f2f0;
+      --bar: #eef0f2;
+      --text: rgba(37, 47, 61, 0.96);
+      --muted: rgba(57, 67, 82, 0.84);
+      --line: #cfc9c3;
+      --accent: #5b8fc9;
+      --bar-border: rgba(37, 47, 61, 0.9);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #1c1b1a;
+        --paper-bg: #1c1a18;
+        --panel: #252422;
+        --bar: #2e2c29;
+        --text: rgba(242, 240, 237, 0.96);
+        --muted: rgba(182, 178, 172, 0.84);
+        --line: #44403b;
+        --accent: #7ca8dc;
+        --bar-border: rgba(242, 240, 237, 0.9);
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background-color: var(--paper-bg);
+      /* paper grain: inline SVG fractal noise, lightly contrast-boosted, tinted to the text colour */
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='240'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.65' numOctaves='3' stitchTiles='stitch'/%3E%3CfeComponentTransfer%3E%3CfeFuncA type='linear' slope='1.9' intercept='-0.45'/%3E%3C/feComponentTransfer%3E%3CfeColorMatrix values='0 0 0 0 0.15 0 0 0 0 0.18 0 0 0 0 0.24 0 0 0 0.09 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+      background-size: 240px 240px;
+      color: var(--text);
+      font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+      font-size: 18px;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+    .top-nav {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background-color: var(--bg);
+      border-bottom: 1px solid var(--line);
+      width: 100%;
+    }
+    .nav-container {
+      max-width: 1008px;
+      margin: 0 auto;
+      padding: 16px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .brand-name {
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 15px;
+      font-weight: 700;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      color: var(--text);
+      text-decoration: none;
+    }
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+    }
+    .lang-link {
+      background: transparent;
+      border: none;
+      padding: 4px 0;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 13px;
+      font-weight: 500;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      color: var(--muted);
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    .lang-link:hover {
+      color: var(--text);
+    }
+    .lang-link.active {
+      color: var(--text);
+      border-bottom: 2px solid var(--text);
+    }
+    main {
+      max-width: 1008px;
+      margin: 0 auto;
+      padding: 40px 24px 80px;
+    }
+    .hero {
+      text-align: center;
+      max-width: 760px;
+      margin: 0 auto 36px;
+    }
+    .hero-mark {
+      margin: 0 auto 20px;
+      display: flex;
+      justify-content: center;
+    }
+    h1 {
+      font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+      font-size: 46px;
+      font-weight: 400;
+      font-style: italic;
+      line-height: 1.25;
+      letter-spacing: -0.01em;
+      margin: 0 0 20px;
+      color: var(--text);
+    }
+    .accent {
+      color: var(--accent);
+      font-style: italic;
+    }
+    #intro {
+      font-size: 18px;
+      line-height: 1.6;
+      color: var(--text);
+      margin: 0;
+    }
+    #status {
+      text-align: center;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 14px;
+      color: var(--muted);
+      margin: 16px 0;
+      overflow-wrap: anywhere;
+    }
+    .preview-container {
+      margin-bottom: 36px;
+    }
+    .preview-panel {
+      background-color: #1a1b26;
+      border: 1px solid var(--line);
+      border-radius: 0;
+      padding: 14px 16px;
+      min-height: 82px;
+      overflow-x: auto;
+      white-space: pre;
+      color: #e3e5e5;
+      font-size: 18px;
+      line-height: 1.5;
+      box-sizing: border-box;
+    }
+    .preview-line {
+      display: block;
+      font-size: 18px;
+      line-height: 1.5;
+      min-height: 1.5em;
+    }
+    .preview-segment {
+      display: inline;
+    }
+    .preview-cursor {
+      display: inline-block;
+      width: .55em;
+      height: 1.05em;
+      margin-left: .12em;
+      vertical-align: -.18em;
+      background: #e3e5e5;
+      animation: preview-cursor-blink 1.8s steps(1, end) infinite;
+    }
+    @keyframes preview-cursor-blink {
+      0%, 49% { opacity: 1; }
+      50%, 100% { opacity: 0; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .preview-cursor {
+        animation: none;
+      }
+    }
+    .nf-glyph {
+      font-family: "Symbols Nerd Font", "SauceCodePro NFM", "JetBrainsMono NFM", "FiraCode NFM", "BlexMono NFM", "UbuntuMono NFM";
+      font-family: "Symbols Nerd Font", "SauceCodePro NFM", "JetBrainsMono NFM", "FiraCode NFM", "BlexMono NFM", "UbuntuMono NFM", inherit;
+    }
+    .preview-caption {
+      margin-top: 8px;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    #sections {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 24px;
+    }
+    fieldset {
+      margin: 0;
+      padding: 0 0 16px 0;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 0;
+      min-width: 0;
+    }
+    fieldset::after {
+      content: "";
+      display: table;
+      clear: both;
+    }
+    legend {
+      display: block;
+      width: 100%;
+      box-sizing: border-box;
+      background: var(--bar);
+      border-left: 3px solid var(--bar-border);
+      border-bottom: 1px solid var(--line);
+      padding: 12px 18px;
+      margin: 0 0 12px 0;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 15px;
+      font-weight: 600;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      color: var(--text);
+      float: left;
+    }
+    .select-wrap {
+      padding: 14px 20px 18px;
+      clear: both;
+    }
+    .styled-select {
+      width: 100%;
+      padding: 10px 14px;
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 0;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 14px;
+      cursor: pointer;
+      box-sizing: border-box;
+      -webkit-appearance: none;
+      -moz-appearance: none;
+      appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%235b8fc9' d='M2 4l4 4 4-4'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 14px center;
+      padding-right: 36px;
+    }
+    .choice {
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+      padding: 10px 20px;
+      cursor: pointer;
+      border-bottom: 1px solid rgba(207, 201, 195, 0.35);
+      transition: background 0.15s;
+    }
+    .choice:first-of-type {
+      clear: both;
+    }
+    .choice:last-of-type {
+      border-bottom: none;
+    }
+    .choice:hover {
+      background: rgba(37, 47, 61, 0.03);
+    }
+    .choice input {
+      accent-color: var(--accent);
+      margin: 4px 0 0;
+      width: 16px;
+      height: 16px;
+      flex-shrink: 0;
+      cursor: pointer;
+    }
+    .choice.disabled {
+      opacity: .65;
+      cursor: default;
+    }
+    .choice.disabled input {
+      cursor: default;
+    }
+    .choice strong {
+      display: block;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 15px;
+      font-weight: 600;
+      letter-spacing: .04em;
+      color: var(--text);
+      overflow-wrap: anywhere;
+    }
+    .choice small {
+      display: block;
+      font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+      font-size: 15px;
+      line-height: 1.4;
+      color: var(--muted);
+      overflow-wrap: anywhere;
+      margin-top: 2px;
+    }
+    .choice .note {
+      font-style: italic;
+      margin-top: 4px;
+    }
+    .feature-bullets {
+      margin: 6px 0 6px 18px;
+      padding: 0;
+      font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+      font-size: 15px;
+      line-height: 1.4;
+      color: var(--muted);
+    }
+    .feature-bullets li {
+      margin-bottom: 4px;
+    }
+    .always-installed-list {
+      margin: 12px 20px 12px 36px;
+      padding: 0;
+      clear: both;
+      font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+      font-size: 15px;
+      line-height: 1.6;
+      color: var(--text);
+    }
+    .always-installed-list li {
+      margin-bottom: 6px;
+    }
+    .always-installed-list strong {
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 14px;
+      font-weight: 600;
+      letter-spacing: .04em;
+    }
+    .custom-tools-wrap {
+      padding: 14px 20px 18px;
+      border-top: 1px solid rgba(207, 201, 195, 0.35);
+      clear: both;
+    }
+    .custom-tools-label {
+      display: block;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: .04em;
+      color: var(--text);
+      margin-bottom: 8px;
+    }
+    .styled-input {
+      width: 100%;
+      padding: 10px 14px;
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 0;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 14px;
+      box-sizing: border-box;
+    }
+    .custom-tools-help {
+      font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+      font-size: 14px;
+      color: var(--muted);
+      margin: 8px 0 0;
+      line-height: 1.4;
+    }
+    .custom-tools-help a {
+      color: var(--accent);
+      text-decoration: underline;
+    }
+    .custom-tools-rejected {
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 13px;
+      color: #e88a80;
+      margin-top: 6px;
+    }
+    .command-panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 0;
+      margin-top: 40px;
+      margin-bottom: 0;
+    }
+    .command-bar {
+      display: flex;
+      align-items: stretch;
+      background: var(--bar);
+      border-bottom: 1px solid var(--line);
+    }
+    .command-tab {
+      padding: 10px 24px;
+      background: var(--panel);
+      border-right: 1px solid var(--line);
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      color: var(--text);
+    }
+    .command-label-wrap {
+      display: flex;
+      align-items: center;
+      padding: 0 16px;
+    }
+    .command-label-wrap label {
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 12px;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .command-body {
+      padding: 24px 28px;
+    }
+    .command-input-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 14px;
+    }
+    .command-prompt {
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 16px;
+      font-weight: 500;
+      line-height: 1.5;
+      padding-top: 4px;
+      color: var(--muted);
+      user-select: none;
+      flex-shrink: 0;
+    }
+    #command {
+      flex: 1;
+      background: transparent;
+      border: none;
+      outline: none;
+      resize: none;
+      overflow: hidden;
+      padding: 4px 0;
+      margin: 0;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 15px;
+      line-height: 1.5;
+      color: var(--text);
+      white-space: pre-wrap;
+      word-break: break-all;
+      box-sizing: border-box;
+      height: auto;
+    }
+    .command-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-shrink: 0;
+    }
+    #copy {
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 13px;
+      font-weight: 500;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      color: var(--text);
+      background: transparent;
+      border: 1px solid var(--line);
+      border-radius: 0;
+      padding: 8px 16px;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    #copy:hover:not(:disabled) {
+      background: var(--bar);
+      border-color: var(--text);
+    }
+    #copy:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+    .command-footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-top: 12px;
+    }
+    #notice {
+      font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+      font-size: 14px;
+      color: var(--muted);
+      margin: 0;
+    }
+    #copy-status {
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 12px;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      color: var(--accent);
+      white-space: nowrap;
+    }
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border-width: 0;
+    }
+    [hidden] {
+      display: none !important;
+    }
+    :focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+    @media (max-width: 768px) {
+      #sections {
+        grid-template-columns: 1fr;
+      }
+      main {
+        padding: 24px 16px 48px;
+      }
+      h1 {
+        font-size: 32px;
+      }
+      .command-input-row {
+        flex-wrap: wrap;
+      }
+      .command-actions {
+        width: 100%;
+        justify-content: flex-end;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="top-nav">
+    <div class="nav-container">
+      <div class="nav-brand">
+        <span class="brand-name">kaisian</span>
+      </div>
+      <nav class="nav-links" aria-label="Language">
+        <button type="button" class="lang-link active" data-lang="en">EN</button>
+        <button type="button" class="lang-link" data-lang="zh-TW">繁體中文</button>
+        <label class="sr-only">
+          <span id="language-label">Language</span>
+          <select id="language" aria-label="Language"><option value="en">English</option><option value="zh-TW">繁體中文</option></select>
+        </label>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <div class="hero">
+      <div class="hero-mark" aria-hidden="true">
+        <svg width="40" height="40" viewBox="0 0 40 40" fill="none">
+          <!-- 開線: a line being opened -->
+          <rect x="4" y="18" width="14" height="4" fill="#5b8fc9"/>
+          <rect x="22" y="18" width="14" height="4" fill="#5b8fc9"/>
+          <rect x="18" y="14" width="4" height="12" fill="#e88a80"/>
+        </svg>
+      </div>
+      <h1 id="headline">Pick what looks good.<br>Get what the <span class="accent">pros</span> run.</h1>
+      <p id="intro"></p>
+    </div>
+
+    <p id="status" role="status"></p>
+
+    <div id="preview-container" class="preview-container" hidden>
+      <div id="preview-panel" class="preview-panel" role="region" aria-label="Prompt preview">
+        <div id="preview-content"></div>
+      </div>
+      <div id="preview-caption" class="preview-caption"></div>
+    </div>
+
+    <form id="choices" hidden>
+      <div id="sections"></div>
+    </form>
+
+    <section id="command-section" class="command-panel" aria-labelledby="command-title" hidden>
+      <div class="command-bar">
+        <div class="command-tab">
+          <span id="command-title"></span>
+        </div>
+        <div class="command-label-wrap">
+          <label for="command" id="command-label"></label>
+        </div>
+      </div>
+      <div class="command-body">
+        <div class="command-input-row">
+          <span class="command-prompt" aria-hidden="true">$</span>
+          <textarea id="command" readonly spellcheck="false"></textarea>
+          <div class="command-actions">
+            <button id="copy" type="button" disabled></button>
+          </div>
+        </div>
+        <div class="command-footer">
+          <p id="notice"></p>
+          <span id="copy-status" role="status"></span>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const MANIFEST_URL = "https://raw.githubusercontent.com/taiansu/dotfiles/kaisian/.kaisian.json";
+    const FIXED_LANGS = [
+      { value: "python", label: "python" },
+      { value: "node", label: "node" },
+      { value: "elixir", label: "elixir + erlang" },
+      { value: "rust", label: "rust" },
+      { value: "ruby", label: "ruby" },
+      { value: "bun", label: "bun" },
+    ];
+    const REQUIRED = new Set(["homebrew", "git", "stow", "mise"]);
+    const SAFE_NAME = /^[A-Za-z0-9._@+-]+$/;
+    const LANG_NAME = /^[a-z0-9][a-z0-9._@+-]*$/;
+    const PUA_REGEX = /[\u{E000}-\u{F8FF}\u{F0000}-\u{FFFFF}]/u;
+    const PUA_GLOBAL_REGEX = /([\u{E000}-\u{F8FF}\u{F0000}-\u{FFFFF}]+)/gu;
+
+    const messages = {
+      en: {
+        headline: "Pick what looks good.<br>Get what the <span class=\"accent\">pros</span> run.",
+        intro: "Curated prompts, fonts, and tools — years of tuning, one page of choices.",
+        language: "Language",
+        groups: "1. Prompt style",
+        fonts: "2. Font",
+        brew: "3. Homebrew tools",
+        langs: "4. Languages",
+        features: "5. macOS tweaks",
+        alwaysInstalled: "6. Always installed",
+        otherToolsLabel: "Other tools (comma separated)",
+        otherToolsHelp: "Any tool in the <a href=\"https://mise.jdx.dev/registry.html\" target=\"_blank\" rel=\"noopener\">mise registry</a> works; unknown names abort the install before anything is installed.",
+        rejected: "Rejected",
+        none: "None",
+        commandTitle: "CURL",
+        commandLabel: "Run this command in Terminal:",
+        notice: "Review the installer before running it.",
+        selectGroupPrompt: "Select at least one dotfile group to generate an install command.",
+        copy: "[ COPY ]",
+        copied: "[ COPIED ]",
+        copyFailed: "[ COPY FAILED ]",
+        loading: "Loading available choices…",
+        error: "Could not load the manifest. Check its URL and try reloading.",
+      },
+      "zh-TW": {
+        headline: "直覺點選，<br><span class=\"accent\">職人</span>配置",
+        intro: "精選的提示字元、字型與工具——多年調校，一頁選完。",
+        language: "語言",
+        groups: "1. 提示字元樣式",
+        fonts: "2. 字型",
+        brew: "3. Homebrew 工具",
+        langs: "4. 程式語言",
+        features: "5. macOS 調整",
+        alwaysInstalled: "6. 一律安裝",
+        otherToolsLabel: "其他工具 (逗號分隔)",
+        otherToolsHelp: "<a href=\"https://mise.jdx.dev/registry.html\" target=\"_blank\" rel=\"noopener\">mise registry</a> 內的工具都可以；名稱不存在時會在安裝前中止。",
+        rejected: "已拒絕",
+        none: "不選擇",
+        commandTitle: "CURL",
+        commandLabel: "在終端機執行這行指令：",
+        notice: "執行前請先檢閱安裝程式。",
+        selectGroupPrompt: "請至少選取一個設定檔群組以產生安裝指令。",
+        copy: "[ 複製 ]",
+        copied: "[ 已複製 ]",
+        copyFailed: "[ 複製失敗 ]",
+        loading: "正在載入可選項目…",
+        error: "無法載入資訊清單，請確認網址後重新整理。",
+      },
+    };
+
+    const state = {
+      lang: "en",
+      manifest: null,
+      prompt: "",
+      font: "",
+      brew: new Set(),
+      langs: new Set(["python", "node"]),
+      customInput: "",
+      features: new Set(),
+      error: false,
+    };
+
+    try {
+      const saved = localStorage.getItem("kaisian-language");
+      if (saved === "en" || saved === "zh-TW") state.lang = saved;
+    } catch { /* Storage may be unavailable in private browsing. */ }
+
+    const byId = id => document.getElementById(id);
+    const text = key => messages[state.lang][key];
+    const description = entry => entry.description?.[state.lang] || entry.description?.en || "";
+    const notes = entry => entry.notes?.[state.lang] || entry.notes?.en || "";
+
+    function isMac() {
+      const override = new URLSearchParams(location.search).get("platform");
+      if (override === "mac") return true;
+      if (override) return false;
+      return Boolean(navigator.userAgentData?.platform === "macOS" || /Mac/.test(navigator.platform));
+    }
+
+    let cachedHasNerd = null;
+    function hasAnyNerdFont() {
+      if (cachedHasNerd !== null) return cachedHasNerd;
+      try {
+        const canvas = document.createElement("canvas");
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          cachedHasNerd = false;
+          return false;
+        }
+        const glyph = "\uE0B0";
+        ctx.font = "72px monospace";
+        const wMono = ctx.measureText(glyph).width;
+        ctx.font = '72px "Symbols Nerd Font", "SauceCodePro NFM", "JetBrainsMono NFM", "FiraCode NFM", "BlexMono NFM", "UbuntuMono NFM", monospace';
+        const wNerd = ctx.measureText(glyph).width;
+        if (wMono !== wNerd) {
+          cachedHasNerd = true;
+          return true;
+        }
+
+        const testFonts = ["SauceCodePro NFM", "JetBrainsMono NFM", "FiraCode NFM", "BlexMono NFM", "UbuntuMono NFM"];
+        const str = "mmmmmmmmmmlli";
+        ctx.font = "72px monospace";
+        const monoWidth = ctx.measureText(str).width;
+        for (const fontName of testFonts) {
+          ctx.font = `72px "${fontName}", monospace`;
+          if (ctx.measureText(str).width !== monoWidth) {
+            cachedHasNerd = true;
+            return true;
+          }
+        }
+      } catch {
+        cachedHasNerd = false;
+        return false;
+      }
+      cachedHasNerd = false;
+      return false;
+    }
+
+    function renderSegmentText(parentSpan, text) {
+      if (!PUA_REGEX.test(text)) {
+        parentSpan.textContent = text;
+        return;
+      }
+      if (!hasAnyNerdFont()) {
+        parentSpan.textContent = text.replace(/[\u{E000}-\u{F8FF}\u{F0000}-\u{FFFFF}]/gu, "\u2009");
+        return;
+      }
+      parentSpan.replaceChildren();
+      const parts = text.split(PUA_GLOBAL_REGEX);
+      for (const part of parts) {
+        if (!part) continue;
+        if (PUA_REGEX.test(part)) {
+          const glyphSpan = document.createElement("span");
+          glyphSpan.className = "nf-glyph";
+          glyphSpan.textContent = part;
+          parentSpan.append(glyphSpan);
+        } else {
+          parentSpan.append(part);
+        }
+      }
+    }
+
+    function isValidLang(name) {
+      return LANG_NAME.test(name) && !name.includes("..") && name.length <= 64;
+    }
+
+    function parseCustomLangs(input) {
+      const rawItems = (input || "").split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+      const valid = [];
+      const rejected = [];
+      for (const item of rawItems) {
+        if (isValidLang(item)) {
+          if (!valid.includes(item)) valid.push(item);
+        } else {
+          if (!rejected.includes(item)) rejected.push(item);
+        }
+      }
+      return { valid, rejected };
+    }
+
+    function validateManifest(data) {
+      if (!data || ![1, 2].includes(data.schema) || !Array.isArray(data.groups) || !data.groups.length) throw new Error("Invalid schema or groups");
+      for (const [entries, key] of [[data.groups, "name"], [data.fonts ?? [], "cask"], [data.brew ?? [], "name"], [data.features ?? [], "name"]]) {
+        if (!Array.isArray(entries)) throw new Error("Invalid choices");
+        const names = new Set();
+        for (const entry of entries) {
+          if (!entry || typeof entry[key] !== "string" || !SAFE_NAME.test(entry[key]) || names.has(entry[key])) throw new Error("Invalid or duplicate name");
+          names.add(entry[key]);
+          if (entry.description && Object.values(entry.description).some(value => typeof value !== "string")) throw new Error("Invalid description");
+        }
+      }
+      for (const group of data.groups) {
+        if (group.brew !== undefined) {
+          if (!Array.isArray(group.brew) || group.brew.some(name => typeof name !== "string" || !SAFE_NAME.test(name))) throw new Error("Invalid group brew dependencies");
+        }
+        if (group.preview !== undefined) {
+          if (!Array.isArray(group.preview)) throw new Error("Invalid group preview");
+          for (const line of group.preview) {
+            if (!Array.isArray(line)) throw new Error("Invalid preview line");
+            for (const seg of line) {
+              if (!seg || typeof seg.text !== "string") throw new Error("Invalid preview segment");
+            }
+          }
+        }
+      }
+      if (data.groups.some(group => group.kind !== undefined && group.kind !== "prompt")) throw new Error("Invalid group kind");
+      if ((data.fonts ?? []).some(font => typeof font.family !== "string" || !font.family)) throw new Error("Invalid font family");
+      if ((data.fonts ?? []).some(font => font.preview !== undefined && (typeof font.preview !== "string" || !font.preview))) throw new Error("Invalid font preview");
+      if ((data.brew ?? []).some(entry => entry.cask !== undefined && typeof entry.cask !== "boolean")) throw new Error("Invalid cask flag");
+      if (data.features !== undefined) {
+        if (!Array.isArray(data.features)) throw new Error("Invalid features");
+        for (const feature of data.features) {
+          if (!feature || typeof feature.name !== "string" || !SAFE_NAME.test(feature.name)) throw new Error("Invalid feature name");
+          if (!feature.description || typeof feature.description !== "object" || Object.values(feature.description).some(value => typeof value !== "string")) throw new Error("Invalid feature description");
+          if (feature.macos !== undefined && typeof feature.macos !== "boolean") throw new Error("Invalid feature macos flag");
+          if (feature.notes !== undefined && (typeof feature.notes !== "object" || Object.values(feature.notes).some(value => typeof value !== "string"))) throw new Error("Invalid feature notes");
+        }
+      }
+      const defaults = data.profiles?.default ?? [];
+      if (!Array.isArray(defaults) || defaults.some(name => !data.groups.some(group => group.name === name))) throw new Error("Invalid default profile");
+      if (data.groups.filter(group => group.kind === "prompt" && defaults.includes(group.name)).length > 1) throw new Error("Multiple default prompts");
+      return { ...data, fonts: data.fonts ?? [], brew: (data.brew ?? []).filter(entry => !REQUIRED.has(entry.name)), features: data.features ?? [] };
+    }
+
+    let fontsLoaded = false;
+    function loadGoogleFonts(fonts) {
+      if (fontsLoaded || !fonts?.length) return;
+      const families = fonts
+        .map(f => f.preview)
+        .filter(Boolean)
+        .map(name => `family=${encodeURIComponent(name).replace(/%20/g, "+")}`)
+        .join("&");
+      if (!families) return;
+      const link = document.createElement("link");
+      link.rel = "stylesheet";
+      link.href = `https://fonts.googleapis.com/css2?${families}&display=swap`;
+      document.head.append(link);
+      fontsLoaded = true;
+    }
+
+    function getAlwaysGroups() {
+      if (!state.manifest) return [];
+      const prompts = new Set((state.manifest.groups ?? []).filter(g => g.kind === "prompt").map(g => g.name));
+      return (state.manifest.profiles?.default ?? []).filter(name => !prompts.has(name));
+    }
+
+    function getForcedBrew() {
+      const forced = new Set();
+      if (!state.manifest) return forced;
+      const alwaysGroups = new Set(getAlwaysGroups());
+      for (const group of state.manifest.groups ?? []) {
+        if (alwaysGroups.has(group.name) && Array.isArray(group.brew)) {
+          for (const item of group.brew) {
+            forced.add(item);
+          }
+        }
+      }
+      return forced;
+    }
+
+    function section(key) {
+      const fieldset = document.createElement("fieldset");
+      const legend = document.createElement("legend");
+      legend.textContent = text(key);
+      fieldset.append(legend);
+      byId("sections").append(fieldset);
+      return fieldset;
+    }
+
+    function choice(parent, type, name, value, title, detail, checked, change, disabled = false, note = "") {
+      const label = document.createElement("label");
+      label.className = "choice" + (disabled ? " disabled" : "");
+      const input = document.createElement("input");
+      Object.assign(input, { type, name, value, checked, disabled });
+      input.addEventListener("change", () => { change(input.checked); buildCommand(); });
+      const body = document.createElement("span");
+      const heading = document.createElement("strong");
+      heading.textContent = title;
+      body.append(heading);
+      if (detail) {
+        const small = document.createElement("small");
+        small.textContent = detail;
+        body.append(small);
+      }
+      if (note) {
+        const noteEl = document.createElement("small");
+        noteEl.className = "note";
+        noteEl.textContent = note;
+        body.append(noteEl);
+      }
+      label.append(input, body);
+      parent.append(label);
+    }
+
+    function select(set, value, checked) {
+      if (checked) set.add(value); else set.delete(value);
+    }
+
+    function renderPreview() {
+      const container = byId("preview-content");
+      container.replaceChildren();
+      const promptGroup = state.manifest?.groups?.find(g => g.name === state.prompt);
+      const font = state.manifest?.fonts?.find(f => f.cask === state.font || f.preview === state.font);
+      const fontPreviewFamily = font?.preview || font?.family || "monospace";
+      const fontStack = `"${fontPreviewFamily}", ui-monospace, "SF Mono", Menlo, Consolas, monospace`;
+
+      const panel = byId("preview-panel");
+      panel.style.fontFamily = fontStack;
+      container.style.fontFamily = fontStack;
+
+      const lines = promptGroup?.preview ?? [];
+      if (lines.length) {
+        for (const line of lines) {
+          const lineEl = document.createElement("div");
+          lineEl.className = "preview-line";
+          lineEl.style.fontFamily = fontStack;
+          for (const seg of line) {
+            const span = document.createElement("span");
+            span.className = "preview-segment";
+            span.style.fontFamily = fontStack;
+            if (seg.color) span.style.color = seg.color === "blue" ? "#7aa2f7" : seg.color;
+            if (seg.bg) span.style.backgroundColor = seg.bg;
+            renderSegmentText(span, seg.text);
+            lineEl.append(span);
+          }
+          container.append(lineEl);
+        }
+      } else {
+        const lineEl = document.createElement("div");
+        lineEl.className = "preview-line";
+        lineEl.style.fontFamily = fontStack;
+        const span = document.createElement("span");
+        span.className = "preview-segment";
+        span.textContent = state.prompt ? `~/p/kaisian ❯` : "";
+        span.style.fontFamily = fontStack;
+        lineEl.append(span);
+        container.append(lineEl);
+      }
+
+      const cursor = document.createElement("span");
+      cursor.className = "preview-cursor";
+      cursor.setAttribute("aria-hidden", "true");
+      container.lastElementChild?.append(cursor);
+
+      const promptName = promptGroup?.name || state.prompt || "";
+      const fontName = font?.preview || font?.family || "";
+      byId("preview-caption").textContent = `PREVIEW · ${promptName} · ${fontName}`;
+    }
+
+    function renderPromptSection() {
+      const fieldset = section("groups");
+      const wrap = document.createElement("div");
+      wrap.className = "select-wrap";
+
+      const selectEl = document.createElement("select");
+      selectEl.id = "prompt-select";
+      selectEl.name = "prompt";
+      selectEl.className = "styled-select";
+      selectEl.setAttribute("aria-label", text("groups"));
+
+      const prompts = state.manifest.groups.filter(g => g.kind === "prompt");
+      for (const group of prompts) {
+        const opt = document.createElement("option");
+        opt.value = group.name;
+        opt.textContent = group.name;
+        opt.title = description(group);
+        if (group.name === state.prompt) opt.selected = true;
+        selectEl.append(opt);
+      }
+
+      selectEl.addEventListener("change", event => {
+        state.prompt = event.target.value;
+        renderPreview();
+        buildCommand();
+      });
+
+      wrap.append(selectEl);
+      fieldset.append(wrap);
+    }
+
+    function renderFontSection() {
+      const fieldset = section("fonts");
+      const wrap = document.createElement("div");
+      wrap.className = "select-wrap";
+
+      const selectEl = document.createElement("select");
+      selectEl.id = "font-select";
+      selectEl.name = "font";
+      selectEl.className = "styled-select";
+      selectEl.setAttribute("aria-label", text("fonts"));
+
+      for (const font of state.manifest.fonts) {
+        const opt = document.createElement("option");
+        opt.value = font.cask;
+        opt.textContent = font.preview || font.family;
+        opt.title = description(font);
+        if (font.cask === state.font) opt.selected = true;
+        selectEl.append(opt);
+      }
+
+      const origValueDescriptor = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value");
+      Object.defineProperty(selectEl, "value", {
+        get() { return origValueDescriptor.get.call(this); },
+        set(val) {
+          const found = state.manifest?.fonts?.find(f => f.cask === val || f.preview === val);
+          origValueDescriptor.set.call(this, found ? found.cask : val);
+        }
+      });
+
+      selectEl.addEventListener("change", event => {
+        const val = event.target.value;
+        const found = state.manifest.fonts.find(f => f.cask === val || f.preview === val);
+        state.font = found ? found.cask : val;
+        renderPreview();
+        buildCommand();
+      });
+
+      wrap.append(selectEl);
+      fieldset.append(wrap);
+    }
+
+    function renderBrewSection() {
+      const fieldset = section("brew");
+      const forcedBrew = getForcedBrew();
+      const visibleBrew = (state.manifest.brew ?? []).filter(item => !forcedBrew.has(item.name));
+      for (const entry of visibleBrew) {
+        choice(
+          fieldset,
+          "checkbox",
+          "brew",
+          entry.name,
+          entry.name,
+          description(entry),
+          state.brew.has(entry.name),
+          checked => select(state.brew, entry.name, checked)
+        );
+      }
+    }
+
+    function renderLangsSection() {
+      const fieldset = section("langs");
+      for (const lang of FIXED_LANGS) {
+        choice(
+          fieldset,
+          "checkbox",
+          "lang",
+          lang.value,
+          lang.label,
+          "",
+          state.langs.has(lang.value),
+          checked => {
+            select(state.langs, lang.value, checked);
+            updateCustomLangsUI();
+          }
+        );
+      }
+
+      const customWrap = document.createElement("div");
+      customWrap.className = "custom-tools-wrap";
+
+      const label = document.createElement("label");
+      label.className = "custom-tools-label";
+      label.htmlFor = "custom-langs";
+      label.textContent = text("otherToolsLabel");
+
+      const input = document.createElement("input");
+      input.type = "text";
+      input.id = "custom-langs";
+      input.name = "custom-langs";
+      input.className = "styled-input";
+      input.value = state.customInput;
+      input.placeholder = "e.g. zig, deno";
+
+      const help = document.createElement("p");
+      help.className = "custom-tools-help";
+      help.innerHTML = text("otherToolsHelp");
+
+      const rejectedEl = document.createElement("div");
+      rejectedEl.id = "custom-langs-rejected";
+      rejectedEl.className = "custom-tools-rejected";
+
+      function updateCustomLangsUI() {
+        const { rejected } = parseCustomLangs(state.customInput);
+        if (rejected.length) {
+          rejectedEl.hidden = false;
+          rejectedEl.textContent = `${text("rejected")}: ${rejected.join(", ")}`;
+        } else {
+          rejectedEl.hidden = true;
+          rejectedEl.textContent = "";
+        }
+        buildCommand();
+      }
+
+      input.addEventListener("input", event => {
+        state.customInput = event.target.value;
+        updateCustomLangsUI();
+      });
+
+      customWrap.append(label, input, rejectedEl, help);
+      fieldset.append(customWrap);
+
+      const { rejected } = parseCustomLangs(state.customInput);
+      if (rejected.length) {
+        rejectedEl.hidden = false;
+        rejectedEl.textContent = `${text("rejected")}: ${rejected.join(", ")}`;
+      } else {
+        rejectedEl.hidden = true;
+      }
+    }
+
+    function renderFeaturesSection() {
+      const visibleFeatures = (state.manifest.features ?? []).filter(feature => !feature.macos || isMac());
+      if (!state.manifest.features?.length || !visibleFeatures.length) return;
+
+      const fieldset = section("features");
+      for (const feature of visibleFeatures) {
+        const label = document.createElement("label");
+        label.className = "choice";
+
+        const input = document.createElement("input");
+        Object.assign(input, {
+          type: "checkbox",
+          name: "feature",
+          value: feature.name,
+          checked: state.features.has(feature.name),
+        });
+        input.addEventListener("change", () => {
+          select(state.features, feature.name, input.checked);
+          buildCommand();
+        });
+
+        const body = document.createElement("span");
+        const heading = document.createElement("strong");
+        heading.textContent = feature.name;
+        body.append(heading);
+
+        const descText = description(feature);
+        if (descText) {
+          const sentences = descText
+            .split(/\. |\。/)
+            .map(s => s.trim().replace(/\.$/, ""))
+            .filter(Boolean);
+          if (sentences.length) {
+            const ul = document.createElement("ul");
+            ul.className = "feature-bullets";
+            for (const s of sentences) {
+              const li = document.createElement("li");
+              li.textContent = s;
+              ul.append(li);
+            }
+            body.append(ul);
+          }
+        }
+
+        const noteText = notes(feature);
+        if (noteText) {
+          const noteEl = document.createElement("small");
+          noteEl.className = "note";
+          noteEl.textContent = noteText;
+          body.append(noteEl);
+        }
+
+        label.append(input, body);
+        fieldset.append(label);
+      }
+    }
+
+    function renderAlwaysInstalledSection() {
+      const fieldset = section("alwaysInstalled");
+      const ul = document.createElement("ul");
+      ul.className = "always-installed-list";
+
+      const staticTools = ["Homebrew", "git", "GNU Stow", "mise"];
+      for (const tool of staticTools) {
+        const li = document.createElement("li");
+        const strong = document.createElement("strong");
+        strong.textContent = tool;
+        li.append(strong);
+        ul.append(li);
+      }
+
+      const forcedBrew = getForcedBrew();
+      for (const brewName of forcedBrew) {
+        const entry = (state.manifest.brew ?? []).find(b => b.name === brewName);
+        const li = document.createElement("li");
+        const strong = document.createElement("strong");
+        strong.textContent = brewName;
+        li.append(strong);
+        const desc = entry ? description(entry) : "";
+        if (desc) {
+          li.append(` — ${desc}`);
+        }
+        ul.append(li);
+      }
+
+      fieldset.append(ul);
+    }
+
+    function renderSections() {
+      byId("sections").replaceChildren();
+      if (!state.manifest) return;
+      renderPromptSection();
+      renderFontSection();
+      renderBrewSection();
+      renderLangsSection();
+      renderFeaturesSection();
+      renderAlwaysInstalledSection();
+    }
+
+    function resizeCommand() {
+      const cmd = byId("command");
+      if (!cmd) return;
+      cmd.style.height = "auto";
+      cmd.style.height = `${cmd.scrollHeight}px`;
+    }
+
+    function buildCommand() {
+      if (!state.manifest) return;
+      const manifest = state.manifest;
+      const alwaysGroups = getAlwaysGroups();
+      const groups = [...alwaysGroups];
+      if (state.prompt) {
+        groups.push(state.prompt);
+      }
+      if (!groups.length) {
+        byId("command").value = text("selectGroupPrompt");
+        byId("copy").disabled = true;
+        byId("copy-status").textContent = "";
+        resizeCommand();
+        return;
+      }
+
+      const selectedBrew = (manifest.brew ?? [])
+        .filter(entry => state.brew.has(entry.name))
+        .map(entry => entry.name);
+      const brewList = [...new Set(selectedBrew)];
+
+      const checkedLangs = FIXED_LANGS
+        .filter(l => state.langs.has(l.value))
+        .map(l => l.value);
+      const { valid } = parseCustomLangs(state.customInput);
+      const customLangs = valid.filter(item => !state.langs.has(item));
+      const langs = [...checkedLangs, ...customLangs];
+
+      const features = (manifest.features ?? [])
+        .filter(feature => (!feature.macos || isMac()) && state.features.has(feature.name))
+        .map(feature => feature.name);
+
+      const parts = ["curl -fsSL https://kaisian.phx.tw | bash -s -- --yes"];
+      const defaults = manifest.profiles?.default ?? [];
+      if (!defaults.length) {
+        parts.push("--groups", groups.join(","));
+      } else if (state.prompt && !defaults.includes(state.prompt)) {
+        parts.push("--prompt", state.prompt);
+      }
+      if (state.font) parts.push("--font", state.font);
+      if (brewList.length) parts.push("--brew", brewList.join(","));
+      if (langs.length) parts.push("--langs", langs.join(","));
+      if (features.length) parts.push("--features", features.join(","));
+      parts.push("--lang", state.lang);
+
+      byId("command").value = parts.join(" ");
+      resizeCommand();
+      byId("copy").disabled = false;
+      byId("copy-status").textContent = "";
+    }
+
+    function render() {
+      document.documentElement.lang = state.lang;
+      document.title = state.lang === "en" ? "kaisian — Set up your Mac" : "kaisian — 設定你的 Mac";
+      byId("language").value = state.lang;
+      byId("language").setAttribute("aria-label", text("language"));
+      for (const [id, key] of [
+        ["intro", "intro"],
+        ["language-label", "language"],
+        ["command-title", "commandTitle"],
+        ["command-label", "commandLabel"],
+        ["notice", "notice"],
+        ["copy", "copy"]
+      ]) {
+        const el = byId(id);
+        if (el) el.textContent = text(key);
+      }
+      if (byId("headline")) byId("headline").innerHTML = text("headline");
+      document.querySelectorAll(".lang-link").forEach(btn => {
+        btn.classList.toggle("active", btn.dataset.lang === state.lang);
+      });
+      byId("status").textContent = state.error ? text("error") : state.manifest ? "" : text("loading");
+      byId("preview-container").hidden = !state.manifest;
+      byId("choices").hidden = !state.manifest;
+      byId("command-section").hidden = !state.manifest;
+      if (state.manifest) {
+        loadGoogleFonts(state.manifest.fonts);
+        renderPreview();
+        renderSections();
+        buildCommand();
+      }
+    }
+
+    byId("language").addEventListener("change", event => {
+      state.lang = event.target.value;
+      try { localStorage.setItem("kaisian-language", state.lang); } catch { /* Keep in-memory */ }
+      render();
+    });
+    document.querySelectorAll(".lang-link").forEach(btn => {
+      btn.addEventListener("click", () => {
+        byId("language").value = btn.dataset.lang;
+        byId("language").dispatchEvent(new Event("change"));
+      });
+    });
+    byId("choices").addEventListener("submit", event => event.preventDefault());
+    byId("copy").addEventListener("click", async () => {
+      let copied = false;
+      try {
+        await navigator.clipboard.writeText(byId("command").value);
+        copied = true;
+      } catch {
+        byId("command").focus();
+        byId("command").select();
+        try { copied = document.execCommand("copy"); } catch { /* Leave manual */ }
+      }
+      byId("copy-status").textContent = text(copied ? "copied" : "copyFailed");
+    });
+
+    window.addEventListener("resize", resizeCommand);
+
+    async function loadManifest() {
+      render();
+      try {
+        const url = new URLSearchParams(location.search).get("manifest") || MANIFEST_URL;
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        state.manifest = validateManifest(await response.json());
+
+        const prompts = (state.manifest.groups ?? []).filter(g => g.kind === "prompt");
+        const defaultPrompt = (state.manifest.profiles?.default ?? []).find(name => prompts.some(p => p.name === name)) || prompts[0]?.name || "";
+        state.prompt = defaultPrompt;
+        state.font = state.manifest.fonts?.[0]?.cask || "";
+      } catch {
+        state.error = true;
+      }
+      render();
+    }
+
+    loadManifest();
+  </script>
+</body>
+</html>
