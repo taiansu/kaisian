@@ -86,7 +86,7 @@ of its top-level stow package directory.
       "name": "karabiner-ime",
       "macos": true,
       "brew": [{"name": "karabiner-elements", "cask": true}],
-      "copy": [{"from": "karabiner/default.json", "to": ".config/karabiner/karabiner.json"}],
+      "copy": [{"from": "home/dot-config/karabiner/karabiner.json", "to": ".config/karabiner/karabiner.json"}],
       "hotkeys": [
         {"id": 60, "enabled": true, "ascii": 32, "keycode": 49, "modifiers": 1310720},
         {"id": 61, "enabled": false}
@@ -114,11 +114,12 @@ stow, or mise as optional tools.
 
 ## Web page and deployment
 
-The single-file page uses no framework or build step. It fetches the manifest
-from the dotfiles repository's **kaisian branch**; change `MANIFEST_URL` at the
-top of the script in `web/index.html` when that layout is published elsewhere.
-The installer source and pinned dotfiles revision must also contain the matching
-manifest and package layout before generated commands can be used end to end.
+The single-file page uses no framework or build step. In production it fetches
+the manifest from the dotfiles repository's **kaisian branch**; change
+`REMOTE_MANIFEST_URL` at the top of the script in `web/index.html` when that
+layout is published elsewhere. The installer source and selected dotfiles ref
+must also contain the matching manifest and package layout before generated
+commands can be used end to end.
 
 Local preview (Python 3):
 
@@ -126,12 +127,13 @@ Local preview (Python 3):
 python3 -m http.server 8765 --directory web
 ```
 
-Open `http://localhost:8765/?manifest=fixtures/manifest.json`. The fixture includes
-three fonts and eight optional tools; `?manifest=<url>` can point to another
-manifest (cross-origin URLs need CORS). English / Traditional Chinese selection
-is remembered locally. The page defaults to the default profile and
-Python/Elixir/Node, omits empty flags, and offers a copy button with a manual-copy
-fallback.
+Open `http://localhost:8765/`. On localhost the page loads
+`fixtures/manifest.json` without browser caching; keep that fixture identical to
+the canonical `.kaisian.json` in the dotfiles repository. `?manifest=<url>` can
+point to another manifest (cross-origin URLs need CORS). English / Traditional
+Chinese selection is remembered locally. The page defaults to the default
+profile and Python/Elixir/Node, omits empty flags, and offers a copy button with
+a manual-copy fallback.
 
 Deploy to Cloudflare Workers with Wrangler:
 

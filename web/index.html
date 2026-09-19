@@ -158,7 +158,7 @@
     }
     .preview-line {
       display: block;
-      font-size: 18px;
+      font-size: 20px;
       line-height: 1.5;
       min-height: 1.5em;
     }
@@ -610,7 +610,12 @@
   </main>
 
   <script>
-    const MANIFEST_URL = "https://raw.githubusercontent.com/taiansu/dotfiles/kaisian/.kaisian.json";
+    const REMOTE_MANIFEST_URL = "https://raw.githubusercontent.com/taiansu/dotfiles/kaisian/.kaisian.json";
+    const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+    const IS_LOCAL = LOCAL_HOSTS.has(location.hostname);
+    const DEFAULT_MANIFEST_URL = IS_LOCAL
+      ? "fixtures/manifest.json"
+      : REMOTE_MANIFEST_URL;
     const FIXED_LANGS = [
       { value: "python", label: "python" },
       { value: "node", label: "node" },
@@ -652,11 +657,11 @@
       },
       "zh-TW": {
         headline: "直覺點選，<br><span class=\"accent\">職人</span>配置",
-        intro: "精選的提示字元、字型與工具——多年調校，一頁選完。",
+        intro: "精選的提示字元、字型與工具——多年調校，一行安裝。",
         language: "語言",
         groups: "1. 提示字元樣式",
         fonts: "2. 字型",
-        brew: "3. Homebrew 工具",
+        brew: "3. 安裝工具",
         langs: "4. 程式語言",
         features: "5. macOS 調整",
         alwaysInstalled: "6. 一律安裝",
@@ -1335,8 +1340,8 @@
     async function loadManifest() {
       render();
       try {
-        const url = new URLSearchParams(location.search).get("manifest") || MANIFEST_URL;
-        const response = await fetch(url);
+        const url = new URLSearchParams(location.search).get("manifest") || DEFAULT_MANIFEST_URL;
+        const response = await fetch(url, IS_LOCAL ? { cache: "no-store" } : undefined);
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         state.manifest = validateManifest(await response.json());
 
