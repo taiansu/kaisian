@@ -132,8 +132,10 @@ Open `http://localhost:8765/`. On localhost the page loads
 the canonical `.kaisian.json` in the dotfiles repository. `?manifest=<url>` can
 point to another manifest (cross-origin URLs need CORS). English / Traditional
 Chinese selection is remembered locally. The page defaults to the default
-profile and Python/Elixir/Node, omits empty flags, and offers a copy button with
-a manual-copy fallback.
+profile, the first font, every optional Homebrew tool, Python, and Node. Custom
+mise tool names are validated against the installer's format rules; invalid
+input disables command copying. Empty flags are omitted, and the copy button
+has a manual-copy fallback.
 
 Deploy to Cloudflare Workers with Wrangler:
 

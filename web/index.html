@@ -338,6 +338,14 @@
       font-weight: 600;
       letter-spacing: .04em;
     }
+    .always-installed-list small {
+      display: block;
+      font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+      font-size: 15px;
+      line-height: 1.4;
+      color: var(--muted);
+      margin-top: 2px;
+    }
     .custom-tools-wrap {
       padding: 14px 20px 18px;
       border-top: 1px solid rgba(207, 201, 195, 0.35);
@@ -362,6 +370,10 @@
       font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
       font-size: 14px;
       box-sizing: border-box;
+    }
+    .styled-input[aria-invalid="true"] {
+      border-color: #e88a80;
+      outline-color: #e88a80;
     }
     .custom-tools-help {
       font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
@@ -642,8 +654,14 @@
         features: "5. macOS tweaks",
         alwaysInstalled: "6. Always installed",
         otherToolsLabel: "Other tools (comma separated)",
-        otherToolsHelp: "Any tool in the <a href=\"https://mise.jdx.dev/registry.html\" target=\"_blank\" rel=\"noopener\">mise registry</a> works; unknown names abort the install before anything is installed.",
-        rejected: "Rejected",
+        otherToolsHelp: "Names must start with a lowercase letter or number, use only lowercase letters, numbers, <code>. _ @ + -</code>, contain no <code>..</code>, and be at most 64 characters. Installation also checks the <a href=\"https://mise.jdx.dev/registry.html\" target=\"_blank\" rel=\"noopener\">mise registry</a>.",
+        invalidLangs: "Invalid names",
+        emptyLang: "<empty>",
+        invalidLangPrompt: "Fix invalid language names before generating the install command.",
+        homebrewDescription: "Package manager for macOS",
+        gitDescription: "Distributed version control system",
+        stowDescription: "Symlink manager for dotfiles",
+        miseDescription: "Programming language and tool version manager",
         none: "None",
         commandTitle: "CURL",
         commandLabel: "Run this command in Terminal:",
@@ -666,8 +684,14 @@
         features: "5. macOS 調整",
         alwaysInstalled: "6. 一律安裝",
         otherToolsLabel: "其他工具 (逗號分隔)",
-        otherToolsHelp: "<a href=\"https://mise.jdx.dev/registry.html\" target=\"_blank\" rel=\"noopener\">mise registry</a> 內的工具都可以；名稱不存在時會在安裝前中止。",
-        rejected: "已拒絕",
+        otherToolsHelp: "名稱須以小寫英文字母或數字開頭，後續僅可使用小寫英數與 <code>. _ @ + -</code>，不可包含 <code>..</code>，且最多 64 字元；安裝前仍會檢查 <a href=\"https://mise.jdx.dev/registry.html\" target=\"_blank\" rel=\"noopener\">mise registry</a>。",
+        invalidLangs: "格式錯誤",
+        emptyLang: "<空白>",
+        invalidLangPrompt: "請先修正無效的程式語言名稱，再產生安裝指令。",
+        homebrewDescription: "macOS 套件管理器",
+        gitDescription: "分散式版本控制系統",
+        stowDescription: "以符號連結管理設定檔",
+        miseDescription: "程式語言與工具版本管理器",
         none: "不選擇",
         commandTitle: "CURL",
         commandLabel: "在終端機執行這行指令：",
@@ -778,7 +802,8 @@
     }
 
     function parseCustomLangs(input) {
-      const rawItems = (input || "").split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+      if (input === "") return { valid: [], rejected: [] };
+      const rawItems = input.split(",").map(s => s.trim());
       const valid = [];
       const rejected = [];
       for (const item of rawItems) {
@@ -1085,40 +1110,35 @@
       input.placeholder = "e.g. zig, deno";
 
       const help = document.createElement("p");
+      help.id = "custom-langs-help";
       help.className = "custom-tools-help";
       help.innerHTML = text("otherToolsHelp");
+      input.setAttribute("aria-describedby", "custom-langs-rejected custom-langs-help");
 
       const rejectedEl = document.createElement("div");
       rejectedEl.id = "custom-langs-rejected";
       rejectedEl.className = "custom-tools-rejected";
 
-      function updateCustomLangsUI() {
+      function syncCustomLangsUI() {
         const { rejected } = parseCustomLangs(state.customInput);
-        if (rejected.length) {
-          rejectedEl.hidden = false;
-          rejectedEl.textContent = `${text("rejected")}: ${rejected.join(", ")}`;
-        } else {
-          rejectedEl.hidden = true;
-          rejectedEl.textContent = "";
-        }
-        buildCommand();
+        const hasError = rejected.length > 0;
+        input.setAttribute("aria-invalid", String(hasError));
+        input.setCustomValidity(hasError ? text("invalidLangPrompt") : "");
+        rejectedEl.hidden = !hasError;
+        rejectedEl.textContent = hasError
+          ? `${text("invalidLangs")}: ${rejected.map(item => item || text("emptyLang")).join(", ")}`
+          : "";
       }
 
       input.addEventListener("input", event => {
         state.customInput = event.target.value;
-        updateCustomLangsUI();
+        syncCustomLangsUI();
+        buildCommand();
       });
 
       customWrap.append(label, input, rejectedEl, help);
       fieldset.append(customWrap);
-
-      const { rejected } = parseCustomLangs(state.customInput);
-      if (rejected.length) {
-        rejectedEl.hidden = false;
-        rejectedEl.textContent = `${text("rejected")}: ${rejected.join(", ")}`;
-      } else {
-        rejectedEl.hidden = true;
-      }
+      syncCustomLangsUI();
     }
 
     function renderFeaturesSection() {
@@ -1183,27 +1203,31 @@
       const ul = document.createElement("ul");
       ul.className = "always-installed-list";
 
-      const staticTools = ["Homebrew", "git", "GNU Stow", "mise"];
-      for (const tool of staticTools) {
+      function addTool(name, detail) {
         const li = document.createElement("li");
         const strong = document.createElement("strong");
-        strong.textContent = tool;
+        strong.textContent = name;
         li.append(strong);
+        if (detail) {
+          const small = document.createElement("small");
+          small.textContent = detail;
+          li.append(small);
+        }
         ul.append(li);
       }
+
+      const staticTools = [
+        ["Homebrew", text("homebrewDescription")],
+        ["git", text("gitDescription")],
+        ["GNU Stow", text("stowDescription")],
+        ["mise", text("miseDescription")],
+      ];
+      for (const [name, detail] of staticTools) addTool(name, detail);
 
       const forcedBrew = getForcedBrew();
       for (const brewName of forcedBrew) {
         const entry = (state.manifest.brew ?? []).find(b => b.name === brewName);
-        const li = document.createElement("li");
-        const strong = document.createElement("strong");
-        strong.textContent = brewName;
-        li.append(strong);
-        const desc = entry ? description(entry) : "";
-        if (desc) {
-          li.append(` — ${desc}`);
-        }
-        ul.append(li);
+        addTool(brewName, entry ? description(entry) : "");
       }
 
       fieldset.append(ul);
@@ -1243,6 +1267,15 @@
         return;
       }
 
+      const { valid, rejected } = parseCustomLangs(state.customInput);
+      if (rejected.length) {
+        byId("command").value = text("invalidLangPrompt");
+        byId("copy").disabled = true;
+        byId("copy-status").textContent = "";
+        resizeCommand();
+        return;
+      }
+
       const selectedBrew = (manifest.brew ?? [])
         .filter(entry => state.brew.has(entry.name))
         .map(entry => entry.name);
@@ -1251,7 +1284,6 @@
       const checkedLangs = FIXED_LANGS
         .filter(l => state.langs.has(l.value))
         .map(l => l.value);
-      const { valid } = parseCustomLangs(state.customInput);
       const customLangs = valid.filter(item => !state.langs.has(item));
       const langs = [...checkedLangs, ...customLangs];
 
@@ -1349,6 +1381,12 @@
         const defaultPrompt = (state.manifest.profiles?.default ?? []).find(name => prompts.some(p => p.name === name)) || prompts[0]?.name || "";
         state.prompt = defaultPrompt;
         state.font = state.manifest.fonts?.[0]?.cask || "";
+        const forcedBrew = getForcedBrew();
+        state.brew = new Set(
+          (state.manifest.brew ?? [])
+            .map(entry => entry.name)
+            .filter(name => !forcedBrew.has(name))
+        );
       } catch {
         state.error = true;
       }
