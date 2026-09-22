@@ -5906,8 +5906,8 @@ prompt_conflict_case() {
   return 0
 }
 
-# CLI unknown options: --font unknown, --brew unknown, --langs unknown
-cli_unknown_options_case() {
+# CLI rejects malformed language, font, and Homebrew selections
+cli_invalid_options_case() {
   checkout="$ROOT/checkout_cli_opts"
   mkdir -p "$checkout/home" "$checkout/prompt-default" "$checkout/prompt-pure" "$checkout/karabiner"
   echo '{"profiles":[]}' > "$checkout/karabiner/default.json"
@@ -5935,11 +5935,11 @@ cli_unknown_options_case() {
     assert_contains "$out_font" "Invalid font" || exit 1
     SELECTED_FONT=''
 
-    # 3. Invalid brew
-    SELECTED_BREW='unknown-brew-pkg'
+    # 3. Malformed custom brew name
+    SELECTED_BREW='Unknown-Brew-Pkg'
     out_brew=$(validate_custom_selections 2>&1)
     test $? -ne 0 || exit 1
-    assert_contains "$out_brew" "Invalid brew" || exit 1
+    assert_contains "$out_brew" "Invalid Homebrew package name" || exit 1
     SELECTED_BREW=''
 
     cleanup
@@ -5948,6 +5948,70 @@ cli_unknown_options_case() {
   ) || return 1
   return 0
 }
+# Custom Homebrew names resolve to formulae/casks before Brewfile generation
+custom_brew_resolution_case() {
+  checkout="$ROOT/checkout_custom_brew"
+  mkdir -p "$checkout/home" "$checkout/prompt-default" "$checkout/prompt-pure" "$checkout/karabiner"
+  echo '{"profiles":[]}' > "$checkout/karabiner/default.json"
+  cp "$(dirname "$SCRIPT")/tests/fixtures/manifest-v2.json" "$checkout/.kaisian.json"
+
+  (
+    export KAISIAN_TESTING=1
+    export KAISIAN_TEST_TIME='20260922T120000Z'
+    brew_log="$ROOT/custom_brew.log"
+    export KAISIAN_BREW_LOG="$brew_log"
+    export KAISIAN_BREW_CASKS='visual-studio-code'
+    export KAISIAN_BREW_MISSING=''
+    . "$SCRIPT"
+    test_home=$(make_home)
+    HOME="$test_home"
+    PHYSICAL_HOME="$test_home"
+    STATE_ROOT="$test_home/state"
+    BREW_EXEC="$KAISIAN_BREW_EXEC"
+    acquire_lock || exit 1
+    trap 'cleanup' EXIT
+
+    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+    SELECTION_MODE='profile'
+    SELECTION_VALUE='default'
+    resolve_selection || exit 1
+
+    : > "$brew_log"
+    SELECTED_BREW='ripgrep,jq,visual-studio-code,jq'
+    validate_custom_selections || exit 1
+    test "$(cat "$SANDBOX/custom_brew.tsv")" = "$(printf 'jq\t0\nvisual-studio-code\t1')" || exit 1
+    assert_contains "$(cat "$brew_log")" 'info --json=v2 -- jq' || exit 1
+    assert_contains "$(cat "$brew_log")" 'info --json=v2 -- visual-studio-code' || exit 1
+    if assert_contains "$(cat "$brew_log")" 'info --json=v2 -- ripgrep'; then
+      exit 1
+    fi
+
+    generate_install_inputs || exit 1
+    brewfile="$STATE_ROOT/$KAISIAN_TEST_TIME/Brewfile"
+    assert_contains "$(cat "$brewfile")" 'brew "ripgrep"' || exit 1
+    assert_contains "$(cat "$brewfile")" 'brew "jq"' || exit 1
+    assert_contains "$(cat "$brewfile")" 'cask "visual-studio-code"' || exit 1
+
+    export KAISIAN_BREW_MISSING='does-not-exist'
+    SELECTED_BREW='does-not-exist'
+    out_missing=$(validate_custom_selections 2>&1)
+    test $? -ne 0 || exit 1
+    assert_contains "$out_missing" "was not found as a formula or cask" || exit 1
+
+    export KAISIAN_BREW_MISSING=''
+    DRY_RUN=1
+    BREW_EXEC=''
+    SELECTED_BREW='wget'
+    out_dry=$(validate_custom_selections 2>&1) || exit 1
+    assert_contains "$out_dry" "Would resolve Homebrew package type: wget" || exit 1
+
+    cleanup
+    trap - EXIT
+    exit 0
+  ) || return 1
+  return 0
+}
+
 
 # Generated Brewfile, mise.toml (elixir -> erlang first), and font file content
 generated_install_inputs_and_font_content_case() {
@@ -6762,7 +6826,8 @@ run_case 'Task 5 partial failure preservation and manual restore guidance' task5
 run_case 'Task 5 readonly constants environment injection immunity' task5_readonly_env_injection_case
 run_case 'schema 2 manifest parsing and dependency catalog validation' schema_2_manifest_parsing_case
 run_case 'two prompt groups selected triggers prompt_conflict' prompt_conflict_case
-run_case 'cli unknown options --font, --brew, and --langs fail' cli_unknown_options_case
+run_case 'cli malformed --font, --brew, and --langs values fail' cli_invalid_options_case
+run_case 'custom Homebrew formulae and casks resolve before Brewfile generation' custom_brew_resolution_case
 run_case 'generated Brewfile, mise.toml, and font file content' generated_install_inputs_and_font_content_case
 run_case 'brew bundle and mise install execution, --stow-only, and --dry-run' install_execution_and_flags_case
 run_case 'bootstrap fake brew records install git stow only for missing ones' bootstrap_fake_brew_records_missing_case

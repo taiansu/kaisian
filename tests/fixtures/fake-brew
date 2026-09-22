@@ -6,6 +6,28 @@ if test -n "$log_file"; then
   /bin/mkdir -p "$(/usr/bin/dirname "$log_file")" 2>/dev/null || true
   printf '%s\n' "$*" >> "$log_file"
 fi
+if test $# -gt 0 && test "$1" = "info"; then
+  pkg=''
+  for arg in "$@"; do
+    case "$arg" in
+      info|--json=v2|--) ;;
+      *) pkg="$arg" ;;
+    esac
+  done
+  case " ${KAISIAN_BREW_MISSING-} " in
+    *" $pkg "*) exit 1 ;;
+  esac
+  case " ${KAISIAN_BREW_CASKS-} " in
+    *" $pkg "*)
+      printf '{"formulae":[],"casks":[{"token":"%s"}]}\n' "$pkg"
+      ;;
+    *)
+      printf '{"formulae":[{"name":"%s"}],"casks":[]}\n' "$pkg"
+      ;;
+  esac
+  exit 0
+fi
+
 
 if test $# -gt 0 && test "$1" = "install"; then
   shift

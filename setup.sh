@@ -1245,7 +1245,9 @@ message_en() {
     backup_root) printf 'Backup root: %s' "${1-}" ;;
     manual_restore) printf 'Restore manually with: mv %s %s' "${1-}" "${2-}" ;;
     invalid_font) printf "Invalid font '%s'. It is not declared in the manifest." "${1-}" ;;
-    invalid_brew) printf "Invalid brew package '%s'. It is not declared in the manifest." "${1-}" ;;
+    invalid_brew) printf "Invalid Homebrew package name '%s'." "${1-}" ;;
+    brew_not_found) printf "Homebrew package '%s' was not found as a formula or cask." "${1-}" ;;
+    brew_resolve_dry_run) printf "Would resolve Homebrew package type: %s" "${1-}" ;;
     invalid_lang) printf "Invalid language '%s'." "${1-}" ;;
     invalid_feature) printf "Invalid feature '%s'. It is not declared in the manifest." "${1-}" ;;
     copy_failed) printf "Failed to copy feature file '%s' (%s)." "${1-}" "${2-}" ;;
@@ -1420,7 +1422,9 @@ message_zh_tw() {
     backup_root) printf '備份根目錄：%s' "${1-}" ;;
     manual_restore) printf '手動還原指令：mv %s %s' "${1-}" "${2-}" ;;
     invalid_font) printf '無效的字型「%s」。未在 manifest 中宣告。' "${1-}" ;;
-    invalid_brew) printf '無效的 Homebrew 套件「%s」。未在 manifest 中宣告。' "${1-}" ;;
+    invalid_brew) printf '無效的 Homebrew 套件名稱「%s」。' "${1-}" ;;
+    brew_not_found) printf '找不到 Homebrew formula 或 cask「%s」。' "${1-}" ;;
+    brew_resolve_dry_run) printf '將會辨識 Homebrew 套件類型：%s' "${1-}" ;;
     invalid_lang) printf '無效的語言「%s」。' "${1-}" ;;
     invalid_feature) printf '無效的 feature「%s」。未在 manifest 中宣告。' "${1-}" ;;
     copy_failed) printf '複製 feature 檔案失敗「%s」（%s）。' "${1-}" "${2-}" ;;
@@ -3137,6 +3141,18 @@ is_valid_name() {
   esac
 }
 
+is_valid_brew_name() {
+  token=$1
+  test -n "$token" || return 1
+  test ${#token} -le 64 || return 1
+  case "$token" in
+    *..*) return 1 ;;
+    [!abcdefghijklmnopqrstuvwxyz0123456789]*) return 1 ;;
+    *[!abcdefghijklmnopqrstuvwxyz0123456789._@+-]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 is_valid_lang() {
   token=$1
   test -n "$token" || return 1
@@ -4305,6 +4321,34 @@ resolve_selection() {
     test "$prompt_sel_count" -le 1 || die prompt_conflict
   fi
 }
+resolve_custom_brew() {
+  rb_name=$1
+  if test -z "$BREW_EXEC"; then
+    if test "$DRY_RUN" -eq 1; then
+      rb_msg=$(message brew_resolve_dry_run "$rb_name" 2>/dev/null) || rb_msg="Would resolve Homebrew package type: $rb_name"
+      printf '%s\n' "$rb_msg"
+      return 0
+    fi
+    die bootstrap_failed 'Homebrew is required to resolve custom packages'
+  fi
+
+  rb_json="$SANDBOX/brew_info.json"
+  if ! HOMEBREW_NO_AUTO_UPDATE=1 "$BREW_EXEC" info --json=v2 -- "$rb_name" > "$rb_json" 2>/dev/null; then
+    /bin/rm -f "$rb_json" 2>/dev/null || true
+    die brew_not_found "$rb_name"
+  fi
+  rb_plutil="${PLUTIL_EXEC:-/usr/bin/plutil}"
+  rb_formula_count=$("$rb_plutil" -extract formulae raw "$rb_json" 2>/dev/null || true)
+  rb_cask_count=$("$rb_plutil" -extract casks raw "$rb_json" 2>/dev/null || true)
+  if test "$rb_formula_count" = '1' && test "$rb_cask_count" = '0'; then
+    printf '%s\t0\n' "$rb_name" >> "$SANDBOX/custom_brew.tsv"
+  elif test "$rb_formula_count" = '0' && test "$rb_cask_count" = '1'; then
+    printf '%s\t1\n' "$rb_name" >> "$SANDBOX/custom_brew.tsv"
+  else
+    die brew_not_found "$rb_name"
+  fi
+}
+
 validate_custom_selections() {
   if test -n "$SELECTED_FONT"; then
     found_font=0
@@ -4319,8 +4363,11 @@ validate_custom_selections() {
     test "$found_font" -eq 1 || die invalid_font "$SELECTED_FONT"
   fi
 
+  custom_brew_tsv="$SANDBOX/custom_brew.tsv"
+  : > "$custom_brew_tsv"
   if test -n "$SELECTED_BREW"; then
     cur="$SELECTED_BREW"
+    seen_selected_brew=''
     while :; do
       has_more=0
       case "$cur" in
@@ -4336,16 +4383,25 @@ validate_custom_selections() {
       esac
       trimmed=$(trim_whitespace "$part")
       test -n "$trimmed" || die invalid_brew '<empty>'
-      found_brew=0
-      if test -f "$SANDBOX/brew.tsv"; then
-        while IFS='	' read -r bname bcask || test -n "$bname"; do
-          if test "$bname" = "$trimmed"; then
-            found_brew=1
-            break
+      case " $seen_selected_brew " in
+        *" $trimmed "*) ;;
+        *)
+          seen_selected_brew="$seen_selected_brew $trimmed"
+          found_brew=0
+          if test -f "$SANDBOX/brew.tsv"; then
+            while IFS='	' read -r bname bcask || test -n "$bname"; do
+              if test "$bname" = "$trimmed"; then
+                found_brew=1
+                break
+              fi
+            done < "$SANDBOX/brew.tsv"
           fi
-        done < "$SANDBOX/brew.tsv"
-      fi
-      test "$found_brew" -eq 1 || die invalid_brew "$trimmed"
+          if test "$found_brew" -eq 0; then
+            is_valid_brew_name "$trimmed" || die invalid_brew "$trimmed"
+            resolve_custom_brew "$trimmed"
+          fi
+          ;;
+      esac
       test "$has_more" -eq 0 && break
     done
   fi
@@ -4663,15 +4719,27 @@ generate_install_inputs() {
       *)
         seen_emitted_brew="$seen_emitted_brew $item"
         is_cask=0
+        found_brew_type=0
         if test -f "$SANDBOX/brew.tsv"; then
           while IFS='	' read -r bname bcask || test -n "$bname"; do
             if test "$bname" = "$item"; then
-              test "$bcask" = '1' && is_cask=1
+              is_cask="$bcask"
+              found_brew_type=1
               break
             fi
           done < "$SANDBOX/brew.tsv"
         fi
-        if test "$is_cask" -eq 1; then
+        if test "$found_brew_type" -eq 0 && test -f "$SANDBOX/custom_brew.tsv"; then
+          while IFS='	' read -r bname bcask || test -n "$bname"; do
+            if test "$bname" = "$item"; then
+              is_cask="$bcask"
+              found_brew_type=1
+              break
+            fi
+          done < "$SANDBOX/custom_brew.tsv"
+        fi
+        test "$found_brew_type" -eq 1 || die brew_not_found "$item"
+        if test "$is_cask" = '1'; then
           printf 'cask "%s"\n' "$item" >> "$brewfile_path"
         else
           printf 'brew "%s"\n' "$item" >> "$brewfile_path"

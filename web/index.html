@@ -638,7 +638,7 @@
     ];
     const REQUIRED = new Set(["homebrew", "git", "stow", "mise"]);
     const SAFE_NAME = /^[A-Za-z0-9._@+-]+$/;
-    const LANG_NAME = /^[a-z0-9][a-z0-9._@+-]*$/;
+    const CUSTOM_TOOL_NAME = /^[a-z0-9][a-z0-9._@+-]*$/;
     const PUA_REGEX = /[\u{E000}-\u{F8FF}\u{F0000}-\u{FFFFF}]/u;
     const PUA_GLOBAL_REGEX = /([\u{E000}-\u{F8FF}\u{F0000}-\u{FFFFF}]+)/gu;
 
@@ -653,11 +653,14 @@
         langs: "4. Languages",
         features: "5. macOS tweaks",
         alwaysInstalled: "6. Always installed",
-        otherToolsLabel: "Other tools (comma separated)",
+        otherBrewLabel: "Other Homebrew tools (comma separated)",
+        otherBrewHelp: "Official Homebrew formula and cask names only; third-party taps using <code>/</code> are not supported. Names follow the same 64-character format rules below. Before applying dotfiles, the installer asks Homebrew to verify and classify each name. <a href=\"https://formulae.brew.sh/\" target=\"_blank\" rel=\"noopener\">Browse packages</a>.",
+        otherToolsLabel: "Other mise tools (comma separated)",
         otherToolsHelp: "Names must start with a lowercase letter or number, use only lowercase letters, numbers, <code>. _ @ + -</code>, contain no <code>..</code>, and be at most 64 characters. Installation also checks the <a href=\"https://mise.jdx.dev/registry.html\" target=\"_blank\" rel=\"noopener\">mise registry</a>.",
-        invalidLangs: "Invalid names",
-        emptyLang: "<empty>",
-        invalidLangPrompt: "Fix invalid language names before generating the install command.",
+        invalidNames: "Invalid names",
+        emptyName: "<empty>",
+        invalidBrewPrompt: "Fix invalid Homebrew package names before generating the install command.",
+        invalidLangPrompt: "Fix invalid mise tool names before generating the install command.",
         homebrewDescription: "Package manager for macOS",
         gitDescription: "Distributed version control system",
         stowDescription: "Symlink manager for dotfiles",
@@ -683,11 +686,14 @@
         langs: "4. 程式語言",
         features: "5. macOS 調整",
         alwaysInstalled: "6. 一律安裝",
-        otherToolsLabel: "其他工具 (逗號分隔)",
+        otherBrewLabel: "其他 Homebrew 工具 (逗號分隔)",
+        otherBrewHelp: "僅支援官方 Homebrew formula 與 cask 名稱；不支援含 <code>/</code> 的第三方 tap。名稱使用下方相同的 64 字元格式規則；installer 會在套用設定檔前請 Homebrew 驗證並辨識每個名稱。<a href=\"https://formulae.brew.sh/\" target=\"_blank\" rel=\"noopener\">瀏覽套件</a>。",
+        otherToolsLabel: "其他 mise 工具 (逗號分隔)",
         otherToolsHelp: "名稱須以小寫英文字母或數字開頭，後續僅可使用小寫英數與 <code>. _ @ + -</code>，不可包含 <code>..</code>，且最多 64 字元；安裝前仍會檢查 <a href=\"https://mise.jdx.dev/registry.html\" target=\"_blank\" rel=\"noopener\">mise registry</a>。",
-        invalidLangs: "格式錯誤",
-        emptyLang: "<空白>",
-        invalidLangPrompt: "請先修正無效的程式語言名稱，再產生安裝指令。",
+        invalidNames: "格式錯誤",
+        emptyName: "<空白>",
+        invalidBrewPrompt: "請先修正無效的 Homebrew 套件名稱，再產生安裝指令。",
+        invalidLangPrompt: "請先修正無效的 mise 工具名稱，再產生安裝指令。",
         homebrewDescription: "macOS 套件管理器",
         gitDescription: "分散式版本控制系統",
         stowDescription: "以符號連結管理設定檔",
@@ -711,8 +717,9 @@
       prompt: "",
       font: "",
       brew: new Set(),
+      customBrewInput: "",
       langs: new Set(["python", "node"]),
-      customInput: "",
+      customLangInput: "",
       features: new Set(),
       error: false,
     };
@@ -797,17 +804,17 @@
       }
     }
 
-    function isValidLang(name) {
-      return LANG_NAME.test(name) && !name.includes("..") && name.length <= 64;
+    function isValidCustomToolName(name) {
+      return CUSTOM_TOOL_NAME.test(name) && !name.includes("..") && name.length <= 64;
     }
 
-    function parseCustomLangs(input) {
+    function parseCustomTools(input) {
       if (input === "") return { valid: [], rejected: [] };
       const rawItems = input.split(",").map(s => s.trim());
       const valid = [];
       const rejected = [];
       for (const item of rawItems) {
-        if (isValidLang(item)) {
+        if (isValidCustomToolName(item)) {
           if (!valid.includes(item)) valid.push(item);
         } else {
           if (!rejected.includes(item)) rejected.push(item);
@@ -1057,6 +1064,63 @@
       fieldset.append(wrap);
     }
 
+    function appendCustomToolsField(fieldset, {
+      id,
+      labelKey,
+      helpKey,
+      promptKey,
+      placeholder,
+      value,
+      onInput,
+    }) {
+      const customWrap = document.createElement("div");
+      customWrap.className = "custom-tools-wrap";
+
+      const label = document.createElement("label");
+      label.className = "custom-tools-label";
+      label.htmlFor = id;
+      label.textContent = text(labelKey);
+
+      const input = document.createElement("input");
+      input.type = "text";
+      input.id = id;
+      input.name = id;
+      input.className = "styled-input";
+      input.value = value;
+      input.placeholder = placeholder;
+
+      const help = document.createElement("p");
+      help.id = `${id}-help`;
+      help.className = "custom-tools-help";
+      help.innerHTML = text(helpKey);
+      input.setAttribute("aria-describedby", `${id}-rejected ${id}-help`);
+
+      const rejectedEl = document.createElement("div");
+      rejectedEl.id = `${id}-rejected`;
+      rejectedEl.className = "custom-tools-rejected";
+
+      function syncValidation() {
+        const { rejected } = parseCustomTools(input.value);
+        const hasError = rejected.length > 0;
+        input.setAttribute("aria-invalid", String(hasError));
+        input.setCustomValidity(hasError ? text(promptKey) : "");
+        rejectedEl.hidden = !hasError;
+        rejectedEl.textContent = hasError
+          ? `${text("invalidNames")}: ${rejected.map(item => item || text("emptyName")).join(", ")}`
+          : "";
+      }
+
+      input.addEventListener("input", event => {
+        onInput(event.target.value);
+        syncValidation();
+        buildCommand();
+      });
+
+      customWrap.append(label, input, rejectedEl, help);
+      fieldset.append(customWrap);
+      syncValidation();
+    }
+
     function renderBrewSection() {
       const fieldset = section("brew");
       const forcedBrew = getForcedBrew();
@@ -1073,6 +1137,15 @@
           checked => select(state.brew, entry.name, checked)
         );
       }
+      appendCustomToolsField(fieldset, {
+        id: "custom-brew",
+        labelKey: "otherBrewLabel",
+        helpKey: "otherBrewHelp",
+        promptKey: "invalidBrewPrompt",
+        placeholder: "e.g. jq, visual-studio-code",
+        value: state.customBrewInput,
+        onInput: value => { state.customBrewInput = value; },
+      });
     }
 
     function renderLangsSection() {
@@ -1093,52 +1166,15 @@
         );
       }
 
-      const customWrap = document.createElement("div");
-      customWrap.className = "custom-tools-wrap";
-
-      const label = document.createElement("label");
-      label.className = "custom-tools-label";
-      label.htmlFor = "custom-langs";
-      label.textContent = text("otherToolsLabel");
-
-      const input = document.createElement("input");
-      input.type = "text";
-      input.id = "custom-langs";
-      input.name = "custom-langs";
-      input.className = "styled-input";
-      input.value = state.customInput;
-      input.placeholder = "e.g. zig, deno";
-
-      const help = document.createElement("p");
-      help.id = "custom-langs-help";
-      help.className = "custom-tools-help";
-      help.innerHTML = text("otherToolsHelp");
-      input.setAttribute("aria-describedby", "custom-langs-rejected custom-langs-help");
-
-      const rejectedEl = document.createElement("div");
-      rejectedEl.id = "custom-langs-rejected";
-      rejectedEl.className = "custom-tools-rejected";
-
-      function syncCustomLangsUI() {
-        const { rejected } = parseCustomLangs(state.customInput);
-        const hasError = rejected.length > 0;
-        input.setAttribute("aria-invalid", String(hasError));
-        input.setCustomValidity(hasError ? text("invalidLangPrompt") : "");
-        rejectedEl.hidden = !hasError;
-        rejectedEl.textContent = hasError
-          ? `${text("invalidLangs")}: ${rejected.map(item => item || text("emptyLang")).join(", ")}`
-          : "";
-      }
-
-      input.addEventListener("input", event => {
-        state.customInput = event.target.value;
-        syncCustomLangsUI();
-        buildCommand();
+      appendCustomToolsField(fieldset, {
+        id: "custom-langs",
+        labelKey: "otherToolsLabel",
+        helpKey: "otherToolsHelp",
+        promptKey: "invalidLangPrompt",
+        placeholder: "e.g. zig, deno",
+        value: state.customLangInput,
+        onInput: value => { state.customLangInput = value; },
       });
-
-      customWrap.append(label, input, rejectedEl, help);
-      fieldset.append(customWrap);
-      syncCustomLangsUI();
     }
 
     function renderFeaturesSection() {
@@ -1267,8 +1303,17 @@
         return;
       }
 
-      const { valid, rejected } = parseCustomLangs(state.customInput);
-      if (rejected.length) {
+      const { valid: customBrew, rejected: rejectedBrew } = parseCustomTools(state.customBrewInput);
+      if (rejectedBrew.length) {
+        byId("command").value = text("invalidBrewPrompt");
+        byId("copy").disabled = true;
+        byId("copy-status").textContent = "";
+        resizeCommand();
+        return;
+      }
+
+      const { valid: customLangs, rejected: rejectedLangs } = parseCustomTools(state.customLangInput);
+      if (rejectedLangs.length) {
         byId("command").value = text("invalidLangPrompt");
         byId("copy").disabled = true;
         byId("copy-status").textContent = "";
@@ -1279,13 +1324,13 @@
       const selectedBrew = (manifest.brew ?? [])
         .filter(entry => state.brew.has(entry.name))
         .map(entry => entry.name);
-      const brewList = [...new Set(selectedBrew)];
+      const brewList = [...new Set([...selectedBrew, ...customBrew])];
 
       const checkedLangs = FIXED_LANGS
         .filter(l => state.langs.has(l.value))
         .map(l => l.value);
-      const customLangs = valid.filter(item => !state.langs.has(item));
-      const langs = [...checkedLangs, ...customLangs];
+      const extraLangs = customLangs.filter(item => !state.langs.has(item));
+      const langs = [...checkedLangs, ...extraLangs];
 
       const features = (manifest.features ?? [])
         .filter(feature => (!feature.macos || isMac()) && state.features.has(feature.name))

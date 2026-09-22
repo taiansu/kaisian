@@ -24,7 +24,7 @@ not selectable tools. Homebrew installation may require a sudo password.
 | `--interactive` | Select groups with fzf, if installed; optional terminal-only mode. |
 | `--all` | Select every group; still subject to the one-prompt limit. |
 | `--font CASK` | Select a cask from the manifest's `fonts` array. |
-| `--brew NAME[,NAME...]` | Select names from the manifest's `brew` array. |
+| `--brew NAME[,NAME...]` | Select catalog entries or add official Homebrew formula/cask names. Extra names are verified and classified by Homebrew before dotfiles are applied. |
 | `--langs LANG[,LANG...]` | Select tools to install via mise (e.g. `python,node` or any tool in the mise registry); Elixir also installs Erlang. |
 | `--features NAME[,NAME...]` | Select features from the manifest's `features` array. |
 | `--stow-only` | Bootstrap and stow, and write the font override, but do not install packages or languages. |
@@ -48,11 +48,15 @@ the main file and treats repeated `font-family` as fallbacks, so the reset makes
 chosen font primary. Your stowed Ghostty configuration should include
 `config-file = ?~/.config/ghostty/kaisian.conf`; put CJK or emoji fallbacks in a
 second include listed after it. Generated inputs are stored under the installer's
-state directory at `<run-timestamp>/{Brewfile,mise.toml}`. The Brewfile is installed
-with `brew bundle`; the mise configuration is copied to
-`~/.config/mise/conf.d/kaisian.toml` and applied with `mise install` after every tool
-name is checked against the mise registry. Shell rc files are never edited; shell
-integration belongs to your dotfiles.
+state directory at `<run-timestamp>/{Brewfile,mise.toml}`. Catalog Homebrew
+entries use their manifest type; additional `--brew` names must use lowercase
+Homebrew package syntax without third-party tap paths (`/`). Before moving
+conflicts or applying dotfiles, the installer asks Homebrew to verify each
+additional name and classify it as a formula or cask, then writes the complete
+Brewfile and installs it with `brew bundle`. The mise configuration is copied
+to `~/.config/mise/conf.d/kaisian.toml` and applied with `mise install` after
+tool name is checked against the mise registry. Shell rc files are never edited;
+shell integration belongs to your dotfiles.
 
 For local testing, `KAISIAN_MISE_EXEC` selects a replacement mise executable,
 `KAISIAN_BREW_EXEC` selects a replacement brew executable,
@@ -133,9 +137,10 @@ the canonical `.kaisian.json` in the dotfiles repository. `?manifest=<url>` can
 point to another manifest (cross-origin URLs need CORS). English / Traditional
 Chinese selection is remembered locally. The page defaults to the default
 profile, the first font, every optional Homebrew tool, Python, and Node. Custom
-mise tool names are validated against the installer's format rules; invalid
-input disables command copying. Empty flags are omitted, and the copy button
-has a manual-copy fallback.
+Homebrew and mise names are validated against the installer's format rules;
+invalid input disables command copying. Homebrew performs authoritative
+existence and formula/cask classification during installer preflight. Empty
+flags are omitted, and the copy button has a manual-copy fallback.
 
 Deploy to Cloudflare Workers with Wrangler:
 
