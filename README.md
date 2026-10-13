@@ -150,8 +150,13 @@ bun x wrangler dev
 bun x wrangler deploy
 ```
 
-`wrangler.jsonc` imports HTML as text. Browser requests whose `Accept` header
-includes `text/html` receive the page; other requests receive a 302 redirect to
+`wrangler.jsonc` imports HTML as text and declares `kaisian.phx.tw` as a Workers
+Custom Domain. `wrangler deploy` deploys the Worker and binds that domain; the
+logged-in Cloudflare account must own the `phx.tw` zone.
+Browser requests whose `Accept` header includes `text/html` receive the page;
+other requests receive a 302 redirect to
 `https://raw.githubusercontent.com/taiansu/kaisian/main/setup.sh`.
-Attach `kaisian.phx.tw` as a custom domain to the `kaisian` Worker in Cloudflare.
 The local fixture is for the Python preview and is not served by the Worker.
+For `wrangler dev`, override the local default with
+`?manifest=https://raw.githubusercontent.com/taiansu/dotfiles/kaisian/.kaisian.json`.
+Local Wrangler build artifacts and caches under `.wrangler/` are git-ignored.
