@@ -97,6 +97,16 @@
       color: var(--text);
       border-bottom: 2px solid var(--text);
     }
+    .nav-group {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+    }
+    .nav-divider {
+      width: 1px;
+      height: 16px;
+      background: var(--line);
+    }
     main {
       max-width: 1008px;
       margin: 0 auto;
@@ -558,9 +568,16 @@
       <div class="nav-brand">
         <span class="brand-name">kaisian</span>
       </div>
-      <nav class="nav-links" aria-label="Language">
-        <button type="button" class="lang-link active" data-lang="en">EN</button>
-        <button type="button" class="lang-link" data-lang="zh-TW">繁體中文</button>
+      <nav class="nav-links" aria-label="Settings">
+        <span class="nav-group" role="group" id="platform-group" aria-label="Platform">
+          <button type="button" class="lang-link" data-platform="mac">macOS</button>
+          <button type="button" class="lang-link" data-platform="windows">Windows</button>
+        </span>
+        <span class="nav-divider" aria-hidden="true"></span>
+        <span class="nav-group" role="group" aria-label="Language">
+          <button type="button" class="lang-link active" data-lang="en">EN</button>
+          <button type="button" class="lang-link" data-lang="zh-TW">繁體中文</button>
+        </span>
         <label class="sr-only">
           <span id="language-label">Language</span>
           <select id="language" aria-label="Language"><option value="en">English</option><option value="zh-TW">繁體中文</option></select>
@@ -607,7 +624,7 @@
       </div>
       <div class="command-body">
         <div class="command-input-row">
-          <span class="command-prompt" aria-hidden="true">$</span>
+          <span class="command-prompt" id="command-prompt" aria-hidden="true">$</span>
           <textarea id="command" readonly spellcheck="false"></textarea>
           <div class="command-actions">
             <button id="copy" type="button" disabled></button>
@@ -647,14 +664,19 @@
         headline: "Pick what looks good.<br>Get what the <span class=\"accent\">pros</span> run.",
         intro: "Curated prompts, fonts, and tools — years of tuning, one page of choices.",
         language: "Language",
-        groups: "1. Prompt style",
-        fonts: "2. Font",
-        brew: "3. Homebrew tools",
-        langs: "4. Languages",
-        features: "5. macOS tweaks",
-        alwaysInstalled: "6. Always installed",
+        pageTitle: "kaisian — Set up your Mac",
+        pageTitleWindows: "kaisian — Set up Windows + WSL",
+        groups: "Prompt style",
+        fonts: "Font",
+        brew: "Homebrew tools",
+        langs: "Languages",
+        features: "macOS tweaks",
+        featuresWindows: "Extras",
+        windowsTerminal: "Windows Terminal",
+        alwaysInstalled: "Always installed",
         otherBrewLabel: "Other Homebrew tools (comma separated)",
         otherBrewHelp: "Official Homebrew formula and cask names only; third-party taps using <code>/</code> are not supported. Names follow the same 64-character format rules below. Before applying dotfiles, the installer asks Homebrew to verify and classify each name. <a href=\"https://formulae.brew.sh/\" target=\"_blank\" rel=\"noopener\">Browse packages</a>.",
+        otherBrewHelpWindows: "Official Homebrew formula names only; casks are macOS-only and are rejected in WSL, and third-party taps using <code>/</code> are not supported. Names follow the same 64-character format rules below. Before applying dotfiles, the installer asks Homebrew to verify each name. <a href=\"https://formulae.brew.sh/\" target=\"_blank\" rel=\"noopener\">Browse packages</a>.",
         otherToolsLabel: "Other mise tools (comma separated)",
         otherToolsHelp: "Names must start with a lowercase letter or number, use only lowercase letters, numbers, <code>. _ @ + -</code>, contain no <code>..</code>, and be at most 64 characters. Installation also checks the <a href=\"https://mise.jdx.dev/registry.html\" target=\"_blank\" rel=\"noopener\">mise registry</a>.",
         invalidNames: "Invalid names",
@@ -662,13 +684,24 @@
         invalidBrewPrompt: "Fix invalid Homebrew package names before generating the install command.",
         invalidLangPrompt: "Fix invalid mise tool names before generating the install command.",
         homebrewDescription: "Package manager for macOS",
+        homebrewDescriptionWindows: "Package manager, installed inside WSL",
         gitDescription: "Distributed version control system",
         stowDescription: "Symlink manager for dotfiles",
         miseDescription: "Programming language and tool version manager",
+        wslDescription: "Ubuntu on WSL, installed if missing (asks for administrator approval)",
+        zshDescription: "Set as the default login shell in WSL",
+        windowsTerminalDescription: "Installed if missing, otherwise upgraded as the last step; uses the chosen font",
+        skipTerminalUpgrade: "Skip the Windows Terminal upgrade",
+        skipTerminalUpgradeHelp: "An already installed Windows Terminal is upgraded after setup finishes; the upgrade may close the window running the installer.",
+        keepDefaultTerminal: "Keep my current default terminal",
+        keepDefaultTerminalHelp: "Otherwise Windows Terminal becomes the default terminal application.",
         none: "None",
         commandTitle: "CURL",
+        commandTitleWindows: "POWERSHELL",
         commandLabel: "Run this command in Terminal:",
+        commandLabelWindows: "Run this command in PowerShell on Windows 11:",
         notice: "Review the installer before running it.",
+        noticeWindows: "Review setup.ps1 and setup.sh before running them. Requires Windows 11.",
         selectGroupPrompt: "Select at least one dotfile group to generate an install command.",
         copy: "[ COPY ]",
         copied: "[ COPIED ]",
@@ -680,14 +713,19 @@
         headline: "直覺點選，<br><span class=\"accent\">職人</span>配置",
         intro: "精選的提示字元、字型與工具——多年調校，一行安裝。",
         language: "語言",
-        groups: "1. 提示字元樣式",
-        fonts: "2. 字型",
-        brew: "3. 安裝工具",
-        langs: "4. 程式語言",
-        features: "5. macOS 調整",
-        alwaysInstalled: "6. 一律安裝",
+        pageTitle: "kaisian — 設定你的 Mac",
+        pageTitleWindows: "kaisian — 設定 Windows + WSL",
+        groups: "提示字元樣式",
+        fonts: "字型",
+        brew: "安裝工具",
+        langs: "程式語言",
+        features: "macOS 調整",
+        featuresWindows: "其他選項",
+        windowsTerminal: "Windows Terminal",
+        alwaysInstalled: "一律安裝",
         otherBrewLabel: "其他 Homebrew 工具 (逗號分隔)",
         otherBrewHelp: "僅支援官方 Homebrew formula 與 cask 名稱；不支援含 <code>/</code> 的第三方 tap。名稱使用下方相同的 64 字元格式規則；installer 會在套用設定檔前請 Homebrew 驗證並辨識每個名稱。<a href=\"https://formulae.brew.sh/\" target=\"_blank\" rel=\"noopener\">瀏覽套件</a>。",
+        otherBrewHelpWindows: "僅支援官方 Homebrew formula 名稱；cask 只適用於 macOS，在 WSL 會被拒絕，也不支援含 <code>/</code> 的第三方 tap。名稱使用下方相同的 64 字元格式規則；installer 會在套用設定檔前請 Homebrew 驗證每個名稱。<a href=\"https://formulae.brew.sh/\" target=\"_blank\" rel=\"noopener\">瀏覽套件</a>。",
         otherToolsLabel: "其他 mise 工具 (逗號分隔)",
         otherToolsHelp: "名稱須以小寫英文字母或數字開頭，後續僅可使用小寫英數與 <code>. _ @ + -</code>，不可包含 <code>..</code>，且最多 64 字元；安裝前仍會檢查 <a href=\"https://mise.jdx.dev/registry.html\" target=\"_blank\" rel=\"noopener\">mise registry</a>。",
         invalidNames: "格式錯誤",
@@ -695,13 +733,24 @@
         invalidBrewPrompt: "請先修正無效的 Homebrew 套件名稱，再產生安裝指令。",
         invalidLangPrompt: "請先修正無效的 mise 工具名稱，再產生安裝指令。",
         homebrewDescription: "macOS 套件管理器",
+        homebrewDescriptionWindows: "套件管理器，安裝在 WSL 內",
         gitDescription: "分散式版本控制系統",
         stowDescription: "以符號連結管理設定檔",
         miseDescription: "程式語言與工具版本管理器",
+        wslDescription: "WSL 上的 Ubuntu，缺少時安裝（需要系統管理員核准）",
+        zshDescription: "設為 WSL 的預設登入 shell",
+        windowsTerminalDescription: "缺少時安裝，否則在最後一步升級；使用所選字型",
+        skipTerminalUpgrade: "略過 Windows Terminal 升級",
+        skipTerminalUpgradeHelp: "已安裝的 Windows Terminal 會在安裝完成後升級；升級可能會關閉正在執行安裝程式的視窗。",
+        keepDefaultTerminal: "保留目前的預設終端機",
+        keepDefaultTerminalHelp: "否則會把 Windows Terminal 設為預設終端機應用程式。",
         none: "不選擇",
         commandTitle: "CURL",
+        commandTitleWindows: "POWERSHELL",
         commandLabel: "在終端機執行這行指令：",
+        commandLabelWindows: "在 Windows 11 的 PowerShell 執行這行指令：",
         notice: "執行前請先檢閱安裝程式。",
+        noticeWindows: "執行前請先檢閱 setup.ps1 與 setup.sh。需要 Windows 11。",
         selectGroupPrompt: "請至少選取一個設定檔群組以產生安裝指令。",
         copy: "[ 複製 ]",
         copied: "[ 已複製 ]",
@@ -721,6 +770,9 @@
       langs: new Set(["python", "node"]),
       customLangInput: "",
       features: new Set(),
+      platform: "mac",
+      skipTerminalUpgrade: false,
+      keepDefaultTerminal: false,
       error: false,
     };
 
@@ -729,16 +781,41 @@
       if (saved === "en" || saved === "zh-TW") state.lang = saved;
     } catch { /* Storage may be unavailable in private browsing. */ }
 
+    state.platform = initialPlatform();
+
+    // ?platform=mac|windows wins, then the remembered choice, then the browser's OS.
+    function initialPlatform() {
+      const override = new URLSearchParams(location.search).get("platform");
+      if (override === "mac" || override === "windows") return override;
+      try {
+        const saved = localStorage.getItem("kaisian-platform");
+        if (saved === "mac" || saved === "windows") return saved;
+      } catch { /* Storage may be unavailable in private browsing. */ }
+      const platform = navigator.userAgentData?.platform || navigator.platform || "";
+      return /^Win/.test(platform) ? "windows" : "mac";
+    }
+
     const byId = id => document.getElementById(id);
-    const text = key => messages[state.lang][key];
+    const isWindows = () => state.platform === "windows";
+    const isMac = () => state.platform === "mac";
+    // Windows-only wording lives under "<key>Windows" and falls back to "<key>".
+    const text = key => (isWindows() && messages[state.lang][`${key}Windows`]) || messages[state.lang][key];
     const description = entry => entry.description?.[state.lang] || entry.description?.en || "";
     const notes = entry => entry.notes?.[state.lang] || entry.notes?.en || "";
+    // Windows installs fonts from Nerd Fonts releases, and WSL has no casks or macOS tweaks.
+    const platformFonts = () => (state.manifest?.fonts ?? []).filter(font => !isWindows() || font.nerd_font);
+    const platformBrew = () => (state.manifest?.brew ?? []).filter(entry => !isWindows() || !entry.cask);
+    const platformFeatures = () => (state.manifest?.features ?? []).filter(feature => !feature.macos || isMac());
 
-    function isMac() {
-      const override = new URLSearchParams(location.search).get("platform");
-      if (override === "mac") return true;
-      if (override) return false;
-      return Boolean(navigator.userAgentData?.platform === "macOS" || /Mac/.test(navigator.platform));
+    function syncFontWithPlatform() {
+      const fonts = platformFonts();
+      if (!fonts.some(font => font.cask === state.font)) state.font = fonts[0]?.cask || "";
+    }
+
+    // PowerShell argument mode treats commas, quotes, @, $, and number-like words
+    // specially; anything but a plain word is single-quoted.
+    function psArg(value) {
+      return /^[A-Za-z][A-Za-z0-9._-]*$/.test(value) ? value : `'${value.replace(/'/g, "''")}'`;
     }
 
     let cachedHasNerd = null;
@@ -851,6 +928,7 @@
       if (data.groups.some(group => group.kind !== undefined && group.kind !== "prompt")) throw new Error("Invalid group kind");
       if ((data.fonts ?? []).some(font => typeof font.family !== "string" || !font.family)) throw new Error("Invalid font family");
       if ((data.fonts ?? []).some(font => font.preview !== undefined && (typeof font.preview !== "string" || !font.preview))) throw new Error("Invalid font preview");
+      if ((data.fonts ?? []).some(font => font.nerd_font !== undefined && (typeof font.nerd_font !== "string" || !/^[A-Za-z0-9]+$/.test(font.nerd_font)))) throw new Error("Invalid Nerd Fonts asset name");
       if ((data.brew ?? []).some(entry => entry.cask !== undefined && typeof entry.cask !== "boolean")) throw new Error("Invalid cask flag");
       if (data.features !== undefined) {
         if (!Array.isArray(data.features)) throw new Error("Invalid features");
@@ -903,10 +981,11 @@
       return forced;
     }
 
+    // Sections are numbered in render order, so platform-specific ones never leave gaps.
     function section(key) {
       const fieldset = document.createElement("fieldset");
       const legend = document.createElement("legend");
-      legend.textContent = text(key);
+      legend.textContent = `${byId("sections").children.length + 1}. ${text(key)}`;
       fieldset.append(legend);
       byId("sections").append(fieldset);
       return fieldset;
@@ -1024,6 +1103,8 @@
     }
 
     function renderFontSection() {
+      const fonts = platformFonts();
+      if (!fonts.length) return;
       const fieldset = section("fonts");
       const wrap = document.createElement("div");
       wrap.className = "select-wrap";
@@ -1034,7 +1115,7 @@
       selectEl.className = "styled-select";
       selectEl.setAttribute("aria-label", text("fonts"));
 
-      for (const font of state.manifest.fonts) {
+      for (const font of fonts) {
         const opt = document.createElement("option");
         opt.value = font.cask;
         opt.textContent = font.preview || font.family;
@@ -1124,7 +1205,7 @@
     function renderBrewSection() {
       const fieldset = section("brew");
       const forcedBrew = getForcedBrew();
-      const visibleBrew = (state.manifest.brew ?? []).filter(item => !forcedBrew.has(item.name));
+      const visibleBrew = platformBrew().filter(item => !forcedBrew.has(item.name));
       for (const entry of visibleBrew) {
         choice(
           fieldset,
@@ -1178,8 +1259,8 @@
     }
 
     function renderFeaturesSection() {
-      const visibleFeatures = (state.manifest.features ?? []).filter(feature => !feature.macos || isMac());
-      if (!state.manifest.features?.length || !visibleFeatures.length) return;
+      const visibleFeatures = platformFeatures();
+      if (!visibleFeatures.length) return;
 
       const fieldset = section("features");
       for (const feature of visibleFeatures) {
@@ -1258,15 +1339,45 @@
         ["GNU Stow", text("stowDescription")],
         ["mise", text("miseDescription")],
       ];
+      if (isWindows()) {
+        staticTools.unshift(["WSL", text("wslDescription")]);
+        staticTools.push(["zsh", text("zshDescription")], ["Windows Terminal", text("windowsTerminalDescription")]);
+      }
       for (const [name, detail] of staticTools) addTool(name, detail);
 
       const forcedBrew = getForcedBrew();
       for (const brewName of forcedBrew) {
         const entry = (state.manifest.brew ?? []).find(b => b.name === brewName);
+        // setup.sh skips casks that groups pull in on WSL.
+        if (isWindows() && entry?.cask) continue;
         addTool(brewName, entry ? description(entry) : "");
       }
 
       fieldset.append(ul);
+    }
+
+    function renderWindowsTerminalSection() {
+      const fieldset = section("windowsTerminal");
+      choice(
+        fieldset,
+        "checkbox",
+        "skip-terminal-upgrade",
+        "skip-terminal-upgrade",
+        text("skipTerminalUpgrade"),
+        text("skipTerminalUpgradeHelp"),
+        state.skipTerminalUpgrade,
+        checked => { state.skipTerminalUpgrade = checked; }
+      );
+      choice(
+        fieldset,
+        "checkbox",
+        "keep-default-terminal",
+        "keep-default-terminal",
+        text("keepDefaultTerminal"),
+        text("keepDefaultTerminalHelp"),
+        state.keepDefaultTerminal,
+        checked => { state.keepDefaultTerminal = checked; }
+      );
     }
 
     function renderSections() {
@@ -1277,6 +1388,7 @@
       renderBrewSection();
       renderLangsSection();
       renderFeaturesSection();
+      if (isWindows()) renderWindowsTerminalSection();
       renderAlwaysInstalledSection();
     }
 
@@ -1321,7 +1433,7 @@
         return;
       }
 
-      const selectedBrew = (manifest.brew ?? [])
+      const selectedBrew = platformBrew()
         .filter(entry => state.brew.has(entry.name))
         .map(entry => entry.name);
       const brewList = [...new Set([...selectedBrew, ...customBrew])];
@@ -1332,24 +1444,38 @@
       const extraLangs = customLangs.filter(item => !state.langs.has(item));
       const langs = [...checkedLangs, ...extraLangs];
 
-      const features = (manifest.features ?? [])
-        .filter(feature => (!feature.macos || isMac()) && state.features.has(feature.name))
+      const features = platformFeatures()
+        .filter(feature => state.features.has(feature.name))
         .map(feature => feature.name);
 
-      const parts = ["curl -fsSL https://kaisian.phx.tw | bash -s -- --yes"];
+      // setup.sh options as [flag, value?]; the font goes to setup.ps1 on Windows.
+      const options = [["--yes"]];
       const defaults = manifest.profiles?.default ?? [];
       if (!defaults.length) {
-        parts.push("--groups", groups.join(","));
+        options.push(["--groups", groups.join(",")]);
       } else if (state.prompt && !defaults.includes(state.prompt)) {
-        parts.push("--prompt", state.prompt);
+        options.push(["--prompt", state.prompt]);
       }
-      if (state.font) parts.push("--font", state.font);
-      if (brewList.length) parts.push("--brew", brewList.join(","));
-      if (langs.length) parts.push("--langs", langs.join(","));
-      if (features.length) parts.push("--features", features.join(","));
-      parts.push("--lang", state.lang);
+      if (state.font && isMac()) options.push(["--font", state.font]);
+      if (brewList.length) options.push(["--brew", brewList.join(",")]);
+      if (langs.length) options.push(["--langs", langs.join(",")]);
+      if (features.length) options.push(["--features", features.join(",")]);
+      options.push(["--lang", state.lang]);
 
-      byId("command").value = parts.join(" ");
+      let command;
+      if (isWindows()) {
+        const parts = ["& ([scriptblock]::Create((irm https://kaisian.phx.tw/win)))"];
+        const font = platformFonts().find(f => f.cask === state.font);
+        if (font) parts.push("-NerdFont", psArg(font.nerd_font), "-FontFamily", psArg(font.family));
+        if (state.skipTerminalUpgrade) parts.push("-SkipTerminalUpgrade");
+        if (state.keepDefaultTerminal) parts.push("-KeepDefaultTerminal");
+        parts.push("--", ...options.map(([flag, ...value]) => [flag, ...value.map(psArg)].join(" ")));
+        command = parts.join(" ");
+      } else {
+        command = ["curl -fsSL https://kaisian.phx.tw | bash -s --", ...options.flat()].join(" ");
+      }
+
+      byId("command").value = command;
       resizeCommand();
       byId("copy").disabled = false;
       byId("copy-status").textContent = "";
@@ -1357,7 +1483,7 @@
 
     function render() {
       document.documentElement.lang = state.lang;
-      document.title = state.lang === "en" ? "kaisian — Set up your Mac" : "kaisian — 設定你的 Mac";
+      document.title = text("pageTitle");
       byId("language").value = state.lang;
       byId("language").setAttribute("aria-label", text("language"));
       for (const [id, key] of [
@@ -1372,8 +1498,13 @@
         if (el) el.textContent = text(key);
       }
       if (byId("headline")) byId("headline").innerHTML = text("headline");
-      document.querySelectorAll(".lang-link").forEach(btn => {
+      byId("command-prompt").textContent = isWindows() ? "PS>" : "$";
+      document.querySelectorAll(".lang-link[data-lang]").forEach(btn => {
         btn.classList.toggle("active", btn.dataset.lang === state.lang);
+      });
+      document.querySelectorAll(".lang-link[data-platform]").forEach(btn => {
+        btn.classList.toggle("active", btn.dataset.platform === state.platform);
+        btn.setAttribute("aria-pressed", String(btn.dataset.platform === state.platform));
       });
       byId("status").textContent = state.error ? text("error") : state.manifest ? "" : text("loading");
       byId("preview-container").hidden = !state.manifest;
@@ -1392,10 +1523,18 @@
       try { localStorage.setItem("kaisian-language", state.lang); } catch { /* Keep in-memory */ }
       render();
     });
-    document.querySelectorAll(".lang-link").forEach(btn => {
+    document.querySelectorAll(".lang-link[data-lang]").forEach(btn => {
       btn.addEventListener("click", () => {
         byId("language").value = btn.dataset.lang;
         byId("language").dispatchEvent(new Event("change"));
+      });
+    });
+    document.querySelectorAll(".lang-link[data-platform]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        state.platform = btn.dataset.platform;
+        try { localStorage.setItem("kaisian-platform", state.platform); } catch { /* Keep in-memory */ }
+        syncFontWithPlatform();
+        render();
       });
     });
     byId("choices").addEventListener("submit", event => event.preventDefault());
@@ -1425,7 +1564,7 @@
         const prompts = (state.manifest.groups ?? []).filter(g => g.kind === "prompt");
         const defaultPrompt = (state.manifest.profiles?.default ?? []).find(name => prompts.some(p => p.name === name)) || prompts[0]?.name || "";
         state.prompt = defaultPrompt;
-        state.font = state.manifest.fonts?.[0]?.cask || "";
+        syncFontWithPlatform();
         const forcedBrew = getForcedBrew();
         state.brew = new Set(
           (state.manifest.brew ?? [])

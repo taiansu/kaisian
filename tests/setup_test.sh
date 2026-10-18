@@ -6812,6 +6812,44 @@ manifest_preview_shape_violations_case() {
   ) || return 1
   return 0
 }
+
+font_nerd_font_manifest_case() {
+  checkout="$ROOT/checkout_nerd_font"
+  mkdir -p "$checkout/home" "$checkout/prompt-default"
+
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+    test_home=$(make_home)
+    HOME="$test_home"
+    acquire_lock || exit 1
+    trap 'cleanup' EXIT
+
+    manifest_with_nerd_font() {
+      printf '{"schema": 2, "groups": [{"name": "home", "description": {"en": "e", "zh-TW": "z"}}, {"name": "prompt-default", "kind": "prompt", "description": {"en": "e", "zh-TW": "z"}}], "fonts": [{"cask": "font-blex-mono-nerd-font", "family": "BlexMono NFM", %s"description": {"en": "e", "zh-TW": "z"}}]}\n' "$1" > "$SANDBOX/test_manifest.json"
+    }
+
+    # Windows downloads <nerd_font>.zip from the Nerd Fonts release, so only bare asset names pass.
+    manifest_with_nerd_font '"nerd_font": "IBMPlexMono", '
+    out=$(parse_manifest "$SANDBOX/test_manifest.json" "$checkout" 2>&1) || { printf 'valid nerd_font rejected: %s\n' "$out" >&2; exit 1; }
+    manifest_with_nerd_font ''
+    out=$(parse_manifest "$SANDBOX/test_manifest.json" "$checkout" 2>&1) || { printf 'font without nerd_font rejected: %s\n' "$out" >&2; exit 1; }
+
+    for bad in '"../IBMPlexMono"' '"IBM Plex"' '""' '42' '["IBMPlexMono"]'; do
+      manifest_with_nerd_font "\"nerd_font\": $bad, "
+      if out=$(parse_manifest "$SANDBOX/test_manifest.json" "$checkout" 2>&1); then
+        printf 'nerd_font %s accepted\n' "$bad" >&2
+        exit 1
+      fi
+      assert_contains "$out" "'nerd_font'" || { printf 'nerd_font %s failed for another reason: %s\n' "$bad" "$out" >&2; exit 1; }
+    done
+
+    cleanup
+    trap - EXIT
+    exit 0
+  ) || return 1
+  return 0
+}
 run_case 'Task 5 preflight target classification and exact conflict planning' task5_preflight_targets_classification_case
 run_case 'Task 5 preflight target rejection for symlink parents and special nodes' task5_preflight_targets_rejection_case
 run_case 'Task 5 preflight unselected package filtering' task5_preflight_selection_filtering_case
@@ -6840,5 +6878,6 @@ run_case 'feature notes printed in selected locale' feature_notes_locale_case
 run_case 'feature brewfile cask inclusion when feature selected' feature_brewfile_cask_inclusion_case
 run_case 'custom --langs validation, deduplication, and mise generation' custom_langs_and_validation_case
 run_case 'manifest preview shape violations fail' manifest_preview_shape_violations_case
+run_case 'font nerd_font must be a bare Nerd Fonts asset name' font_nerd_font_manifest_case
 printf '%s passed; %s failed\n' "$PASS" "$FAIL"
 test "$FAIL" -eq 0

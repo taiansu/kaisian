@@ -41,6 +41,9 @@ CONFLICTS_FILE=''
 STOW_IGNORE_FILE=''
 BACKUP_ROOT=''
 CONFIRMED=0
+PLATFORM=''
+TMP_ROOT=''
+JQ_EXEC=''
 
 has_control_char() {
   LC_ALL=C
@@ -373,12 +376,152 @@ nearest_existing() {
   printf '%s\n' "$p"
 }
 
+# Sets PLATFORM to macos or wsl; any other system is unsupported.
+detect_platform() {
+  test -z "$PLATFORM" || return 0
+  os_name=$(/usr/bin/uname -s 2>/dev/null) || die unsupported_os
+  case "$os_name" in
+    Darwin)
+      PLATFORM='macos'
+      TMP_ROOT='/private/tmp'
+      ;;
+    Linux)
+      osrelease=$(/bin/cat "${KAISIAN_OSRELEASE_FILE:-/proc/sys/kernel/osrelease}" 2>/dev/null) || die unsupported_os
+      case "$osrelease" in
+        *[Mm]icrosoft*|*WSL*) ;;
+        *) die unsupported_os ;;
+      esac
+      PLATFORM='wsl'
+      TMP_ROOT='/tmp'
+      ;;
+    *) die unsupported_os ;;
+  esac
+}
+
+# Prints one file attribute without following symlinks. BSD and GNU stat spell
+# the formats differently; values are only compared within one platform.
+stat_field() {
+  sf_field=$1
+  sf_path=$2
+  if test "$PLATFORM" = 'wsl'; then
+    case "$sf_field" in
+      dev) sf_format='%d' ;;
+      ino) sf_format='%i' ;;
+      type) sf_format='%F' ;;
+      mode) sf_format='%f' ;;
+      uid) sf_format='%u' ;;
+      devino) sf_format='%d %i' ;;
+      *) return 2 ;;
+    esac
+    /usr/bin/stat -c "$sf_format" -- "$sf_path" 2>/dev/null
+  else
+    case "$sf_field" in
+      dev) sf_format='%d' ;;
+      ino) sf_format='%i' ;;
+      type) sf_format='%HT' ;;
+      mode) sf_format='%p' ;;
+      uid) sf_format='%u' ;;
+      devino) sf_format='%d %i' ;;
+      *) return 2 ;;
+    esac
+    /usr/bin/stat -f "$sf_format" "$sf_path" 2>/dev/null
+  fi
+}
+
 stat_dev() {
   if test "${KAISIAN_TESTING-0}" = '1' && test -n "${KAISIAN_STAT_EXEC-}"; then
     "$KAISIAN_STAT_EXEC" -f '%d' "$1" 2>/dev/null
   else
-    /usr/bin/stat -f '%d' "$1" 2>/dev/null
+    stat_field dev "$1"
   fi
+}
+
+# jq definitions shared by plutil_compat: kp resolves a plutil key path
+# ("fonts.0.cask") to a jq path, failing like plutil when no value exists.
+readonly PLUTIL_COMPAT_JQ_DEFS='
+def kp($p): . as $root | reduce ($p | split("."))[] as $c ([];
+  . as $acc | ($root | getpath($acc)) as $cur
+  | if ($cur | type) == "array" and ($c | test("^[0-9]+$")) and (($c | tonumber) < ($cur | length)) then $acc + [$c | tonumber]
+    elif ($cur | type) == "object" and ($cur | has($c)) then $acc + [$c]
+    else error("no value at key path " + $p) end);
+def ptype: if type == "object" then "dictionary"
+  elif type == "array" then "array"
+  elif type == "string" then "string"
+  elif type == "boolean" then "bool"
+  elif type == "number" then (if (tojson | test("[.eE]")) then "float" else "integer" end)
+  else "(any)" end;
+'
+
+# The subset of plutil(1) that manifest parsing uses, implemented with jq for
+# WSL. Files written in "xml1" format hold plain JSON and are only read back by
+# this function; conversion still rejects null like a real property list.
+# Known differences that validation never observes: json extracts keep source key
+# order and do not escape '/', and raw floats print as JSON numbers, not "%f".
+plutil_compat() {
+  if test -z "$JQ_EXEC"; then
+    JQ_EXEC=$(get_tool_exec jq) || return 1
+  fi
+  pc_op=${1-}
+  shift || return 1
+  case "$pc_op" in
+    -convert)
+      test $# -ge 4 && test "$2" = '-o' || return 1
+      pc_format=$1
+      pc_out=$3
+      shift 3
+      test "$1" != '--' || shift
+      case "$pc_format" in
+        json) pc_filter='if length == 1 then .[0] else error("expected one JSON value") end' ;;
+        xml1) pc_filter='if length == 1 and ([.[0] | .. | nulls] | length) == 0 then .[0] else error("not a property list") end' ;;
+        *) return 1 ;;
+      esac
+      "$JQ_EXEC" -c -s "$pc_filter" "$1" > "$pc_out" 2>/dev/null
+      ;;
+    -create)
+      test $# -eq 2 && test "$1" = 'xml1' || return 1
+      printf '{}\n' > "$2"
+      ;;
+    -insert)
+      test $# -eq 4 && test "$2" = '-xml' || return 1
+      case "$1" in
+        *.*) pc_parent=${1%.*} pc_key=${1##*.} ;;
+        *) pc_parent='' pc_key=$1 ;;
+      esac
+      "$JQ_EXEC" -c --arg parent "$pc_parent" --arg key "$pc_key" --argjson v "$3" "$PLUTIL_COMPAT_JQ_DEFS"'
+        (if $parent == "" then [] else kp($parent) end) as $pp
+        | if (getpath($pp) | type) == "object" and (getpath($pp) | has($key) | not)
+          then setpath($pp + [$key]; $v) else error("cannot insert at " + $key) end' "$4" > "$4.compat" 2>/dev/null \
+        && /bin/mv -f "$4.compat" "$4"
+      ;;
+    -type)
+      test $# -eq 2 || return 1
+      "$JQ_EXEC" -r --arg p "$1" "$PLUTIL_COMPAT_JQ_DEFS"'getpath(kp($p)) | ptype' "$2" 2>/dev/null
+      ;;
+    -extract)
+      test $# -ge 3 || return 1
+      pc_path=$1
+      pc_format=$2
+      shift 2
+      test "$1" != '-o' || shift 2
+      case "$pc_format" in
+        raw)
+          "$JQ_EXEC" -r --arg p "$pc_path" "$PLUTIL_COMPAT_JQ_DEFS"'getpath(kp($p))
+            | if type == "array" then length
+              elif type == "object" then keys_unsorted[]
+              elif type == "string" or type == "number" or type == "boolean" then .
+              else error("not a raw value") end' "$1" 2>/dev/null
+          ;;
+        json) "$JQ_EXEC" -c --arg p "$pc_path" "$PLUTIL_COMPAT_JQ_DEFS"'getpath(kp($p))' "$1" 2>/dev/null ;;
+        *) return 1 ;;
+      esac
+      ;;
+    -remove)
+      test $# -eq 2 || return 1
+      "$JQ_EXEC" -c --arg p "$1" "$PLUTIL_COMPAT_JQ_DEFS"'delpaths([kp($p)])' "$2" > "$2.compat" 2>/dev/null \
+        && /bin/mv -f "$2.compat" "$2"
+      ;;
+    *) return 1 ;;
+  esac
 }
 
 preflight_targets() {
@@ -559,13 +702,13 @@ preflight_targets() {
     test "$dst_dev" = "$backup_dev" || return 1
 
     printf '%s\t%s\n' "$dst" "$backup" >> "$CONFLICTS_FILE" || return 1
-    dst_ino=$(/usr/bin/stat -f '%i' "$dst" 2>/dev/null) || return 1
+    dst_ino=$(stat_field ino "$dst") || return 1
     test -n "$dst_ino" || return 1
     has_control_char "$dst_ino" && return 1
-    dst_type=$(/usr/bin/stat -f '%HT' "$dst" 2>/dev/null) || return 1
+    dst_type=$(stat_field type "$dst") || return 1
     test -n "$dst_type" || return 1
     has_control_char "$dst_type" && return 1
-    dst_mode=$(/usr/bin/stat -f '%p' "$dst" 2>/dev/null) || return 1
+    dst_mode=$(stat_field mode "$dst") || return 1
     test -n "$dst_mode" || return 1
     has_control_char "$dst_mode" && return 1
     printf '%s\t%s\t%s\t%s\t%s\n' "$dst" "$dst_dev" "$dst_ino" "$dst_type" "$dst_mode" >> "$IDENTITIES_FILE" || return 1
@@ -618,13 +761,13 @@ preflight_targets() {
 
         if ! /usr/bin/grep -F -e "$(printf '%s\t' "$dst")" "$CONFLICTS_FILE" 2>/dev/null; then
           printf '%s\t%s\n' "$dst" "$backup" >> "$CONFLICTS_FILE" || return 1
-          dst_ino=$(/usr/bin/stat -f '%i' "$dst" 2>/dev/null) || return 1
+          dst_ino=$(stat_field ino "$dst") || return 1
           test -n "$dst_ino" || return 1
           has_control_char "$dst_ino" && return 1
-          dst_type=$(/usr/bin/stat -f '%HT' "$dst" 2>/dev/null) || return 1
+          dst_type=$(stat_field type "$dst") || return 1
           test -n "$dst_type" || return 1
           has_control_char "$dst_type" && return 1
-          dst_mode=$(/usr/bin/stat -f '%p' "$dst" 2>/dev/null) || return 1
+          dst_mode=$(stat_field mode "$dst") || return 1
           test -n "$dst_mode" || return 1
           has_control_char "$dst_mode" && return 1
           printf '%s\t%s\t%s\t%s\t%s\n' "$dst" "$dst_dev" "$dst_ino" "$dst_type" "$dst_mode" >> "$IDENTITIES_FILE" || return 1
@@ -769,13 +912,13 @@ revalidate_conflict() {
       test -n "$cur_dev" || return 1
       test "$cur_dev" = "$row_dev" || return 1
 
-      cur_ino=$(/usr/bin/stat -f '%i' "$target_src" 2>/dev/null) || return 1
+      cur_ino=$(stat_field ino "$target_src") || return 1
       test "$cur_ino" = "$row_ino" || return 1
 
-      cur_type=$(/usr/bin/stat -f '%HT' "$target_src" 2>/dev/null) || return 1
+      cur_type=$(stat_field type "$target_src") || return 1
       test "$cur_type" = "$row_type" || return 1
 
-      cur_mode=$(/usr/bin/stat -f '%p' "$target_src" 2>/dev/null) || return 1
+      cur_mode=$(stat_field mode "$target_src") || return 1
       test "$cur_mode" = "$row_mode" || return 1
     fi
   done < "$IDENTITIES_FILE"
@@ -799,7 +942,7 @@ record_backup_tree_identities() {
     test -d "$path" && test ! -L "$path" || return 1
     canon=$(canonicalize_path "$path") || return 1
     dev=$(stat_dev "$path") || return 1
-    ino=$(/usr/bin/stat -f '%i' "$path" 2>/dev/null) || return 1
+    ino=$(stat_field ino "$path") || return 1
     test -n "$canon" && test -n "$dev" && test -n "$ino" || return 1
     has_control_char "$path" && return 1
     has_control_char "$canon" && return 1
@@ -818,7 +961,7 @@ verify_backup_tree_identities() {
     test -d "$path" && test ! -L "$path" || return 1
     current_canon=$(canonicalize_path "$path") || return 1
     current_dev=$(stat_dev "$path") || return 1
-    current_ino=$(/usr/bin/stat -f '%i' "$path" 2>/dev/null) || return 1
+    current_ino=$(stat_field ino "$path") || return 1
     test "$current_canon" = "$canon" || return 1
     test "$current_dev" = "$dev" || return 1
     test "$current_ino" = "$ino" || return 1
@@ -1095,7 +1238,7 @@ message_en() {
   case "$key" in
     error_prefix) printf 'Error' ;;
     missing_tools) printf 'Missing required commands: %s' "${1-}" ;;
-    unsupported_os) printf 'Kaisian requires macOS (Darwin).' ;;
+    unsupported_os) printf 'Kaisian requires macOS or WSL on Windows 11.' ;;
     no_tty) printf 'A controlling terminal is required.' ;;
     selection_conflict) printf 'Selection flags (--prompt, --profile, --groups, --interactive, --all) are mutually exclusive.' ;;
     unknown_argument) printf 'Unknown argument: %s' "${1-}" ;;
@@ -1173,6 +1316,7 @@ message_en() {
         group_preview_segment_invalid_bg) printf "Invalid manifest: group %s preview line %s segment %s 'bg' must be a string." "${2-}" "${3-}" "${4-}" ;;
         group_preview_segment_unknown_key) printf "Invalid manifest: unknown key in group %s preview line %s segment %s." "${2-}" "${3-}" "${4-}" ;;
         font_invalid_preview) printf "Invalid manifest: font %s 'preview' must be a string." "${2-}" ;;
+        font_invalid_nerd_font) printf "Invalid manifest: font %s 'nerd_font' must be an ASCII letters-and-digits Nerd Fonts asset name." "${2-}" ;;
         features_not_array) printf "Invalid manifest: 'features' must be an array." ;;
         feature_not_object) printf 'Invalid manifest: feature item %s must be an object.' "${2-}" ;;
         feature_missing_name) printf "Invalid manifest: feature %s missing 'name'." "${2-}" ;;
@@ -1262,6 +1406,14 @@ message_en() {
     bootstrap_brew_installing) printf 'Installing Homebrew...' ;;
     bootstrap_tools_installing) printf 'Installing missing tools: %s' "${1-}" ;;
     bootstrap_dry_run) printf 'Would bootstrap: %s' "${1-}" ;;
+    wsl_root_unsupported) printf 'Run kaisian as your regular WSL user, not root.' ;;
+    wsl_font_unsupported) printf '%s' '--font is not supported in WSL; setup.ps1 installs the font on Windows.' ;;
+    wsl_cask_unsupported) printf "Homebrew cask '%s' is macOS-only and cannot be installed in WSL." "${1-}" ;;
+    wsl_cask_skipped) printf "Skipping macOS-only cask '%s' in WSL." "${1-}" ;;
+    wsl_feature_unsupported) printf "Feature '%s' is macOS-only and cannot be selected in WSL." "${1-}" ;;
+    default_shell_dry_run) printf 'Would set the default login shell to %s' "${1-}" ;;
+    default_shell_changed) printf 'Default login shell set to %s; it takes effect in new WSL sessions.' "${1-}" ;;
+    wsl_dry_run_needs_jq) printf 'Stopping the dry run here: previewing the dotfiles needs jq, which a real run installs first.' ;;
     *) return 64 ;;
   esac
 }
@@ -1272,7 +1424,7 @@ message_zh_tw() {
   case "$key" in
     error_prefix) printf '錯誤' ;;
     missing_tools) printf '缺少必要指令：%s' "${1-}" ;;
-    unsupported_os) printf 'Kaisian 僅支援 macOS (Darwin)。' ;;
+    unsupported_os) printf 'Kaisian 僅支援 macOS 或 Windows 11 上的 WSL。' ;;
     no_tty) printf '此操作需要可控制的終端機。' ;;
     selection_conflict) printf '選取選項（--prompt, --profile, --groups, --interactive, --all）不可同時使用。' ;;
     unknown_argument) printf '未知的參數：%s' "${1-}" ;;
@@ -1350,6 +1502,7 @@ message_zh_tw() {
         group_preview_segment_invalid_bg) printf '無效的 manifest：群組 %s preview 第 %s 行第 %s 個片段的「bg」必須是字串。' "${2-}" "${3-}" "${4-}" ;;
         group_preview_segment_unknown_key) printf '無效的 manifest：群組 %s preview 第 %s 行第 %s 個片段包含未知鍵值。' "${2-}" "${3-}" "${4-}" ;;
         font_invalid_preview) printf '無效的 manifest：字型 %s 的「preview」必須是字串。' "${2-}" ;;
+        font_invalid_nerd_font) printf '無效的 manifest：字型 %s 的「nerd_font」必須是只含英文字母與數字的 Nerd Fonts 檔名。' "${2-}" ;;
         features_not_array) printf '無效的 manifest：「features」必須是陣列。' ;;
         feature_not_object) printf '無效的 manifest：feature 項目 %s 必須是物件。' "${2-}" ;;
         feature_missing_name) printf '無效的 manifest：feature %s 缺少「name」。' "${2-}" ;;
@@ -1439,6 +1592,14 @@ message_zh_tw() {
     bootstrap_brew_installing) printf '正在安裝 Homebrew...' ;;
     bootstrap_tools_installing) printf '正在安裝缺少工具：%s' "${1-}" ;;
     bootstrap_dry_run) printf '將會引導安裝：%s' "${1-}" ;;
+    wsl_root_unsupported) printf '請以一般 WSL 使用者執行 kaisian，不要使用 root。' ;;
+    wsl_font_unsupported) printf 'WSL 不支援 --font；字型由 Windows 端的 setup.ps1 安裝。' ;;
+    wsl_cask_unsupported) printf 'Homebrew cask「%s」僅適用於 macOS，無法在 WSL 安裝。' "${1-}" ;;
+    wsl_cask_skipped) printf '略過僅適用於 macOS 的 cask「%s」（WSL）。' "${1-}" ;;
+    wsl_feature_unsupported) printf '功能「%s」僅適用於 macOS，無法在 WSL 選取。' "${1-}" ;;
+    default_shell_dry_run) printf '將會把預設登入 shell 設為 %s' "${1-}" ;;
+    default_shell_changed) printf '預設登入 shell 已設為 %s，新的 WSL 工作階段才會生效。' "${1-}" ;;
+    wsl_dry_run_needs_jq) printf '預覽在此停止：預覽設定檔需要 jq，實際執行時會先安裝。' ;;
     *) return 64 ;;
   esac
 }
@@ -1717,6 +1878,7 @@ parse_args() {
 }
 
 validate_home() {
+  detect_platform
   raw_home=${HOME-}
   test -n "$raw_home" || die invalid_home '<empty>'
   case "$raw_home" in
@@ -1730,7 +1892,7 @@ validate_home() {
 
   test -r "$raw_home" && test -w "$raw_home" && test -x "$raw_home" || die invalid_home "$raw_home"
 
-  owner_uid=$(/usr/bin/stat -f '%u' "$raw_home" 2>/dev/null) || die invalid_home "$raw_home"
+  owner_uid=$(stat_field uid "$raw_home") || die invalid_home "$raw_home"
   curr_uid=$(/usr/bin/id -u 2>/dev/null) || die invalid_home "$raw_home"
   test "$owner_uid" = "$curr_uid" || die invalid_home "$raw_home"
 
@@ -1857,13 +2019,14 @@ on_signal() {
 }
 
 acquire_lock() {
+  detect_platform
   curr_uid=$(/usr/bin/id -u 2>/dev/null) || die lock_failed "$LOCK_DIR"
-  LOCK_DIR="/private/tmp/kaisian-$curr_uid.lock"
+  LOCK_DIR="$TMP_ROOT/kaisian-$curr_uid.lock"
 
-  test -d '/private/tmp' || die lock_failed "$LOCK_DIR"
-  tmp_owner=$(/usr/bin/stat -f '%u' '/private/tmp' 2>/dev/null) || die lock_failed "$LOCK_DIR"
+  test -d "$TMP_ROOT" || die lock_failed "$LOCK_DIR"
+  tmp_owner=$(stat_field uid "$TMP_ROOT") || die lock_failed "$LOCK_DIR"
   test "$tmp_owner" = '0' || die lock_failed "$LOCK_DIR"
-  test -k '/private/tmp' || die lock_failed "$LOCK_DIR"
+  test -k "$TMP_ROOT" || die lock_failed "$LOCK_DIR"
   check_path_overlap_with_lock "$CHECKOUT_DIR"
   check_path_overlap_with_lock "$STATE_ROOT"
 
@@ -1871,7 +2034,7 @@ acquire_lock() {
     die lock_failed "$LOCK_DIR"
   fi
 
-  RECORDED_LOCK_DEV_INO=$(/usr/bin/stat -f '%d %i' "$LOCK_DIR" 2>/dev/null)
+  RECORDED_LOCK_DEV_INO=$(stat_field devino "$LOCK_DIR")
   if test -z "$RECORDED_LOCK_DEV_INO"; then
     /bin/rmdir "$LOCK_DIR" 2>/dev/null || true
     die lock_failed "$LOCK_DIR"
@@ -1886,7 +2049,7 @@ acquire_lock() {
 
   SANDBOX="$LOCK_DIR/sandbox"
   /bin/mkdir -m 0700 "$SANDBOX" 2>/dev/null || die lock_failed "$LOCK_DIR"
-  RECORDED_SANDBOX_DEV_INO=$(/usr/bin/stat -f '%d %i' "$SANDBOX" 2>/dev/null)
+  RECORDED_SANDBOX_DEV_INO=$(stat_field devino "$SANDBOX")
   if test -z "$RECORDED_SANDBOX_DEV_INO"; then
     /bin/rmdir "$SANDBOX" 2>/dev/null || true
     die lock_failed "$LOCK_DIR"
@@ -1904,13 +2067,13 @@ cleanup() {
   test -n "$LOCK_DIR" || return 0
   test -n "$RECORDED_LOCK_DEV_INO" || return 0
 
-  curr_lock_dev_ino=$(/usr/bin/stat -f '%d %i' "$LOCK_DIR" 2>/dev/null || true)
+  curr_lock_dev_ino=$(stat_field devino "$LOCK_DIR" || true)
   if test "$curr_lock_dev_ino" != "$RECORDED_LOCK_DEV_INO"; then
     return 0
   fi
 
   if test -n "$SANDBOX" && test -n "$RECORDED_SANDBOX_DEV_INO"; then
-    curr_sb_dev_ino=$(/usr/bin/stat -f '%d %i' "$SANDBOX" 2>/dev/null || true)
+    curr_sb_dev_ino=$(stat_field devino "$SANDBOX" || true)
     if test "$curr_sb_dev_ino" = "$RECORDED_SANDBOX_DEV_INO"; then
       case "$SANDBOX" in
         "$LOCK_DIR"/*)
@@ -2085,6 +2248,14 @@ get_tool_exec() {
         return 1
       fi
       ;;
+    jq)
+      if test -n "${KAISIAN_JQ_EXEC-}"; then
+        printf '%s\n' "$KAISIAN_JQ_EXEC"
+        return 0
+      elif test "${KAISIAN_JQ_EXEC+x}" = 'x'; then
+        return 1
+      fi
+      ;;
     brew)
       if test -n "${KAISIAN_BREW_EXEC-}"; then
         printf '%s\n' "$KAISIAN_BREW_EXEC"
@@ -2114,6 +2285,9 @@ get_tool_exec() {
       elif test -f '/usr/local/bin/brew' && test -x '/usr/local/bin/brew'; then
         printf '/usr/local/bin/brew\n'
         return 0
+      elif test -f '/home/linuxbrew/.linuxbrew/bin/brew' && test -x '/home/linuxbrew/.linuxbrew/bin/brew'; then
+        printf '/home/linuxbrew/.linuxbrew/bin/brew\n'
+        return 0
       fi
       ;;
   esac
@@ -2133,16 +2307,26 @@ bootstrap_prerequisites() {
       else
         /bin/bash -c "$(/usr/bin/curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" || die bootstrap_failed 'Homebrew installation failed'
       fi
-      if test -d '/opt/homebrew/bin'; then
-        PATH="/opt/homebrew/bin:$PATH"
-        export PATH
-      fi
-      if test -d '/usr/local/bin'; then
-        PATH="/usr/local/bin:$PATH"
-        export PATH
-      fi
+      for brew_prefix_bin in '/opt/homebrew/bin' '/usr/local/bin' '/home/linuxbrew/.linuxbrew/bin'; do
+        if test -d "$brew_prefix_bin"; then
+          PATH="$brew_prefix_bin:$PATH"
+          export PATH
+        fi
+      done
       BREW_EXEC=$(get_tool_exec brew) || die bootstrap_failed 'Homebrew executable not found after installation'
     fi
+  fi
+
+  # Homebrew on Linux is usually off PATH until the user's shell runs
+  # brew shellenv; tools it installs (stow, mise) must still be discoverable.
+  if test "$PLATFORM" = 'wsl' && test -n "$BREW_EXEC" && test -z "${KAISIAN_BREW_EXEC-}"; then
+    case ":$PATH:" in
+      *":${BREW_EXEC%/*}:"*) ;;
+      *)
+        PATH="${BREW_EXEC%/*}:$PATH"
+        export PATH
+        ;;
+    esac
   fi
 
   # 2. Discover git and stow
@@ -2180,11 +2364,73 @@ bootstrap_prerequisites() {
   fi
 }
 
-require_prerequisites() {
-  os_name=$(/usr/bin/uname -s 2>/dev/null) || die unsupported_os
-  test "$os_name" = 'Darwin' || die unsupported_os
+# Debian packages WSL needs before Homebrew: Homebrew's documented Linux
+# requirements, jq for manifest parsing, and zsh for the login shell.
+readonly WSL_APT_PACKAGES='build-essential procps curl file git jq zsh'
 
-  PLUTIL_EXEC=$(get_tool_exec plutil) || die missing_tools 'plutil'
+bootstrap_wsl_packages() {
+  dpkg_query_bin=${KAISIAN_DPKG_QUERY_EXEC:-/usr/bin/dpkg-query}
+  missing_apt=''
+  for apt_pkg in $WSL_APT_PACKAGES; do
+    apt_status=$("$dpkg_query_bin" -W -f='${db:Status-Status}' "$apt_pkg" 2>/dev/null || true)
+    test "$apt_status" = 'installed' || missing_apt="$missing_apt $apt_pkg"
+  done
+  missing_apt=${missing_apt# }
+  test -n "$missing_apt" || return 0
+
+  if test "$DRY_RUN" -eq 1; then
+    msg=$(message bootstrap_dry_run "sudo apt-get install -y $missing_apt" 2>/dev/null) || msg="Would bootstrap: sudo apt-get install -y $missing_apt"
+    printf '%s\n' "$msg"
+    return 0
+  fi
+  msg=$(message bootstrap_tools_installing "$missing_apt" 2>/dev/null) || msg="Installing missing tools: $missing_apt"
+  printf '%s\n' "$msg"
+  sudo_bin=${KAISIAN_SUDO_EXEC:-/usr/bin/sudo}
+  "$sudo_bin" /usr/bin/apt-get update || die bootstrap_failed 'apt-get update failed'
+  # shellcheck disable=SC2086
+  "$sudo_bin" /usr/bin/env DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get install -y $missing_apt || die bootstrap_failed "apt-get install $missing_apt failed"
+}
+
+# WSL only: zsh becomes the login shell so new sessions load the stowed zsh
+# files. macOS already defaults to zsh and is left alone.
+set_default_shell() {
+  test "$PLATFORM" = 'wsl' || return 0
+  zsh_path='/usr/bin/zsh'
+  user_name=$(/usr/bin/id -un 2>/dev/null) || die bootstrap_failed 'cannot determine the current user'
+  current_shell=$(/usr/bin/getent passwd "$user_name" 2>/dev/null) || current_shell=''
+  current_shell=${current_shell##*:}
+  test "$current_shell" != "$zsh_path" || return 0
+
+  if test "$DRY_RUN" -eq 1; then
+    msg=$(message default_shell_dry_run "$zsh_path" 2>/dev/null) || msg="Would set the default login shell to $zsh_path"
+    printf '%s\n' "$msg"
+    return 0
+  fi
+  sudo_bin=${KAISIAN_SUDO_EXEC:-/usr/bin/sudo}
+  "$sudo_bin" /usr/bin/chsh -s "$zsh_path" "$user_name" || die bootstrap_failed "chsh -s $zsh_path failed"
+  msg=$(message default_shell_changed "$zsh_path" 2>/dev/null) || msg="Default login shell set to $zsh_path"
+  printf '%s\n' "$msg"
+}
+
+require_prerequisites() {
+  detect_platform
+  if test "$PLATFORM" = 'wsl'; then
+    curr_uid=$(/usr/bin/id -u 2>/dev/null) || die wsl_root_unsupported
+    test "$curr_uid" != '0' || die wsl_root_unsupported
+    test -z "$SELECTED_FONT" || die wsl_font_unsupported
+    bootstrap_wsl_packages
+    if ! JQ_EXEC=$(get_tool_exec jq); then
+      test "$DRY_RUN" -eq 1 || die missing_tools 'jq'
+      # The dotfiles preview needs jq, which only a real run installs.
+      bootstrap_prerequisites
+      msg=$(message wsl_dry_run_needs_jq 2>/dev/null) || msg='Stopping the dry run here: previewing the dotfiles needs jq, which a real run installs first.'
+      printf '%s\n' "$msg"
+      exit 0
+    fi
+    PLUTIL_EXEC='plutil_compat'
+  else
+    PLUTIL_EXEC=$(get_tool_exec plutil) || die missing_tools 'plutil'
+  fi
 
   bootstrap_prerequisites
 
@@ -3193,6 +3439,8 @@ parse_manifest() {
 
   if test "${KAISIAN_TESTING-0}" = '1'; then
     plutil_bin="${KAISIAN_PLUTIL_EXEC:-${PLUTIL_EXEC:-/usr/bin/plutil}}"
+  elif test "$PLATFORM" = 'wsl'; then
+    plutil_bin='plutil_compat'
   else
     plutil_bin='/usr/bin/plutil'
   fi
@@ -3593,6 +3841,16 @@ parse_manifest() {
         *'	'*) die invalid_manifest font_control_char "$k" ;;
       esac
 
+      # nerd_font names the Nerd Fonts release asset setup.ps1 installs on Windows.
+      has_nerd_font=$("$plutil_bin" -type "fonts.$k.nerd_font" "$manifest" 2>/dev/null || true)
+      if test -n "$has_nerd_font"; then
+        test "$has_nerd_font" = 'string' || die invalid_manifest font_invalid_nerd_font "$k"
+        fnerd=$("$plutil_bin" -extract "fonts.$k.nerd_font" raw "$manifest" 2>/dev/null || true)
+        case "$fnerd" in
+          ''|*[!A-Za-z0-9]*) die invalid_manifest font_invalid_nerd_font "$k" ;;
+        esac
+      fi
+
       fdesc_type=$("$plutil_bin" -type "fonts.$k.description" "$manifest" 2>/dev/null || true)
       test -n "$fdesc_type" || die invalid_manifest font_missing_description "$k"
       test "$fdesc_type" = 'dictionary' || die invalid_manifest description_not_object "$k"
@@ -3608,6 +3866,9 @@ parse_manifest() {
       "$plutil_bin" -remove "fonts.$k.family" "$font_check_xml" 2>/dev/null || true
       if test -n "$has_font_preview"; then
         "$plutil_bin" -remove "fonts.$k.preview" "$font_check_xml" 2>/dev/null || true
+      fi
+      if test -n "$has_nerd_font"; then
+        "$plutil_bin" -remove "fonts.$k.nerd_font" "$font_check_xml" 2>/dev/null || true
       fi
       "$plutil_bin" -remove "fonts.$k.description.en" "$font_check_xml" 2>/dev/null || true
       "$plutil_bin" -remove "fonts.$k.description.zh-TW" "$font_check_xml" 2>/dev/null || true
@@ -4343,6 +4604,7 @@ resolve_custom_brew() {
   if test "$rb_formula_count" = '1' && test "$rb_cask_count" = '0'; then
     printf '%s\t0\n' "$rb_name" >> "$SANDBOX/custom_brew.tsv"
   elif test "$rb_formula_count" = '0' && test "$rb_cask_count" = '1'; then
+    test "$PLATFORM" != 'wsl' || die wsl_cask_unsupported "$rb_name"
     printf '%s\t1\n' "$rb_name" >> "$SANDBOX/custom_brew.tsv"
   else
     die brew_not_found "$rb_name"
@@ -4392,6 +4654,7 @@ validate_custom_selections() {
             while IFS='	' read -r bname bcask || test -n "$bname"; do
               if test "$bname" = "$trimmed"; then
                 found_brew=1
+                test "$PLATFORM" != 'wsl' || test "$bcask" != '1' || die wsl_cask_unsupported "$trimmed"
                 break
               fi
             done < "$SANDBOX/brew.tsv"
@@ -4430,6 +4693,7 @@ validate_custom_selections() {
         while IFS='	' read -r fname fmacos fden fdzh || test -n "$fname"; do
           if test "$fname" = "$trimmed"; then
             found_feature=1
+            test "$PLATFORM" != 'wsl' || test "$fmacos" != '1' || die wsl_feature_unsupported "$trimmed"
             break
           fi
         done < "$SANDBOX/features.tsv"
@@ -4537,6 +4801,8 @@ apply_feature_copies() {
 }
 
 apply_feature_hotkeys() {
+  # Symbolic hotkeys are a macOS preference domain; WSL has nothing to apply.
+  test "$PLATFORM" != 'wsl' || return 0
   test -f "$SANDBOX/selected_features.txt" || return 0
   test -f "$SANDBOX/feature_hotkeys.tsv" || return 0
   test -s "$SANDBOX/selected_features.txt" || return 0
@@ -4739,7 +5005,10 @@ generate_install_inputs() {
           done < "$SANDBOX/custom_brew.tsv"
         fi
         test "$found_brew_type" -eq 1 || die brew_not_found "$item"
-        if test "$is_cask" = '1'; then
+        if test "$is_cask" = '1' && test "$PLATFORM" = 'wsl'; then
+          msg=$(message wsl_cask_skipped "$item" 2>/dev/null) || msg="Skipping macOS-only cask '$item' in WSL."
+          printf '%s\n' "$msg"
+        elif test "$is_cask" = '1'; then
           printf 'cask "%s"\n' "$item" >> "$brewfile_path"
         else
           printf 'brew "%s"\n' "$item" >> "$brewfile_path"
@@ -4758,7 +5027,10 @@ generate_install_inputs() {
             *" $fpkg "*) ;;
             *)
               seen_emitted_brew="$seen_emitted_brew $fpkg"
-              if test "$fcask" = '1'; then
+              if test "$fcask" = '1' && test "$PLATFORM" = 'wsl'; then
+                msg=$(message wsl_cask_skipped "$fpkg" 2>/dev/null) || msg="Skipping macOS-only cask '$fpkg' in WSL."
+                printf '%s\n' "$msg"
+              elif test "$fcask" = '1'; then
                 printf 'cask "%s"\n' "$fpkg" >> "$brewfile_path"
               else
                 printf 'brew "%s"\n' "$fpkg" >> "$brewfile_path"
@@ -4912,6 +5184,7 @@ print_feature_notes() {
 main() {
   resolve_language ''
   parse_args "$@"
+  detect_platform
   validate_home
   acquire_lock
   require_prerequisites
@@ -4947,6 +5220,7 @@ main() {
   generate_install_inputs
   install_packages
   install_languages
+  set_default_shell
   print_feature_notes
   return 0
 }
