@@ -17,6 +17,7 @@ export GIT_AUTHOR_NAME="Test User"
 export GIT_AUTHOR_EMAIL="test@example.com"
 export GIT_COMMITTER_NAME="Test User"
 export GIT_COMMITTER_EMAIL="test@example.com"
+unset XDG_CONFIG_HOME XDG_STATE_HOME
 PASS=0
 FAIL=0
 
@@ -233,7 +234,9 @@ help_without_tools_case() {
   test_home=$(make_home)
   output=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --help 2>&1) || return 1
   assert_contains "$output" 'setup.sh [OPTIONS]' || return 1
-  assert_contains "$output" '--interactive'
+  assert_contains "$output" '--interactive' || return 1
+  assert_contains "$output" '--multiline true|false' || return 1
+  assert_contains "$output" '--show-time true|false'
 }
 
 # 2. --prompt/--profile/--groups/--interactive/--all reject every pair
@@ -293,12 +296,21 @@ unknown_and_missing_values_case() {
     "--lang="
     "--agents"
     "--agents="
+    "--multiline"
+    "--multiline="
+    "--show-time"
+    "--show-time="
   )
   for opt in "${missing_val_pairs[@]}"; do
     out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" $opt 2>&1)
     test $? -ne 0 || return 1
     opt_name=${opt%=*}
     assert_contains "$out" "Option '$opt_name' requires a non-empty value." || return 1
+  done
+  for opt in --multiline --show-time; do
+    out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" "$opt" "" 2>&1)
+    test $? -ne 0 || return 1
+    assert_contains "$out" "Option '$opt' requires a non-empty value." || return 1
   done
   return 0
 }
@@ -654,6 +666,7 @@ message_key_parity_case() {
       "backup_root"
       "manual_restore"
       "invalid_font"
+      "invalid_boolean"
       "invalid_brew"
       "invalid_lang"
       "invalid_agent"
@@ -5946,10 +5959,36 @@ cli_invalid_options_case() {
     assert_contains "$out_brew" "Invalid Homebrew package name" || exit 1
     SELECTED_BREW=''
 
+    # 4. Invalid prompt boolean values in validate_custom_selections
+    out_ml=$(SELECTED_MULTILINE='yes' validate_custom_selections 2>&1)
+    test $? -ne 0 || exit 1
+    assert_contains "$out_ml" "--multiline" || exit 1
+    out_st=$(SELECTED_SHOW_TIME='0' validate_custom_selections 2>&1)
+    test $? -ne 0 || exit 1
+    assert_contains "$out_st" "--show-time" || exit 1
+
     cleanup
     trap - EXIT
     exit 0
   ) || return 1
+
+  # 5. CLI invalid --multiline and --show-time boolean values fail before mutation
+  test_home=$(make_home)
+  fake_bin=$(make_fake_bin)
+  for flag in --multiline --show-time; do
+    for bad_bool in 1 0 yes no on off True False TRUE FALSE " true" "true " invalid; do
+      out_en=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --lang en "$flag" "$bad_bool" 2>&1)
+      test $? -ne 0 || return 1
+      assert_contains "$out_en" "Invalid boolean value" || return 1
+      assert_contains "$out_en" "$flag" || return 1
+
+      out_zh=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --lang zh-TW "$flag=$bad_bool" 2>&1)
+      test $? -ne 0 || return 1
+      assert_contains "$out_zh" "$flag" || return 1
+    done
+  done
+  test ! -e "$test_home/.dotfiles" || return 1
+  test ! -e "$test_home/.config/zsh/kaisian-prompt.zsh" || return 1
   return 0
 }
 # Custom Homebrew names resolve to formulae/casks before Brewfile generation
@@ -7090,6 +7129,353 @@ EOF
   ) || return 1
   return 0
 }
+
+prompt_preferences_cli_and_partial_update_case() {
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+
+    test_home=$(make_home)
+    fake_tools=$(make_fake_bin)
+    make_behavioral_mock_stow "$fake_tools"
+    cat << 'EOF' > "$fake_tools/fzf"
+#!/bin/bash
+exit 0
+EOF
+    chmod +x "$fake_tools/fzf"
+    cat << 'EOF' > "$fake_tools/brew"
+#!/bin/bash
+exit 0
+EOF
+    chmod +x "$fake_tools/brew"
+    export KAISIAN_BREW_EXEC="$fake_tools/brew"
+
+    remote_repo=$(make_remote_repo)
+    map_file="$ROOT/fake-map-prompt-prefs.txt"
+    printf 'https://github.com/taiansu/dotfiles=%s\n' "$remote_repo" > "$map_file"
+
+    export KAISIAN_GIT_EXEC="$FAKE_GIT"
+    export KAISIAN_FAKE_GIT_MAP="$map_file"
+    export KAISIAN_GIT_TRACE_LOG="$TRACE_LOG"
+    export KAISIAN_STOW_EXEC="$fake_tools/stow"
+    export KAISIAN_FZF_EXEC="$fake_tools/fzf"
+
+    prefs_file="$test_home/.config/zsh/kaisian-prompt.zsh"
+    local_zsh="$test_home/.config/zsh/local.zsh"
+
+    # 1. No prompt flags when prefs file is absent -> does not create kaisian-prompt.zsh
+    (
+      HOME="$test_home"
+      PATH="$fake_tools:/usr/bin:/bin"
+      main --repo taiansu/dotfiles --ref main
+    ) || exit 1
+    assert_not_exists "$prefs_file" || exit 1
+
+    # 2. Existing local.zsh and kaisian-prompt.zsh remain untouched when no prompt flags are passed
+    mkdir -p "$test_home/.config/zsh"
+    printf "export PROMPT_CHAR='>'\n" > "$local_zsh"
+    printf "# custom note\nKAISIAN_PROMPT_MULTILINE=true\n" > "$prefs_file"
+    local_ino_before=$(/usr/bin/stat -f '%i' "$local_zsh")
+    prefs_ino_before=$(/usr/bin/stat -f '%i' "$prefs_file")
+    (
+      HOME="$test_home"
+      PATH="$fake_tools:/usr/bin:/bin"
+      main --repo taiansu/dotfiles --ref main
+    ) || exit 1
+    test "$(cat "$local_zsh")" = "export PROMPT_CHAR='>'" || exit 1
+    test "$(/usr/bin/stat -f '%i' "$local_zsh")" = "$local_ino_before" || exit 1
+    test "$(cat "$prefs_file")" = "$(printf '# custom note\nKAISIAN_PROMPT_MULTILINE=true')" || exit 1
+    test "$(/usr/bin/stat -f '%i' "$prefs_file")" = "$prefs_ino_before" || exit 1
+
+    # 3. Single flag on fresh state writes only that key
+    rm -f "$prefs_file"
+    (
+      HOME="$test_home"
+      PATH="$fake_tools:/usr/bin:/bin"
+      main --repo taiansu/dotfiles --ref main --multiline true
+    ) || exit 1
+    test -f "$prefs_file" && test ! -L "$prefs_file" || exit 1
+    test "$(cat "$prefs_file")" = 'KAISIAN_PROMPT_MULTILINE=true' || exit 1
+    test "$(/usr/bin/stat -f '%Lp' "$prefs_file")" = '644' || exit 1
+
+    # 4. Partial update with --show-time=false preserves KAISIAN_PROMPT_MULTILINE=true
+    (
+      HOME="$test_home"
+      PATH="$fake_tools:/usr/bin:/bin"
+      main --repo taiansu/dotfiles --ref main --show-time=false
+    ) || exit 1
+    test "$(cat "$prefs_file")" = "$(printf 'KAISIAN_PROMPT_MULTILINE=true\nKAISIAN_PROMPT_SHOW_TIME=false')" || exit 1
+
+    # 5. Partial update with --multiline=false preserves KAISIAN_PROMPT_SHOW_TIME=false
+    (
+      HOME="$test_home"
+      PATH="$fake_tools:/usr/bin:/bin"
+      main --repo taiansu/dotfiles --ref main --multiline=false
+    ) || exit 1
+    test "$(cat "$prefs_file")" = "$(printf 'KAISIAN_PROMPT_MULTILINE=false\nKAISIAN_PROMPT_SHOW_TIME=false')" || exit 1
+
+    # 6. --stow-only applies explicit prompt preferences and preserves unrelated local.zsh
+    (
+      HOME="$test_home"
+      PATH="$fake_tools:/usr/bin:/bin"
+      main --repo taiansu/dotfiles --ref main --stow-only --multiline true --show-time true
+    ) || exit 1
+    test "$(cat "$prefs_file")" = "$(printf 'KAISIAN_PROMPT_MULTILINE=true\nKAISIAN_PROMPT_SHOW_TIME=true')" || exit 1
+    test "$(cat "$local_zsh")" = "export PROMPT_CHAR='>'" || exit 1
+    test "$(/usr/bin/stat -f '%i' "$local_zsh")" = "$local_ino_before" || exit 1
+
+    # 7. Partial update merges only recognized literal boolean assignments without evaluating content
+    pwned_marker="$test_home/pwned_eval_marker"
+    cat << EOF > "$prefs_file"
+# comment line
+
+\$(touch "$pwned_marker")
+\`touch "$pwned_marker"\`
+KAISIAN_PROMPT_MULTILINE=false
+KAISIAN_PROMPT_SHOW_TIME=1
+OTHER_KEY=true
+EOF
+    (
+      HOME="$test_home"
+      PATH="$fake_tools:/usr/bin:/bin"
+      main --repo taiansu/dotfiles --ref main --show-time false
+    ) || exit 1
+    assert_not_exists "$pwned_marker" || exit 1
+    test "$(cat "$prefs_file")" = "$(printf 'KAISIAN_PROMPT_MULTILINE=false\nKAISIAN_PROMPT_SHOW_TIME=false')" || exit 1
+
+    # 8. --dry-run describes intended merged writes with zero config mutations
+    dry_before=$(cat "$prefs_file")
+    dry_ino_before=$(/usr/bin/stat -f '%i' "$prefs_file")
+    out_dry=$(
+      HOME="$test_home"
+      PATH="$fake_tools:/usr/bin:/bin"
+      main --repo taiansu/dotfiles --ref main --dry-run --multiline true
+    ) || exit 1
+    test "$(cat "$prefs_file")" = "$dry_before" || exit 1
+    test "$(/usr/bin/stat -f '%i' "$prefs_file")" = "$dry_ino_before" || exit 1
+
+    # 9. Absolute XDG_CONFIG_HOME is honored; default HOME/.config file is untouched
+    custom_xdg="$test_home/custom-xdg-config"
+    custom_prefs="$custom_xdg/zsh/kaisian-prompt.zsh"
+    out_xdg_dry=$(
+      HOME="$test_home"
+      XDG_CONFIG_HOME="$custom_xdg"
+      PATH="$fake_tools:/usr/bin:/bin"
+      main --repo taiansu/dotfiles --ref main --dry-run --multiline=false --show-time=true
+    ) || exit 1
+    assert_not_exists "$custom_prefs" || exit 1
+
+    (
+      HOME="$test_home"
+      XDG_CONFIG_HOME="$custom_xdg"
+      PATH="$fake_tools:/usr/bin:/bin"
+      main --repo taiansu/dotfiles --ref main --multiline=false --show-time=true
+    ) || exit 1
+    test -f "$custom_prefs" && test ! -L "$custom_prefs" || exit 1
+    test "$(cat "$custom_prefs")" = "$(printf 'KAISIAN_PROMPT_MULTILINE=false\nKAISIAN_PROMPT_SHOW_TIME=true')" || exit 1
+    test "$(cat "$prefs_file")" = "$dry_before" || exit 1
+
+    exit 0
+  ) || return 1
+  return 0
+}
+
+prompt_preferences_output_path_hazards_case() {
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+
+    fake_tools=$(make_fake_bin)
+    make_behavioral_mock_stow "$fake_tools"
+    cat << 'EOF' > "$fake_tools/fzf"
+#!/bin/bash
+exit 0
+EOF
+    chmod +x "$fake_tools/fzf"
+    cat << 'EOF' > "$fake_tools/brew"
+#!/bin/bash
+exit 0
+EOF
+    chmod +x "$fake_tools/brew"
+    export KAISIAN_BREW_EXEC="$fake_tools/brew"
+
+    remote_repo=$(make_remote_repo)
+    map_file="$ROOT/fake-map-prompt-hazards.txt"
+    printf 'https://github.com/taiansu/dotfiles=%s\n' "$remote_repo" > "$map_file"
+
+    export KAISIAN_GIT_EXEC="$FAKE_GIT"
+    export KAISIAN_FAKE_GIT_MAP="$map_file"
+    export KAISIAN_GIT_TRACE_LOG="$TRACE_LOG"
+    export KAISIAN_STOW_EXEC="$fake_tools/stow"
+    export KAISIAN_FZF_EXEC="$fake_tools/fzf"
+
+    # 1. Relative, root, or dot-dot XDG_CONFIG_HOME fails before any checkout mutation
+    for bad_xdg in "relative/xdg" "/" "$ROOT/a/../b" "$ROOT/a//b"; do
+      h_xdg=$(make_home)
+      if (
+        HOME="$h_xdg"
+        XDG_CONFIG_HOME="$bad_xdg"
+        PATH="$fake_tools:/usr/bin:/bin"
+        main --repo taiansu/dotfiles --ref main --multiline true
+      ) >/dev/null 2>&1; then
+        exit 1
+      fi
+      assert_not_exists "$h_xdg/.dotfiles" || exit 1
+    done
+
+    # 2. Symlink parent (~/.config or ~/.config/zsh) and non-directory parent fail before mutation
+    for parent_hazard in symlink_config symlink_zsh file_zsh; do
+      h_par=$(make_home)
+      real_outside=$(mktemp -d "$ROOT/real-outside.XXXXXX")
+      case "$parent_hazard" in
+        symlink_config)
+          ln -s "$real_outside" "$h_par/.config"
+          ;;
+        symlink_zsh)
+          mkdir -p "$h_par/.config"
+          ln -s "$real_outside" "$h_par/.config/zsh"
+          ;;
+        file_zsh)
+          mkdir -p "$h_par/.config"
+          printf 'not-a-dir\n' > "$h_par/.config/zsh"
+          ;;
+      esac
+      if (
+        HOME="$h_par"
+        PATH="$fake_tools:/usr/bin:/bin"
+        main --repo taiansu/dotfiles --ref main --multiline true
+      ) >/dev/null 2>&1; then
+        exit 1
+      fi
+      assert_not_exists "$h_par/.dotfiles" || exit 1
+      assert_not_exists "$real_outside/zsh/kaisian-prompt.zsh" || exit 1
+      assert_not_exists "$real_outside/kaisian-prompt.zsh" || exit 1
+    done
+
+    # 3. Symlink leaf (live or dangling) and non-regular leaf (directory or FIFO) fail before mutation
+    for leaf_hazard in live_symlink dangling_symlink dir_leaf fifo_leaf; do
+      h_leaf=$(make_home)
+      mkdir -p "$h_leaf/.config/zsh"
+      prefs_leaf="$h_leaf/.config/zsh/kaisian-prompt.zsh"
+      outside_file="$ROOT/outside-target-$leaf_hazard"
+      printf 'precious\n' > "$outside_file"
+      case "$leaf_hazard" in
+        live_symlink)
+          ln -s "$outside_file" "$prefs_leaf"
+          ;;
+        dangling_symlink)
+          ln -s "$ROOT/nonexistent-$leaf_hazard" "$prefs_leaf"
+          ;;
+        dir_leaf)
+          mkdir -p "$prefs_leaf"
+          ;;
+        fifo_leaf)
+          mkfifo "$prefs_leaf"
+          ;;
+      esac
+      if (
+        HOME="$h_leaf"
+        PATH="$fake_tools:/usr/bin:/bin"
+        main --repo taiansu/dotfiles --ref main --show-time false
+      ) >/dev/null 2>&1; then
+        exit 1
+      fi
+      assert_not_exists "$h_leaf/.dotfiles" || exit 1
+      test "$(cat "$outside_file")" = 'precious' || exit 1
+    done
+
+    # 4. Overlap with LOCK_DIR, CHECKOUT_DIR, or STATE_ROOT fails before mutation
+    uid=$(/usr/bin/id -u)
+    lock_dir="/private/tmp/kaisian-$uid.lock"
+    h_ov=$(make_home)
+    out_lock_ov=$(
+      HOME="$h_ov"
+      XDG_CONFIG_HOME="$lock_dir"
+      PATH="$fake_tools:/usr/bin:/bin"
+      main --repo taiansu/dotfiles --ref main --multiline true 2>&1
+    )
+    test $? -ne 0 || exit 1
+    assert_not_exists "$h_ov/.dotfiles" || exit 1
+
+    if (
+      HOME="$h_ov"
+      XDG_CONFIG_HOME="$h_ov/.dotfiles"
+      PATH="$fake_tools:/usr/bin:/bin"
+      main --repo taiansu/dotfiles --ref main --multiline true
+    ) >/dev/null 2>&1; then
+      exit 1
+    fi
+    assert_not_exists "$h_ov/.dotfiles" || exit 1
+
+    if (
+      HOME="$h_ov"
+      XDG_CONFIG_HOME="$h_ov/.local/state/kaisian"
+      PATH="$fake_tools:/usr/bin:/bin"
+      main --repo taiansu/dotfiles --ref main --multiline true
+    ) >/dev/null 2>&1; then
+      exit 1
+    fi
+    assert_not_exists "$h_ov/.dotfiles" || exit 1
+
+    # 5. Selected stow target collision vs unselected stow package
+    collision_repo=$(mktemp -d "$ROOT/collision-remote.XXXXXX")
+    (
+      cd -P "$collision_repo" || exit 1
+      git init -q
+      git config user.email "test@example.com"
+      git config user.name "Test User"
+      mkdir -p shell/dot-config/zsh colliding/dot-config/zsh
+      printf 'zshrc\n' > shell/dot-zshrc
+      printf 'aliasrc\n' > shell/dot-config/zsh/aliasrc
+      printf 'stowed-prompt-prefs\n' > colliding/dot-config/zsh/kaisian-prompt.zsh
+      cat << 'JSON' > .kaisian.json
+{
+  "schema": 1,
+  "groups": [
+    { "name": "shell", "description": { "en": "Shell", "zh-TW": "Shell" } },
+    { "name": "colliding", "description": { "en": "Colliding", "zh-TW": "Colliding" } }
+  ],
+  "profiles": { "default": ["shell", "colliding"] }
+}
+JSON
+      git add .
+      git commit -q -m "collision fixture"
+      git branch -M main
+    ) || exit 1
+    printf 'https://github.com/taiansu/dotfiles=%s\n' "$collision_repo" > "$map_file"
+
+    # 5a. When colliding package is selected, preflight rejects before moving conflicts or stowing
+    h_col=$(make_home)
+    printf 'existing-zshrc\n' > "$h_col/.zshrc"
+    zshrc_ino=$(/usr/bin/stat -f '%i' "$h_col/.zshrc")
+    if (
+      HOME="$h_col"
+      PATH="$fake_tools:/usr/bin:/bin"
+      main --repo taiansu/dotfiles --ref main --yes --multiline true
+    ) >/dev/null 2>&1; then
+      exit 1
+    fi
+    # Existing .zshrc conflict was NOT moved and nothing was stowed or written
+    test -f "$h_col/.zshrc" && test ! -L "$h_col/.zshrc" || exit 1
+    test "$(/usr/bin/stat -f '%i' "$h_col/.zshrc")" = "$zshrc_ino" || exit 1
+    assert_not_exists "$h_col/.config/zsh/kaisian-prompt.zsh" || exit 1
+    assert_not_exists "$h_col/.config/zsh/aliasrc" || exit 1
+
+    # 5b. When colliding package is unselected (--groups shell), install succeeds and writes prefs
+    (
+      HOME="$h_col"
+      PATH="$fake_tools:/usr/bin:/bin"
+      main --repo taiansu/dotfiles --ref main --yes --groups shell --multiline true --show-time false
+    ) || exit 1
+    test -L "$h_col/.zshrc" || exit 1
+    test -L "$h_col/.config/zsh/aliasrc" || exit 1
+    test -f "$h_col/.config/zsh/kaisian-prompt.zsh" && test ! -L "$h_col/.config/zsh/kaisian-prompt.zsh" || exit 1
+    test "$(cat "$h_col/.config/zsh/kaisian-prompt.zsh")" = "$(printf 'KAISIAN_PROMPT_MULTILINE=true\nKAISIAN_PROMPT_SHOW_TIME=false')" || exit 1
+
+    exit 0
+  ) || return 1
+  return 0
+}
 run_case 'Task 5 preflight target classification and exact conflict planning' task5_preflight_targets_classification_case
 run_case 'Task 5 preflight target rejection for symlink parents and special nodes' task5_preflight_targets_rejection_case
 run_case 'Task 5 preflight unselected package filtering' task5_preflight_selection_filtering_case
@@ -7122,5 +7508,7 @@ run_case 'manifest preview shape violations fail' manifest_preview_shape_violati
 run_case 'cli --agents selection, trimming, deduplication, and validation' agents_selection_and_validation_case
 run_case '--agents --dry-run and --stow-only behavior' agents_dry_run_and_stow_only_case
 run_case '--agents downloader failure, partial download non-execution, and step abort' agents_failure_handling_and_partial_download_case
+run_case 'prompt preferences CLI flags, no-flag preservation, partial updates, --stow-only, --dry-run, and XDG_CONFIG_HOME' prompt_preferences_cli_and_partial_update_case
+run_case 'prompt preferences output path hazards and selected stow target collisions' prompt_preferences_output_path_hazards_case
 printf '%s passed; %s failed\n' "$PASS" "$FAIL"
 test "$FAIL" -eq 0

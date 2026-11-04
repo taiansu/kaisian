@@ -34,6 +34,8 @@ SELECTED_BREW=''
 SELECTED_LANGS=''
 SELECTED_AGENTS=''
 SELECTED_FEATURES=''
+SELECTED_MULTILINE=''
+SELECTED_SHOW_TIME=''
 STOW_ONLY=0
 MISE_TOOLS=''
 RUN_TIMESTAMP=''
@@ -382,6 +384,132 @@ stat_dev() {
   fi
 }
 
+prompt_prefs_requested() {
+  test -n "${SELECTED_MULTILINE-}" || test -n "${SELECTED_SHOW_TIME-}"
+}
+
+resolve_prompt_prefs_path() {
+  local base_home="${PHYSICAL_HOME:-${HOME-}}"
+  local raw_cfg_root=''
+  local old_ifs=''
+  local seg=''
+
+  test -n "$base_home" || return 1
+  has_control_char "$base_home" && return 1
+  case "$base_home" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+
+  if test -n "${XDG_CONFIG_HOME+x}" && test -n "$XDG_CONFIG_HOME"; then
+    has_control_char "$XDG_CONFIG_HOME" && return 1
+    case "$XDG_CONFIG_HOME" in
+      /*) raw_cfg_root="$XDG_CONFIG_HOME" ;;
+      *) return 1 ;;
+    esac
+    while test "$raw_cfg_root" != '/' && case "$raw_cfg_root" in */) true ;; *) false ;; esac; do
+      raw_cfg_root=${raw_cfg_root%/}
+    done
+    test -n "$raw_cfg_root" && test "$raw_cfg_root" != '/' || return 1
+    case "$raw_cfg_root" in
+      *//*) return 1 ;;
+    esac
+    old_ifs=$IFS
+    IFS='/'
+    set -f
+    # shellcheck disable=SC2086
+    set -- $raw_cfg_root
+    set +f
+    IFS=$old_ifs
+    for seg in "$@"; do
+      test -n "$seg" || continue
+      case "$seg" in
+        .|..) return 1 ;;
+      esac
+    done
+  else
+    raw_cfg_root="${base_home%/}/.config"
+  fi
+
+  printf '%s/zsh/kaisian-prompt.zsh\n' "$raw_cfg_root"
+}
+
+validate_prompt_prefs_target() {
+  local prefs_file=$1
+  local guard_checkout=${2-}
+  local guard_state=${3-}
+  local guard_lock=${4-}
+  local guard_sandbox=${5-}
+  local guard_backup=${6-}
+  local prefs_dir=''
+  local p_curr=''
+  local canon_prefs=''
+  local canon_dir=''
+  local guard=''
+
+  test -n "$prefs_file" || return 1
+  has_control_char "$prefs_file" && return 1
+  case "$prefs_file" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+
+  prefs_dir=${prefs_file%/*}
+  test -n "$prefs_dir" && test "$prefs_dir" != '/' || return 1
+
+  p_curr="$prefs_dir"
+  while test "$p_curr" != '/' && test -n "$p_curr"; do
+    if test -L "$p_curr"; then return 1; fi
+    if test -e "$p_curr" && test ! -d "$p_curr"; then return 1; fi
+    p_curr=${p_curr%/*}
+    test -n "$p_curr" || p_curr='/'
+  done
+
+  if test -L "$prefs_file"; then
+    return 1
+  fi
+  if test -e "$prefs_file"; then
+    test -f "$prefs_file" && test -r "$prefs_file" || return 1
+  fi
+
+  canon_prefs=$(canonicalize_path "$prefs_file") || return 1
+  has_control_char "$canon_prefs" && return 1
+  canon_dir=$(canonicalize_path "$prefs_dir") || return 1
+  has_control_char "$canon_dir" && return 1
+
+  for guard in "$guard_checkout" "$guard_state" "$guard_lock" "$guard_sandbox" "$guard_backup"; do
+    test -n "$guard" || continue
+    paths_overlap "$canon_prefs" "$guard" && return 1
+    case "$guard/" in "$canon_dir/"*) return 1 ;; esac
+  done
+
+  return 0
+}
+
+validate_prompt_prefs_early() {
+  local prefs_file=''
+  local canon_checkout=''
+  local canon_state=''
+  local canon_lock=''
+  local canon_sandbox=''
+
+  prefs_file=$(resolve_prompt_prefs_path) || return 1
+  if test -n "$CHECKOUT_DIR"; then
+    canon_checkout=$(canonicalize_path "$CHECKOUT_DIR") || return 1
+  fi
+  if test -n "$STATE_ROOT"; then
+    canon_state=$(canonicalize_path "$STATE_ROOT") || return 1
+  fi
+  if test -n "$LOCK_DIR"; then
+    canon_lock=$(canonicalize_path "$LOCK_DIR") || return 1
+  fi
+  if test -n "$SANDBOX"; then
+    canon_sandbox=$(canonicalize_path "$SANDBOX") || return 1
+  fi
+  validate_prompt_prefs_target "$prefs_file" "$canon_checkout" "$canon_state" "$canon_lock" "$canon_sandbox" '' || return 1
+  return 0
+}
+
 preflight_targets() {
   has_control_char "${PHYSICAL_HOME-}" && return 1
   has_control_char "${HOME-}" && return 1
@@ -473,6 +601,25 @@ preflight_targets() {
   if test -n "$STATE_ROOT" && test -n "$canon_sandbox"; then
     paths_overlap "$STATE_ROOT" "$canon_sandbox" && return 1
   fi
+  prompt_prefs_file=''
+  folded_prompt_prefs=''
+  if prompt_prefs_requested; then
+    case "${SELECTED_MULTILINE-}" in
+      ''|true|false) ;;
+      *) return 1 ;;
+    esac
+    case "${SELECTED_SHOW_TIME-}" in
+      ''|true|false) ;;
+      *) return 1 ;;
+    esac
+    prompt_prefs_file=$(resolve_prompt_prefs_path) || return 1
+    validate_prompt_prefs_target "$prompt_prefs_file" "$canon_checkout" "$STATE_ROOT" "$canon_lock" "$canon_sandbox" "$BACKUP_ROOT" || return 1
+    folded_prompt_prefs=$(ascii_fold "$prompt_prefs_file")
+    if test -n "${SELECTED_FONT-}"; then
+      paths_overlap "$folded_prompt_prefs" "$(ascii_fold "$PHYSICAL_HOME/.config/ghostty/kaisian.conf")" && return 1
+    fi
+  fi
+
 
   test -n "$SANDBOX" && test -d "$SANDBOX" || return 1
   MAPPING_FILE="$SANDBOX/mapping.tsv"
@@ -514,6 +661,10 @@ preflight_targets() {
       if test -e "$dst" && test ! -d "$dst"; then
         return 1
       fi
+      if test -n "$folded_prompt_prefs"; then
+        folded_dst=$(ascii_fold "$dst")
+        case "$folded_dst/" in "$folded_prompt_prefs/"*) return 1 ;; esac
+      fi
       continue
     fi
 
@@ -521,6 +672,11 @@ preflight_targets() {
     source="$CHECKOUT_DIR/$pkg/$src"
 
     physical_parent_safe "$dst" || return 1
+
+    if test -n "$folded_prompt_prefs"; then
+      folded_dst=$(ascii_fold "$dst")
+      paths_overlap "$folded_dst" "$folded_prompt_prefs" && return 1
+    fi
 
     if test ! -e "$dst" && test ! -L "$dst"; then
       continue
@@ -591,6 +747,11 @@ preflight_targets() {
         done
 
         physical_parent_safe "$dst" || return 1
+
+        if test -n "$folded_prompt_prefs"; then
+          folded_dst=$(ascii_fold "$dst")
+          paths_overlap "$folded_dst" "$folded_prompt_prefs" && return 1
+        fi
 
         if test ! -e "$dst" && test ! -L "$dst"; then
           continue
@@ -1050,6 +1211,8 @@ Selection, exactly zero or one (none: the default profile from the manifest):
 
 Customization (optional):
   --font CASK
+  --multiline true|false
+  --show-time true|false
   --brew PKG[,PKG...]
   --langs LANG[,LANG...]
   --agents AGENT[,AGENT...]
@@ -1248,6 +1411,7 @@ message_en() {
     backup_root) printf 'Backup root: %s' "${1-}" ;;
     manual_restore) printf 'Restore manually with: mv %s %s' "${1-}" "${2-}" ;;
     invalid_font) printf "Invalid font '%s'. It is not declared in the manifest." "${1-}" ;;
+    invalid_boolean) printf "Invalid boolean value '%s' for '%s'. Supported: true, false." "${2-}" "${1-}" ;;
     invalid_brew) printf "Invalid Homebrew package name '%s'." "${1-}" ;;
     brew_not_found) printf "Homebrew package '%s' was not found as a formula or cask." "${1-}" ;;
     brew_resolve_dry_run) printf "Would resolve Homebrew package type: %s" "${1-}" ;;
@@ -1428,6 +1592,7 @@ message_zh_tw() {
     backup_root) printf '備份根目錄：%s' "${1-}" ;;
     manual_restore) printf '手動還原指令：mv %s %s' "${1-}" "${2-}" ;;
     invalid_font) printf '無效的字型「%s」。未在 manifest 中宣告。' "${1-}" ;;
+    invalid_boolean) printf '選項「%s」的布林值「%s」無效。僅支援：true, false。' "${1-}" "${2-}" ;;
     invalid_brew) printf '無效的 Homebrew 套件名稱「%s」。' "${1-}" ;;
     brew_not_found) printf '找不到 Homebrew formula 或 cask「%s」。' "${1-}" ;;
     brew_resolve_dry_run) printf '將會辨識 Homebrew 套件類型：%s' "${1-}" ;;
@@ -1546,6 +1711,21 @@ validate_agents() {
     test "$has_more" -eq 0 && break
   done
   SELECTED_AGENTS="$deduped_agents"
+}
+
+validate_prompt_options() {
+  if test -n "${SELECTED_MULTILINE-}"; then
+    case "$SELECTED_MULTILINE" in
+      true|false) ;;
+      *) die invalid_boolean '--multiline' "$SELECTED_MULTILINE" ;;
+    esac
+  fi
+  if test -n "${SELECTED_SHOW_TIME-}"; then
+    case "$SELECTED_SHOW_TIME" in
+      true|false) ;;
+      *) die invalid_boolean '--show-time' "$SELECTED_SHOW_TIME" ;;
+    esac
+  fi
 }
 
 parse_args() {
@@ -1696,6 +1876,34 @@ parse_args() {
         test -n "$val" || die missing_option_value '--font'
         SELECTED_FONT="$val"
         ;;
+      --multiline|--multiline=*)
+        if test "$arg" = '--multiline'; then
+          test $# -gt 0 || die missing_option_value '--multiline'
+          val=$1
+          shift
+        else
+          val=${arg#--multiline=}
+        fi
+        test -n "$val" || die missing_option_value '--multiline'
+        case "$val" in
+          true|false) SELECTED_MULTILINE="$val" ;;
+          *) die invalid_boolean '--multiline' "$val" ;;
+        esac
+        ;;
+      --show-time|--show-time=*)
+        if test "$arg" = '--show-time'; then
+          test $# -gt 0 || die missing_option_value '--show-time'
+          val=$1
+          shift
+        else
+          val=${arg#--show-time=}
+        fi
+        test -n "$val" || die missing_option_value '--show-time'
+        case "$val" in
+          true|false) SELECTED_SHOW_TIME="$val" ;;
+          *) die invalid_boolean '--show-time' "$val" ;;
+        esac
+        ;;
       --brew|--brew=*)
         if test "$arg" = '--brew'; then
           test $# -gt 0 || die missing_option_value '--brew'
@@ -1772,6 +1980,7 @@ parse_args() {
   fi
   validate_langs
   validate_agents
+  validate_prompt_options
 }
 
 validate_home() {
@@ -1924,6 +2133,13 @@ acquire_lock() {
   test -k '/private/tmp' || die lock_failed "$LOCK_DIR"
   check_path_overlap_with_lock "$CHECKOUT_DIR"
   check_path_overlap_with_lock "$STATE_ROOT"
+  if prompt_prefs_requested; then
+    if test -n "${XDG_CONFIG_HOME-}"; then
+      check_path_overlap_with_lock "$XDG_CONFIG_HOME/zsh/kaisian-prompt.zsh"
+    else
+      check_path_overlap_with_lock "$PHYSICAL_HOME/.config/zsh/kaisian-prompt.zsh"
+    fi
+  fi
 
   if ! ( umask 077 && /bin/mkdir "$LOCK_DIR" 2>/dev/null ); then
     die lock_failed "$LOCK_DIR"
@@ -1956,6 +2172,13 @@ acquire_lock() {
   # Re-check path overlap after sandbox exists to ensure symlink-plus-.. cannot bypass lock containment
   check_path_overlap_with_lock "$CHECKOUT_DIR"
   check_path_overlap_with_lock "$STATE_ROOT"
+  if prompt_prefs_requested; then
+    if test -n "${XDG_CONFIG_HOME-}"; then
+      check_path_overlap_with_lock "$XDG_CONFIG_HOME/zsh/kaisian-prompt.zsh"
+    else
+      check_path_overlap_with_lock "$PHYSICAL_HOME/.config/zsh/kaisian-prompt.zsh"
+    fi
+  fi
 }
 
 cleanup() {
@@ -4580,6 +4803,7 @@ validate_custom_selections() {
     done
   fi
   validate_agents
+  validate_prompt_options
 }
 
 stow_selected_packages() {
@@ -4633,6 +4857,132 @@ write_font_override() {
   # as a fallback; an empty value resets the list so the chosen font becomes primary.
   ( umask 022 && printf 'font-family = ""\nfont-family = "%s"\n' "$font_family" > "$font_conf" ) || die invalid_targets "failed to write $font_conf"
   /bin/chmod 644 "$font_conf" 2>/dev/null || true
+}
+
+write_prompt_preferences() {
+  prompt_prefs_requested || return 0
+  validate_prompt_options
+
+  local prefs_file=''
+  local prefs_dir=''
+  local canon_checkout=''
+  local canon_lock=''
+  local canon_sandbox=''
+  local existing_multiline=''
+  local existing_show_time=''
+  local final_multiline=''
+  local final_show_time=''
+  local line=''
+  local summary=''
+  local tmp_prefs=''
+  local chk_p=''
+
+  prefs_file=$(resolve_prompt_prefs_path) || die invalid_targets 'invalid prompt preferences path'
+  if test -n "$CHECKOUT_DIR"; then
+    canon_checkout=$(canonicalize_path "$CHECKOUT_DIR" 2>/dev/null) || canon_checkout="$CHECKOUT_DIR"
+  fi
+  if test -n "$LOCK_DIR"; then
+    canon_lock=$(canonicalize_path "$LOCK_DIR" 2>/dev/null) || canon_lock="$LOCK_DIR"
+  fi
+  if test -n "$SANDBOX"; then
+    canon_sandbox=$(canonicalize_path "$SANDBOX" 2>/dev/null) || canon_sandbox="$SANDBOX"
+  fi
+  validate_prompt_prefs_target "$prefs_file" "$canon_checkout" "${STATE_ROOT-}" "$canon_lock" "$canon_sandbox" "${BACKUP_ROOT-}" || die invalid_targets "$prefs_file"
+
+  if test -f "$prefs_file" && test ! -L "$prefs_file"; then
+    while IFS= read -r line || test -n "$line"; do
+      case "$line" in
+        'KAISIAN_PROMPT_MULTILINE=true')
+          existing_multiline='true'
+          ;;
+        'KAISIAN_PROMPT_MULTILINE=false')
+          existing_multiline='false'
+          ;;
+        'KAISIAN_PROMPT_MULTILINE='*)
+          existing_multiline=''
+          ;;
+        'KAISIAN_PROMPT_SHOW_TIME=true')
+          existing_show_time='true'
+          ;;
+        'KAISIAN_PROMPT_SHOW_TIME=false')
+          existing_show_time='false'
+          ;;
+        'KAISIAN_PROMPT_SHOW_TIME='*)
+          existing_show_time=''
+          ;;
+      esac
+    done < "$prefs_file"
+  fi
+
+  if test -n "${SELECTED_MULTILINE-}"; then
+    final_multiline="$SELECTED_MULTILINE"
+  else
+    final_multiline="$existing_multiline"
+  fi
+
+  if test -n "${SELECTED_SHOW_TIME-}"; then
+    final_show_time="$SELECTED_SHOW_TIME"
+  else
+    final_show_time="$existing_show_time"
+  fi
+
+  if test "$DRY_RUN" -eq 1; then
+    if test -n "$final_multiline" && test -n "$final_show_time"; then
+      summary="KAISIAN_PROMPT_MULTILINE=$final_multiline KAISIAN_PROMPT_SHOW_TIME=$final_show_time"
+    elif test -n "$final_multiline"; then
+      summary="KAISIAN_PROMPT_MULTILINE=$final_multiline"
+    else
+      summary="KAISIAN_PROMPT_SHOW_TIME=$final_show_time"
+    fi
+    printf 'Would write prompt preferences %s: %s\n' "$prefs_file" "$summary"
+    return 0
+  fi
+
+  prefs_dir="${prefs_file%/*}"
+  /bin/mkdir -p "$prefs_dir" 2>/dev/null || die invalid_targets "failed to create $prefs_dir"
+  chk_p="$prefs_dir"
+  while test "$chk_p" != '/' && test -n "$chk_p"; do
+    if test -L "$chk_p" || test ! -d "$chk_p"; then
+      die invalid_targets "$prefs_file"
+    fi
+    chk_p=${chk_p%/*}
+    test -n "$chk_p" || chk_p='/'
+  done
+  if test -L "$prefs_file" || { test -e "$prefs_file" && test ! -f "$prefs_file"; }; then
+    die invalid_targets "$prefs_file"
+  fi
+
+  tmp_prefs="$prefs_dir/.kaisian-prompt.zsh.tmp.$$"
+  if test -L "$tmp_prefs" || { test -e "$tmp_prefs" && test ! -f "$tmp_prefs"; }; then
+    die invalid_targets "$tmp_prefs"
+  fi
+  /bin/rm -f -- "$tmp_prefs" 2>/dev/null || true
+  (
+    umask 022
+    : > "$tmp_prefs" || exit 1
+    if test -n "$final_multiline"; then
+      printf 'KAISIAN_PROMPT_MULTILINE=%s\n' "$final_multiline" >> "$tmp_prefs" || exit 1
+    fi
+    if test -n "$final_show_time"; then
+      printf 'KAISIAN_PROMPT_SHOW_TIME=%s\n' "$final_show_time" >> "$tmp_prefs" || exit 1
+    fi
+  ) || {
+    /bin/rm -f -- "$tmp_prefs" 2>/dev/null || true
+    die invalid_targets "failed to write $prefs_file"
+  }
+  /bin/chmod 644 "$tmp_prefs" 2>/dev/null || {
+    /bin/rm -f -- "$tmp_prefs" 2>/dev/null || true
+    die invalid_targets "failed to chmod $prefs_file"
+  }
+  if test -L "$prefs_file" || { test -e "$prefs_file" && test ! -f "$prefs_file"; }; then
+    /bin/rm -f -- "$tmp_prefs" 2>/dev/null || true
+    die invalid_targets "$prefs_file"
+  fi
+  if ! /bin/mv -f "$tmp_prefs" "$prefs_file" 2>/dev/null; then
+    /bin/rm -f -- "$tmp_prefs" 2>/dev/null || true
+    die invalid_targets "failed to move $prefs_file"
+  fi
+  test -f "$prefs_file" && test ! -L "$prefs_file" || die invalid_targets "$prefs_file"
 }
 
 apply_feature_copies() {
@@ -5267,6 +5617,9 @@ main() {
   parse_args "$@"
   validate_home
   acquire_lock
+  if prompt_prefs_requested; then
+    validate_prompt_prefs_early || die invalid_targets
+  fi
   require_prerequisites
 
   if test -z "$CHECKOUT_DIR"; then
@@ -5295,6 +5648,7 @@ main() {
   move_conflicts || exit 1
   stow_selected_packages
   write_font_override
+  write_prompt_preferences
   apply_feature_copies
   apply_feature_hotkeys
   generate_install_inputs

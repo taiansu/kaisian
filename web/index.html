@@ -150,17 +150,60 @@
       padding: 14px 16px;
       min-height: 82px;
       overflow-x: auto;
-      white-space: pre;
+      white-space: normal;
       color: #e3e5e5;
       font-size: 18px;
       line-height: 1.5;
       box-sizing: border-box;
     }
     .preview-line {
-      display: block;
-      font-size: 20px;
+      display: flex;
+      align-items: baseline;
+      font-size: clamp(13px, 2vw, 20px);
       line-height: 1.5;
       min-height: 1.5em;
+    }
+    .preview-left {
+      flex: 0 0 auto;
+      white-space: pre;
+    }
+    .preview-time {
+      margin-left: auto;
+      padding-left: 1.5em;
+      flex-shrink: 0;
+      white-space: pre;
+      color: #9ca3b5;
+    }
+    .preview-time[hidden] {
+      display: none;
+    }
+    .prompt-options {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px 24px;
+      padding: 16px 20px 0;
+      clear: both;
+    }
+    .prompt-option {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      font-size: 15px;
+      cursor: pointer;
+    }
+    .prompt-option input {
+      margin: 0;
+      width: 16px;
+      height: 16px;
+      flex-shrink: 0;
+      accent-color: var(--accent);
+    }
+    .font-detail {
+      margin: 0;
+      padding: 16px 20px 0;
+      font-size: 15px;
+      line-height: 1.6;
+      color: var(--muted);
     }
     .preview-segment {
       display: inline;
@@ -391,6 +434,19 @@
       padding: 14px 20px 18px;
       border-top: 1px solid rgba(207, 201, 195, 0.35);
       clear: both;
+    }
+    .langs-section {
+      display: flex;
+      flex-direction: column;
+    }
+    .langs-section .custom-tools-wrap {
+      display: flex;
+      flex-direction: column;
+      flex: 1;
+    }
+    .langs-section .custom-tools-help {
+      margin-top: auto;
+      padding-top: 16px;
     }
     .custom-tools-label {
       display: block;
@@ -676,6 +732,7 @@
       { value: "rust", label: "rust" },
       { value: "ruby", label: "ruby" },
       { value: "bun", label: "bun" },
+      { value: "go", label: "go" },
     ];
     const FIXED_AGENTS = [
       { value: "codex", label: "Codex CLI", marker: "*" },
@@ -706,6 +763,9 @@
         language: "Language",
         groups: "1. Prompt style",
         fonts: "2. Font",
+        multiline: "Two-line prompt",
+        showTime: "Show time",
+        previewTime: "Example prompt timestamp",
         brew: "3. Homebrew tools",
         langs: "4. Languages",
         agents: "5. AI CLI",
@@ -742,6 +802,9 @@
         language: "語言",
         groups: "1. 提示字元樣式",
         fonts: "2. 字型",
+        multiline: "雙行顯示",
+        showTime: "顯示時間",
+        previewTime: "提示字元時間範例",
         brew: "3. 安裝工具",
         langs: "4. 程式語言",
         agents: "5. AI CLI",
@@ -779,6 +842,8 @@
       manifest: null,
       prompt: "",
       font: "",
+      multiline: false,
+      showTime: true,
       brew: new Set(),
       customBrewInput: "",
       langs: new Set(["python", "node"]),
@@ -1011,55 +1076,80 @@
       if (checked) set.add(value); else set.delete(value);
     }
 
+    let previewResizeObserver;
+
+    function fitPreviewTime() {
+      const clock = byId("preview-time");
+      if (!clock) return;
+      clock.hidden = false;
+      const left = clock.previousElementSibling;
+      clock.hidden = left.getBoundingClientRect().width + clock.getBoundingClientRect().width
+        > clock.parentElement.clientWidth;
+    }
+
     function renderPreview() {
+      previewResizeObserver?.disconnect();
       const container = byId("preview-content");
       container.replaceChildren();
       const promptGroup = state.manifest?.groups?.find(g => g.name === state.prompt);
       const font = state.manifest?.fonts?.find(f => f.cask === state.font || f.preview === state.font);
       const fontPreviewFamily = font?.preview || font?.family || "monospace";
       const fontStack = `"${fontPreviewFamily}", ui-monospace, "SF Mono", Menlo, Consolas, monospace`;
-
-      const panel = byId("preview-panel");
-      panel.style.fontFamily = fontStack;
+      byId("preview-panel").style.fontFamily = fontStack;
       container.style.fontFamily = fontStack;
 
-      const lines = promptGroup?.preview ?? [];
-      if (lines.length) {
-        for (const line of lines) {
-          const lineEl = document.createElement("div");
-          lineEl.className = "preview-line";
-          lineEl.style.fontFamily = fontStack;
-          for (const seg of line) {
-            const span = document.createElement("span");
-            span.className = "preview-segment";
-            span.style.fontFamily = fontStack;
-            if (seg.color) span.style.color = seg.color === "blue" ? "#7aa2f7" : seg.color;
-            if (seg.bg) span.style.backgroundColor = seg.bg;
-            renderSegmentText(span, seg.text);
-            lineEl.append(span);
-          }
-          container.append(lineEl);
+      // Preview metadata separates context from the input marker for every theme.
+      const [context = [], input = []] = promptGroup?.preview ?? [
+        [{ text: "~/p/kaisian" }], [{ text: "❯ " }],
+      ];
+      function appendLine(segments, withCursor = false) {
+        const row = document.createElement("div");
+        row.className = "preview-line";
+        const left = document.createElement("span");
+        left.className = "preview-left";
+        for (const segment of segments) {
+          const span = document.createElement("span");
+          span.className = "preview-segment";
+          if (segment.color) span.style.color = segment.color === "blue" ? "#7aa2f7" : segment.color;
+          if (segment.bg) span.style.backgroundColor = segment.bg;
+          renderSegmentText(span, segment.text);
+          left.append(span);
         }
-      } else {
-        const lineEl = document.createElement("div");
-        lineEl.className = "preview-line";
-        lineEl.style.fontFamily = fontStack;
-        const span = document.createElement("span");
-        span.className = "preview-segment";
-        span.textContent = state.prompt ? `~/p/kaisian ❯` : "";
-        span.style.fontFamily = fontStack;
-        lineEl.append(span);
-        container.append(lineEl);
+        if (withCursor) {
+          const cursor = document.createElement("span");
+          cursor.className = "preview-cursor";
+          cursor.setAttribute("aria-hidden", "true");
+          left.append(cursor);
+        }
+        row.append(left);
+        container.append(row);
+        return row;
       }
 
-      const cursor = document.createElement("span");
-      cursor.className = "preview-cursor";
-      cursor.setAttribute("aria-hidden", "true");
-      container.lastElementChild?.append(cursor);
+      let inputRow;
+      if (state.multiline) {
+        appendLine(context);
+        inputRow = appendLine(input, true);
+      } else {
+        inputRow = appendLine([...context, { text: " " }, ...input], true);
+      }
+      if (state.showTime) {
+        const clock = document.createElement("span");
+        clock.id = "preview-time";
+        clock.className = "preview-time";
+        clock.textContent = "12:34:56";
+        clock.setAttribute("aria-label", text("previewTime"));
+        inputRow.append(clock);
+        previewResizeObserver = new ResizeObserver(fitPreviewTime);
+        previewResizeObserver.observe(inputRow);
+        previewResizeObserver.observe(inputRow.firstElementChild);
+        fitPreviewTime();
+      }
 
       const promptName = promptGroup?.name || state.prompt || "";
       const fontName = font?.preview || font?.family || "";
-      byId("preview-caption").textContent = `PREVIEW · ${promptName} · ${fontName}`;
+      byId("preview-caption").textContent = `PREVIEW · ${promptName} · ${fontName}`
+        + ` · ${state.multiline ? "2 LINES" : "1 LINE"} · TIME ${state.showTime ? "ON" : "OFF"}`;
     }
 
     function renderPromptSection() {
@@ -1091,6 +1181,25 @@
 
       wrap.append(selectEl);
       fieldset.append(wrap);
+
+      const options = document.createElement("div");
+      options.className = "prompt-options";
+      for (const key of ["multiline", "showTime"]) {
+        const label = document.createElement("label");
+        label.className = "prompt-option";
+        const input = document.createElement("input");
+        Object.assign(input, { type: "checkbox", id: key, name: key, checked: state[key] });
+        input.addEventListener("change", () => {
+          state[key] = input.checked;
+          renderPreview();
+          buildCommand();
+        });
+        const title = document.createElement("span");
+        title.textContent = text(key);
+        label.append(input, title);
+        options.append(label);
+      }
+      fieldset.append(options);
     }
 
     function renderFontSection() {
@@ -1103,6 +1212,7 @@
       selectEl.name = "font";
       selectEl.className = "styled-select";
       selectEl.setAttribute("aria-label", text("fonts"));
+      selectEl.setAttribute("aria-describedby", "font-detail");
 
       for (const font of state.manifest.fonts) {
         const opt = document.createElement("option");
@@ -1122,16 +1232,28 @@
         }
       });
 
+      const detail = document.createElement("p");
+      detail.id = "font-detail";
+      detail.className = "font-detail";
+      detail.setAttribute("aria-live", "polite");
+      function updateDetail() {
+        const selected = state.manifest.fonts.find(font => font.cask === state.font);
+        detail.textContent = selected ? description(selected) : "";
+      }
+
       selectEl.addEventListener("change", event => {
         const val = event.target.value;
         const found = state.manifest.fonts.find(f => f.cask === val || f.preview === val);
         state.font = found ? found.cask : val;
+        updateDetail();
         renderPreview();
         buildCommand();
       });
 
       wrap.append(selectEl);
       fieldset.append(wrap);
+      updateDetail();
+      fieldset.append(detail);
     }
 
     function appendCustomToolsField(fieldset, {
@@ -1220,6 +1342,7 @@
 
     function renderLangsSection() {
       const fieldset = section("langs");
+      fieldset.classList.add("langs-section");
       for (const lang of FIXED_LANGS) {
         choice(
           fieldset,
@@ -1229,10 +1352,7 @@
           lang.label,
           "",
           state.langs.has(lang.value),
-          checked => {
-            select(state.langs, lang.value, checked);
-            updateCustomLangsUI();
-          }
+          checked => select(state.langs, lang.value, checked)
         );
       }
 
@@ -1460,6 +1580,7 @@
         parts.push("--prompt", state.prompt);
       }
       if (state.font) parts.push("--font", state.font);
+      parts.push("--multiline", String(state.multiline), "--show-time", String(state.showTime));
       if (brewList.length) parts.push("--brew", brewList.join(","));
       if (langs.length) parts.push("--langs", langs.join(","));
       if (agents.length) parts.push("--agents", agents.join(","));

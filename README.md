@@ -25,11 +25,13 @@ Homebrew installation may require a sudo password.
 | `--interactive` | Select groups with fzf, if installed; optional terminal-only mode. |
 | `--all` | Select every group; still subject to the one-prompt limit. |
 | `--font CASK` | Select a cask from the manifest's `fonts` array. |
+| `--multiline true\|false` | Put context and command input on two lines, or combine them on one line. |
+| `--show-time true\|false` | Show or hide the prompt timestamp. When enabled explicitly, it appears at the input line's right edge. |
 | `--brew NAME[,NAME...]` | Select catalog entries or add official Homebrew formula/cask names. Extra names are verified and classified by Homebrew before dotfiles are applied. |
-| `--langs LANG[,LANG...]` | Select tools to install via mise (e.g. `python,node` or any tool in the mise registry); Elixir also installs Erlang. |
+| `--langs LANG[,LANG...]` | Select tools to install via mise (e.g. `python,node,go` or any tool in the mise registry); Elixir also installs Erlang. |
 | `--agents ID[,ID...]` | Run selected official AI CLI installers: `codex`, `claude`, `pi`, `omp`. |
 | `--features NAME[,NAME...]` | Select features from the manifest's `features` array. |
-| `--stow-only` | Bootstrap and stow, and write the font override, but do not install packages, languages, or AI CLIs. |
+| `--stow-only` | Bootstrap and stow, and write selected font/prompt preferences, but do not install packages, languages, or AI CLIs. |
 | `--dry-run` | Preview changes, bootstrap requirements, and generated inputs without installing anything. |
 | `--lang en\|zh-TW` | Set the installer language. |
 | `--repo URL\|OWNER/REPO[/tree/REF]` | Use another dotfiles source; requires a ref via `/tree/REF` or `--ref`. |
@@ -68,6 +70,35 @@ For local testing, `KAISIAN_MISE_EXEC` selects a replacement mise executable,
 `KAISIAN_ACTIVATE_SETTINGS_EXEC` replaces activateSettings.
 `KAISIAN_AGENT_DOWNLOADER` replaces AI installer downloads only when
 `KAISIAN_TESTING=1`; production always uses the fixed official URLs.
+
+## Prompt preferences
+
+The page defaults to a single-line prompt with time enabled. The two checkboxes
+apply to all six themes, keep their values when changing themes, fonts, or
+languages, and emit explicit `--multiline false --show-time true` arguments.
+The font selector displays the selected font's localized feature description.
+Prompt and font cards share the same desktop row height.
+
+Both flags accept only `true` or `false`, in spaced or `--flag=value` form.
+When neither is supplied, the CLI leaves stored preferences untouched; a fresh
+installation retains each theme's native layout and time defaults.
+Explicit settings are written to
+`${XDG_CONFIG_HOME:-$HOME/.config}/zsh/kaisian-prompt.zsh` as
+`KAISIAN_PROMPT_MULTILINE` and `KAISIAN_PROMPT_SHOW_TIME`. Partial updates keep
+the other stored setting. This file is loaded before `local.zsh`, so personal
+overrides still win. The installer does not source the stored file.
+
+Explicitly enabled time uses `HH:MM:SS` on `RPROMPT`, in the input row for both
+layouts. It records the prompt-render time, not a continuously updating clock.
+The web preview uses a fixed sample time and hides it when the row is too narrow,
+as zsh does for an overlapping right prompt. Disabling time does not remove
+Default's SSH indicator. Switching Tokyo Night to a single line moves its native
+inline timestamp to the right, without leaving a colored time segment behind.
+
+Default, Bracketed, and Nerd Font use the same Smyck-inspired foreground colors
+in their real zsh layouts and manifest previews; the other themes retain their
+existing palettes. `--dry-run` reports preference writes without changing the
+configuration; `--stow-only` applies selected preferences without installing tools.
 
 ## AI CLI installers
 
@@ -183,6 +214,11 @@ entries), and `notes` (localized post-install guidance). Schema 1 manifests with
 `kind`, `fonts`, `brew`, or `features` remain supported. Do not list Homebrew, git,
 stow, or mise as optional tools.
 
+Prompt `preview` data separates context and the input marker into two segment
+arrays. Do not embed time or alignment-padding spaces in these arrays: the page
+combines the rows and positions the optional timestamp. Font `description`
+contains the localized feature summary shown below the selector.
+
 Publish installer support for new manifest fields before publishing a dotfiles
 manifest that uses them. The default installer reads the dotfiles `kaisian`
 branch; editing only dotfiles `main` does not change the released manifest.
@@ -195,6 +231,9 @@ the manifest from the dotfiles repository's **kaisian branch**; change
 layout is published elsewhere. The installer source and selected dotfiles ref
 must also contain the matching manifest and package layout before generated
 commands can be used end to end.
+For prompt-option releases, publish the updated dotfiles `kaisian` branch and
+matching two-part preview metadata before deploying the new page; otherwise the
+released shell layouts will not read the generated prompt preferences.
 
 Local preview (Python 3):
 
@@ -212,6 +251,8 @@ Homebrew and mise names are validated against the installer's format rules;
 invalid input disables command copying. Homebrew performs authoritative
 existence and formula/cask classification during installer preflight. Empty
 flags are omitted, and the copy button has a manual-copy fallback.
+The language card keeps its format-rule help at the bottom of the desktop card;
+on narrow screens it follows the custom-tool input in normal flow.
 
 Deploy to Cloudflare Workers with Wrangler:
 
