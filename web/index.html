@@ -296,6 +296,35 @@
       color: var(--text);
       overflow-wrap: anywhere;
     }
+    .choice.agent-choice {
+      align-items: center;
+    }
+    .choice.agent-choice input {
+      margin: 0;
+    }
+    .agent-choice .agent-title {
+      display: flex;
+      align-items: center;
+      gap: .5em;
+      line-height: 1.4;
+    }
+    .agent-title sup {
+      line-height: 0;
+    }
+    .agent-icon {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 1.2em;
+      height: 1em;
+      flex: 0 0 auto;
+      pointer-events: none;
+    }
+    .agent-icon svg {
+      display: block;
+      height: 100%;
+      width: auto;
+    }
     .choice small {
       display: block;
       font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
@@ -309,6 +338,11 @@
       font-style: italic;
       margin-top: 4px;
     }
+    .choice .feature-note {
+      margin-top: 16px;
+      font-style: normal;
+      font-weight: 700;
+    }
     .feature-bullets {
       margin: 6px 0 6px 18px;
       padding: 0;
@@ -320,7 +354,13 @@
     .feature-bullets li {
       margin-bottom: 4px;
     }
+    .always-installed-section {
+      grid-column: 1 / -1;
+    }
     .always-installed-list {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr));
+      gap: 12px 24px;
       margin: 12px 20px 12px 36px;
       padding: 0;
       clear: both;
@@ -330,7 +370,8 @@
       color: var(--text);
     }
     .always-installed-list li {
-      margin-bottom: 6px;
+      min-width: 0;
+      overflow-wrap: anywhere;
     }
     .always-installed-list strong {
       font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
@@ -636,6 +677,22 @@
       { value: "ruby", label: "ruby" },
       { value: "bun", label: "bun" },
     ];
+    const FIXED_AGENTS = [
+      { value: "codex", label: "Codex CLI", marker: "*" },
+      { value: "claude", label: "Claude Code" },
+      { value: "pi", label: "Pi", marker: "**" },
+      { value: "omp", label: "omp" },
+    ];
+    const AGENT_ICONS = {
+      // OpenAI Blossom path from https://openai.com/brand/; construction guides omitted.
+      codex: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="146.694 227.042 267.198 264.812" aria-hidden="true" focusable="false"><path fill="black" d="M249.176 323.434V298.276C249.176 296.158 249.971 294.569 251.825 293.509L302.406 264.381C309.29 260.409 317.5 258.555 325.973 258.555C357.75 258.555 377.877 283.185 377.877 309.399C377.877 311.253 377.877 313.371 377.611 315.49L325.178 284.771C322.001 282.919 318.822 282.919 315.645 284.771L249.176 323.434ZM367.283 421.415V361.301C367.283 357.592 365.694 354.945 362.516 353.092L296.048 314.43L317.763 301.982C319.617 300.925 321.206 300.925 323.058 301.982L373.639 331.112C388.205 339.586 398.003 357.592 398.003 375.069C398.003 395.195 386.087 413.733 367.283 421.412V421.415ZM233.553 368.452L211.838 355.742C209.986 354.684 209.19 353.095 209.19 350.975V292.718C209.19 264.383 230.905 242.932 260.301 242.932C271.423 242.932 281.748 246.641 290.49 253.26L238.321 283.449C235.146 285.303 233.555 287.951 233.555 291.659V368.455L233.553 368.452ZM280.292 395.462L249.176 377.985V340.913L280.292 323.436L311.407 340.913V377.985L280.292 395.462ZM300.286 475.968C289.163 475.968 278.837 472.259 270.097 465.64L322.264 435.449C325.441 433.597 327.03 430.949 327.03 427.239V350.445L349.011 363.155C350.865 364.213 351.66 365.802 351.66 367.922V426.179C351.66 454.514 329.679 475.965 300.286 475.965V475.968ZM237.525 416.915L186.944 387.785C172.378 379.31 162.582 361.305 162.582 343.827C162.582 323.436 174.763 305.164 193.563 297.485V357.861C193.563 361.571 195.154 364.217 198.33 366.071L264.535 404.467L242.82 416.915C240.967 417.972 239.377 417.972 237.525 416.915ZM234.614 460.343C204.689 460.343 182.71 437.833 182.71 410.028C182.71 407.91 182.976 405.792 183.238 403.672L235.405 433.863C238.582 435.715 241.763 435.715 244.938 433.863L311.407 395.466V420.622C311.407 422.742 310.612 424.331 308.758 425.389L258.179 454.519C251.293 458.491 243.083 460.343 234.611 460.343H234.614ZM300.286 491.854C332.329 491.854 359.073 469.082 365.167 438.892C394.825 431.211 413.892 403.406 413.892 375.073C413.892 356.535 405.948 338.529 391.648 325.552C392.972 319.991 393.766 314.43 393.766 308.87C393.766 271.003 363.048 242.666 327.562 242.666C320.413 242.666 313.528 243.723 306.644 246.109C294.725 234.457 278.307 227.042 260.301 227.042C228.258 227.042 201.513 249.815 195.42 280.004C165.761 287.685 146.694 315.49 146.694 343.824C146.694 362.362 154.638 380.368 168.938 393.344C167.613 398.906 166.819 404.467 166.819 410.027C166.819 447.894 197.538 476.231 233.024 476.231C240.172 476.231 247.058 475.173 253.943 472.788C265.859 484.441 282.278 491.854 300.286 491.854Z"/></svg>`,
+      // https://claude.com/icon.svg
+      claude: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 248 248" aria-hidden="true" focusable="false"><path fill="#D97757" d="M52.4285 162.873L98.7844 136.879L99.5485 134.602L98.7844 133.334H96.4921L88.7237 132.862L62.2346 132.153L39.3113 131.207L17.0249 130.026L11.4214 128.844L6.2 121.873L6.7094 118.447L11.4214 115.257L18.171 115.847L33.0711 116.911L55.485 118.447L71.6586 119.392L95.728 121.873H99.5485L100.058 120.337L98.7844 119.392L97.7656 118.447L74.5877 102.732L49.4995 86.1905L36.3823 76.62L29.3779 71.7757L25.8121 67.2858L24.2839 57.3608L30.6515 50.2716L39.3113 50.8623L41.4763 51.4531L50.2636 58.1879L68.9842 72.7209L93.4357 90.6804L97.0015 93.6343L98.4374 92.6652L98.6571 91.9801L97.0015 89.2625L83.757 65.2772L69.621 40.8192L63.2534 30.6579L61.5978 24.632C60.9565 22.1032 60.579 20.0111 60.579 17.4246L67.8381 7.49965L71.9133 6.19995L81.7193 7.49965L85.7946 11.0443L91.9074 24.9865L101.714 46.8451L116.996 76.62L121.453 85.4816L123.873 93.6343L124.764 96.1155H126.292V94.6976L127.566 77.9197L129.858 57.3608L132.15 30.8942L132.915 23.4505L136.608 14.4708L143.994 9.62643L149.725 12.344L154.437 19.0788L153.8 23.4505L150.998 41.6463L145.522 70.1215L141.957 89.2625H143.994L146.414 86.7813L156.093 74.0206L172.266 53.698L179.398 45.6635L187.803 36.802L193.152 32.5484H203.34L210.726 43.6549L207.415 55.1159L196.972 68.3492L188.312 79.5739L175.896 96.2095L168.191 109.585L168.882 110.689L170.738 110.53L198.755 104.504L213.91 101.787L231.994 98.7149L240.144 102.496L241.036 106.395L237.852 114.311L218.495 119.037L195.826 123.645L162.07 131.592L161.696 131.893L162.137 132.547L177.36 133.925L183.855 134.279H199.774L229.447 136.524L237.215 141.605L241.8 147.867L241.036 152.711L229.065 158.737L213.019 154.956L175.45 145.977L162.587 142.787H160.805V143.85L171.502 154.366L191.242 172.089L215.82 195.011L217.094 200.682L213.91 205.172L210.599 204.699L188.949 188.394L180.544 181.069L161.696 165.118H160.422V166.772L164.752 173.152L187.803 207.771L188.949 218.405L187.294 221.832L181.308 223.959L174.813 222.777L161.187 203.754L147.305 182.486L136.098 163.345L134.745 164.2L128.075 235.42L125.019 239.082L117.887 241.8L111.902 237.31L108.718 229.984L111.902 215.452L115.722 196.547L118.779 181.541L121.58 162.873L123.291 156.636L123.14 156.219L121.773 156.449L107.699 175.752L86.304 204.699L69.3663 222.777L65.291 224.431L58.2867 220.768L58.9235 214.27L62.8713 208.48L86.304 178.705L100.44 160.155L109.551 149.507L109.462 147.967L108.959 147.924L46.6977 188.512L35.6182 189.93L30.7788 185.44L31.4156 178.115L33.7079 175.752L52.4285 162.873Z"/></svg>`,
+      // https://pi.dev/favicon.svg — official light-color variant.
+      pi: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 560" fill="#111111" aria-hidden="true" focusable="false"><path d="M420 280H280V140H0V0H420V280Z"/><path d="M560 560H420V280H560V560Z"/><path d="M140 560H0V140H140V280H280V420H140V560Z"/></svg>`,
+      // https://omp.sh/favicon.svg — gradient ID namespaced for inline use.
+      omp: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" aria-hidden="true" focusable="false"><defs><linearGradient id="agent-omp-gradient" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#ed4abf"/><stop offset=".5" stop-color="#9b4dff"/><stop offset="1" stop-color="#5ad8e6"/></linearGradient></defs><rect width="64" height="64" rx="12" fill="#0f0a14"/><path fill="url(#agent-omp-gradient)" d="M14 16h36v8H40v32h-8V24h-6v22h-8V24h-4z"/></svg>`,
+    };
     const REQUIRED = new Set(["homebrew", "git", "stow", "mise"]);
     const SAFE_NAME = /^[A-Za-z0-9._@+-]+$/;
     const CUSTOM_TOOL_NAME = /^[a-z0-9][a-z0-9._@+-]*$/;
@@ -651,8 +708,11 @@
         fonts: "2. Font",
         brew: "3. Homebrew tools",
         langs: "4. Languages",
-        features: "5. macOS tweaks",
-        alwaysInstalled: "6. Always installed",
+        agents: "5. AI CLI",
+        features: "6. macOS tweaks",
+        alwaysInstalled: "7. Always installed",
+        codexFootnote: "<sup>*</sup> Codex CLI: The official upstream installer may modify your shell profile and <code>PATH</code>, including stowed dotfiles.",
+        piFootnote: "<sup>**</sup> Pi: Needs Node.js &gt;=22.19 and npm; the <a href=\"https://pi.dev/\" target=\"_blank\" rel=\"noopener\">official installer</a> can prompt about prerequisites, reinstall/migration, and launch.",
         otherBrewLabel: "Other Homebrew tools (comma separated)",
         otherBrewHelp: "Official Homebrew formula and cask names only; third-party taps using <code>/</code> are not supported. Names follow the same 64-character format rules below. Before applying dotfiles, the installer asks Homebrew to verify and classify each name. <a href=\"https://formulae.brew.sh/\" target=\"_blank\" rel=\"noopener\">Browse packages</a>.",
         otherToolsLabel: "Other mise tools (comma separated)",
@@ -684,8 +744,11 @@
         fonts: "2. 字型",
         brew: "3. 安裝工具",
         langs: "4. 程式語言",
-        features: "5. macOS 調整",
-        alwaysInstalled: "6. 一律安裝",
+        agents: "5. AI CLI",
+        features: "6. macOS 調整",
+        alwaysInstalled: "7. 一律安裝",
+        codexFootnote: "<sup>*</sup> Codex CLI：官方上游安裝程式可能會修改 shell 設定檔與 <code>PATH</code>（包含由 Stow 管理的設定檔）。",
+        piFootnote: "<sup>**</sup> Pi：需要 Node.js &gt;=22.19 與 npm；<a href=\"https://pi.dev/\" target=\"_blank\" rel=\"noopener\">官方安裝程式</a>可能會針對前置需求、重新安裝／遷移與啟動進行互動詢問。",
         otherBrewLabel: "其他 Homebrew 工具 (逗號分隔)",
         otherBrewHelp: "僅支援官方 Homebrew formula 與 cask 名稱；不支援含 <code>/</code> 的第三方 tap。名稱使用下方相同的 64 字元格式規則；installer 會在套用設定檔前請 Homebrew 驗證並辨識每個名稱。<a href=\"https://formulae.brew.sh/\" target=\"_blank\" rel=\"noopener\">瀏覽套件</a>。",
         otherToolsLabel: "其他 mise 工具 (逗號分隔)",
@@ -720,6 +783,7 @@
       customBrewInput: "",
       langs: new Set(["python", "node"]),
       customLangInput: "",
+      agents: new Set(),
       features: new Set(),
       error: false,
     };
@@ -912,7 +976,7 @@
       return fieldset;
     }
 
-    function choice(parent, type, name, value, title, detail, checked, change, disabled = false, note = "") {
+    function choice(parent, type, name, value, title, detail, checked, change, disabled = false, note = "", marker = "") {
       const label = document.createElement("label");
       label.className = "choice" + (disabled ? " disabled" : "");
       const input = document.createElement("input");
@@ -921,6 +985,11 @@
       const body = document.createElement("span");
       const heading = document.createElement("strong");
       heading.textContent = title;
+      if (marker) {
+        const sup = document.createElement("sup");
+        sup.textContent = marker;
+        heading.append(sup);
+      }
       body.append(heading);
       if (detail) {
         const small = document.createElement("small");
@@ -935,6 +1004,7 @@
       }
       label.append(input, body);
       parent.append(label);
+      return label;
     }
 
     function select(set, value, checked) {
@@ -1177,6 +1247,46 @@
       });
     }
 
+    function renderAgentsSection() {
+      const fieldset = section("agents");
+      for (const agent of FIXED_AGENTS) {
+        const label = choice(
+          fieldset,
+          "checkbox",
+          "agent",
+          agent.value,
+          agent.label,
+          "",
+          state.agents.has(agent.value),
+          checked => select(state.agents, agent.value, checked),
+          false,
+          "",
+          agent.marker
+        );
+        label.classList.add("agent-choice");
+        const heading = label.querySelector("strong");
+        heading.classList.add("agent-title");
+        const name = document.createElement("span");
+        name.className = "agent-name";
+        name.append(...heading.childNodes);
+        const icon = document.createElement("span");
+        icon.className = "agent-icon";
+        icon.setAttribute("aria-hidden", "true");
+        icon.innerHTML = AGENT_ICONS[agent.value];
+        heading.replaceChildren(icon, name);
+      }
+
+      const footnotesWrap = document.createElement("div");
+      footnotesWrap.className = "custom-tools-wrap";
+      for (const key of ["codexFootnote", "piFootnote"]) {
+        const p = document.createElement("p");
+        p.className = "custom-tools-help";
+        p.innerHTML = text(key);
+        footnotesWrap.append(p);
+      }
+      fieldset.append(footnotesWrap);
+    }
+
     function renderFeaturesSection() {
       const visibleFeatures = (state.manifest.features ?? []).filter(feature => !feature.macos || isMac());
       if (!state.manifest.features?.length || !visibleFeatures.length) return;
@@ -1224,7 +1334,7 @@
         const noteText = notes(feature);
         if (noteText) {
           const noteEl = document.createElement("small");
-          noteEl.className = "note";
+          noteEl.className = "note feature-note";
           noteEl.textContent = noteText;
           body.append(noteEl);
         }
@@ -1236,6 +1346,7 @@
 
     function renderAlwaysInstalledSection() {
       const fieldset = section("alwaysInstalled");
+      fieldset.classList.add("always-installed-section");
       const ul = document.createElement("ul");
       ul.className = "always-installed-list";
 
@@ -1276,6 +1387,7 @@
       renderFontSection();
       renderBrewSection();
       renderLangsSection();
+      renderAgentsSection();
       renderFeaturesSection();
       renderAlwaysInstalledSection();
     }
@@ -1332,6 +1444,10 @@
       const extraLangs = customLangs.filter(item => !state.langs.has(item));
       const langs = [...checkedLangs, ...extraLangs];
 
+      const agents = FIXED_AGENTS
+        .filter(a => state.agents.has(a.value))
+        .map(a => a.value);
+
       const features = (manifest.features ?? [])
         .filter(feature => (!feature.macos || isMac()) && state.features.has(feature.name))
         .map(feature => feature.name);
@@ -1346,6 +1462,7 @@
       if (state.font) parts.push("--font", state.font);
       if (brewList.length) parts.push("--brew", brewList.join(","));
       if (langs.length) parts.push("--langs", langs.join(","));
+      if (agents.length) parts.push("--agents", agents.join(","));
       if (features.length) parts.push("--features", features.join(","));
       parts.push("--lang", state.lang);
 

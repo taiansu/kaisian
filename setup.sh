@@ -32,6 +32,7 @@ MISE_EXEC=''
 SELECTED_FONT=''
 SELECTED_BREW=''
 SELECTED_LANGS=''
+SELECTED_AGENTS=''
 SELECTED_FEATURES=''
 STOW_ONLY=0
 MISE_TOOLS=''
@@ -686,7 +687,7 @@ confirm_conflicts() {
   done < "$CONFLICTS_FILE"
   if test "$DRY_RUN" -eq 1; then
     # Nothing downstream mutates under --dry-run; keep going so the whole plan
-    # (stow, font, features, brew, mise) is shown, not just the backups.
+    # (stow, font, features, brew, mise, agents) is shown, not just the backups.
     CONFIRMED=1
     return 0
   fi
@@ -1051,6 +1052,7 @@ Customization (optional):
   --font CASK
   --brew PKG[,PKG...]
   --langs LANG[,LANG...]
+  --agents AGENT[,AGENT...]
   --features NAME[,NAME...]
   --stow-only
 
@@ -1250,6 +1252,7 @@ message_en() {
     brew_not_found) printf "Homebrew package '%s' was not found as a formula or cask." "${1-}" ;;
     brew_resolve_dry_run) printf "Would resolve Homebrew package type: %s" "${1-}" ;;
     invalid_lang) printf "Invalid language '%s'." "${1-}" ;;
+    invalid_agent) printf "Invalid agent '%s'. Supported: codex, claude, pi, omp." "${1-}" ;;
     invalid_feature) printf "Invalid feature '%s'. It is not declared in the manifest." "${1-}" ;;
     copy_failed) printf "Failed to copy feature file '%s' (%s)." "${1-}" "${2-}" ;;
     hotkey_failed) printf "Failed to configure symbolic hotkey '%s' (%s)." "${1-}" "${2-}" ;;
@@ -1259,6 +1262,7 @@ message_en() {
     brew_bundle_failed) printf 'brew bundle failed (%s).' "${1-}" ;;
     unknown_mise_tools) printf 'Unknown mise tools: %s — see https://mise.jdx.dev/registry.html' "${1-}" ;;
     mise_install_failed) printf 'mise install failed (%s).' "${1-}" ;;
+    agent_install_failed) printf "Failed to install agent '%s' (%s)." "${1-}" "${2-}" ;;
     bootstrap_failed) printf 'Bootstrap failed: %s' "${1-}" ;;
     bootstrap_brew_installing) printf 'Installing Homebrew...' ;;
     bootstrap_tools_installing) printf 'Installing missing tools: %s' "${1-}" ;;
@@ -1428,6 +1432,7 @@ message_zh_tw() {
     brew_not_found) printf '找不到 Homebrew formula 或 cask「%s」。' "${1-}" ;;
     brew_resolve_dry_run) printf '將會辨識 Homebrew 套件類型：%s' "${1-}" ;;
     invalid_lang) printf '無效的語言「%s」。' "${1-}" ;;
+    invalid_agent) printf '無效的 agent「%s」。僅支援：codex, claude, pi, omp。' "${1-}" ;;
     invalid_feature) printf '無效的 feature「%s」。未在 manifest 中宣告。' "${1-}" ;;
     copy_failed) printf '複製 feature 檔案失敗「%s」（%s）。' "${1-}" "${2-}" ;;
     hotkey_failed) printf '設定快捷鍵失敗「%s」（%s）。' "${1-}" "${2-}" ;;
@@ -1437,6 +1442,7 @@ message_zh_tw() {
     brew_bundle_failed) printf 'brew bundle 執行失敗（%s）。' "${1-}" ;;
     unknown_mise_tools) printf 'mise 不認識這些工具：%s — 參考 https://mise.jdx.dev/registry.html' "${1-}" ;;
     mise_install_failed) printf 'mise install 執行失敗（%s）。' "${1-}" ;;
+    agent_install_failed) printf '安裝 agent「%s」失敗（%s）。' "${1-}" "${2-}" ;;
     bootstrap_failed) printf '引導安裝失敗：%s' "${1-}" ;;
     bootstrap_brew_installing) printf '正在安裝 Homebrew...' ;;
     bootstrap_tools_installing) printf '正在安裝缺少工具：%s' "${1-}" ;;
@@ -1502,6 +1508,44 @@ validate_langs() {
     test "$has_more" -eq 0 && break
   done
   SELECTED_LANGS="$deduped_langs"
+}
+
+validate_agents() {
+  test -n "$SELECTED_AGENTS" || return 0
+  cur="$SELECTED_AGENTS"
+  deduped_agents=''
+  seen_agents=''
+  while :; do
+    has_more=0
+    case "$cur" in
+      *,*)
+        part="${cur%%,*}"
+        cur="${cur#*,}"
+        has_more=1
+        ;;
+      *)
+        part="$cur"
+        cur=''
+        ;;
+    esac
+    trimmed=$(trim_whitespace "$part")
+    test -n "$trimmed" || die invalid_agent '<empty>'
+    is_valid_agent "$trimmed" || die invalid_agent "$trimmed"
+    case " $seen_agents " in
+      *" $trimmed "*) ;;
+      *)
+        if test -z "$seen_agents"; then
+          seen_agents="$trimmed"
+          deduped_agents="$trimmed"
+        else
+          seen_agents="$seen_agents $trimmed"
+          deduped_agents="$deduped_agents,$trimmed"
+        fi
+        ;;
+    esac
+    test "$has_more" -eq 0 && break
+  done
+  SELECTED_AGENTS="$deduped_agents"
 }
 
 parse_args() {
@@ -1674,6 +1718,17 @@ parse_args() {
         test -n "$val" || die missing_option_value '--langs'
         SELECTED_LANGS="$val"
         ;;
+      --agents|--agents=*)
+        if test "$arg" = '--agents'; then
+          test $# -gt 0 || die missing_option_value '--agents'
+          val=$1
+          shift
+        else
+          val=${arg#--agents=}
+        fi
+        test -n "$val" || die missing_option_value '--agents'
+        SELECTED_AGENTS="$val"
+        ;;
       --features|--features=*)
         if test "$arg" = '--features'; then
           test $# -gt 0 || die missing_option_value '--features'
@@ -1716,6 +1771,7 @@ parse_args() {
     fi
   fi
   validate_langs
+  validate_agents
 }
 
 validate_home() {
@@ -3178,6 +3234,42 @@ is_valid_lang() {
   esac
 }
 
+is_valid_agent() {
+  case "${1-}" in
+    codex|claude|pi|omp) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+agent_install_spec() {
+  case "${1-}" in
+    codex)
+      AGENT_URL='https://chatgpt.com/codex/install.sh'
+      AGENT_SHELL='/bin/sh'
+      AGENT_CMD='curl -fsSL https://chatgpt.com/codex/install.sh | sh'
+      ;;
+    claude)
+      AGENT_URL='https://claude.ai/install.sh'
+      AGENT_SHELL='/bin/bash'
+      AGENT_CMD='curl -fsSL https://claude.ai/install.sh | bash'
+      ;;
+    pi)
+      AGENT_URL='https://pi.dev/install.sh'
+      AGENT_SHELL='/bin/sh'
+      AGENT_CMD='curl -fsSL https://pi.dev/install.sh | sh'
+      ;;
+    omp)
+      AGENT_URL='https://omp.sh/install'
+      AGENT_SHELL='/bin/sh'
+      AGENT_CMD='curl -fsSL https://omp.sh/install | sh'
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  return 0
+}
+
 has_control_char() {
   (
     LC_ALL=C
@@ -4487,6 +4579,7 @@ validate_custom_selections() {
       test "$has_more" -eq 0 && break
     done
   fi
+  validate_agents
 }
 
 stow_selected_packages() {
@@ -4959,6 +5052,190 @@ install_languages() {
   "$MISE_EXEC" install || die mise_install_failed "$?"
 }
 
+prepend_path_dir() {
+  local base_path=$1
+  local new_dir=$2
+  test -n "$new_dir" || { printf '%s\n' "$base_path"; return 0; }
+  case ":$base_path:" in
+    *":$new_dir:"*)
+      printf '%s\n' "$base_path"
+      ;;
+    *)
+      if test -n "$base_path"; then
+        printf '%s:%s\n' "$new_dir" "$base_path"
+      else
+        printf '%s\n' "$new_dir"
+      fi
+      ;;
+  esac
+}
+
+is_selected_mise_runtime() {
+  local rt=$1
+  case " ${MISE_TOOLS-} " in
+    *" $rt "*) return 0 ;;
+  esac
+  case ",${SELECTED_LANGS-}," in
+    *,"$rt",*) return 0 ;;
+  esac
+  return 1
+}
+
+resolve_mise_runtime_bin() {
+  local rt=$1
+  local target_home="${PHYSICAL_HOME:-${HOME-}}"
+  local mise_bin="${MISE_EXEC-}"
+  local where_out=''
+  if test -z "$mise_bin" || test ! -x "$mise_bin"; then
+    mise_bin=$(get_tool_exec mise) || return 1
+  fi
+  where_out=$(HOME="$target_home" "$mise_bin" where "$rt") || return 1
+  if test -d "$where_out/bin" && test -x "$where_out/bin/$rt"; then
+    printf '%s\n' "$where_out/bin"
+  elif test -d "$where_out" && test -x "$where_out/$rt"; then
+    printf '%s\n' "$where_out"
+  else
+    return 1
+  fi
+}
+
+download_agent_script() {
+  local url=$1
+  local dest=$2
+  if test "${KAISIAN_TESTING-0}" = '1' && test -n "${KAISIAN_AGENT_DOWNLOADER-}"; then
+    "$KAISIAN_AGENT_DOWNLOADER" "$url" "$dest"
+  else
+    /usr/bin/curl -fsSL -o "$dest" -- "$url"
+  fi
+}
+
+run_agent_child() {
+  local agent_id=$1
+  local target_home=$2
+  local child_path=$3
+  local agent_shell=$4
+  local script_path=$5
+  if test "$agent_id" = 'omp'; then
+    local omp_bun_bin="${BUN_INSTALL_BIN:-$target_home/.local/bin}"
+    BUN_INSTALL_BIN="$omp_bun_bin" HOME="$target_home" PATH="$child_path" "$agent_shell" "$script_path"
+  else
+    HOME="$target_home" PATH="$child_path" "$agent_shell" "$script_path"
+  fi
+}
+
+install_agents() {
+  test "$STOW_ONLY" -eq 0 || return 0
+  validate_agents
+  test -n "$SELECTED_AGENTS" || return 0
+
+  local cur="$SELECTED_AGENTS"
+  local has_more=0
+  local part=''
+  local agent_id=''
+  if test "$DRY_RUN" -eq 1; then
+    while :; do
+      has_more=0
+      case "$cur" in
+        *,*)
+          part="${cur%%,*}"
+          cur="${cur#*,}"
+          has_more=1
+          ;;
+        *)
+          part="$cur"
+          cur=''
+          ;;
+      esac
+      agent_id=$(trim_whitespace "$part")
+      if test -n "$agent_id"; then
+        agent_install_spec "$agent_id" || die invalid_agent "$agent_id"
+        printf 'Would run: %s\n' "$AGENT_CMD"
+      fi
+      test "$has_more" -eq 0 && break
+    done
+    return 0
+  fi
+
+  test -n "$SANDBOX" && test -d "$SANDBOX" && test ! -L "$SANDBOX" || die lock_failed "$SANDBOX"
+  local agents_sandbox="$SANDBOX/agents"
+  /bin/mkdir -p -m 0700 "$agents_sandbox" 2>/dev/null || die lock_failed "$agents_sandbox"
+  test -d "$agents_sandbox" && test ! -L "$agents_sandbox" || die lock_failed "$agents_sandbox"
+
+  local target_home="${PHYSICAL_HOME:-${HOME-}}"
+  local child_path="${PATH-}"
+  local rt=''
+  local rt_bin=''
+  for rt in bun node; do
+    if is_selected_mise_runtime "$rt"; then
+      rt_bin=$(resolve_mise_runtime_bin "$rt") || die bootstrap_failed "selected mise runtime is unavailable: $rt"
+      child_path=$(prepend_path_dir "$child_path" "$rt_bin")
+    fi
+  done
+  if test -n "$target_home"; then
+    child_path=$(prepend_path_dir "$child_path" "$target_home/.local/bin")
+  fi
+
+  local tmp_script=''
+  local final_script=''
+  local rc=0
+  cur="$SELECTED_AGENTS"
+  while :; do
+    has_more=0
+    case "$cur" in
+      *,*)
+        part="${cur%%,*}"
+        cur="${cur#*,}"
+        has_more=1
+        ;;
+      *)
+        part="$cur"
+        cur=''
+        ;;
+    esac
+    agent_id=$(trim_whitespace "$part")
+    if test -n "$agent_id"; then
+      agent_install_spec "$agent_id" || die invalid_agent "$agent_id"
+      tmp_script="$agents_sandbox/${agent_id}.tmp.$$"
+      final_script="$agents_sandbox/${agent_id}.sh"
+      /bin/rm -f -- "$tmp_script" "$final_script" 2>/dev/null || true
+
+      if ! download_agent_script "$AGENT_URL" "$tmp_script" < /dev/null; then
+        /bin/rm -f -- "$tmp_script" "$final_script" 2>/dev/null || true
+        die agent_install_failed "$agent_id" 'download failed'
+      fi
+
+      if test ! -f "$tmp_script" || test -L "$tmp_script" || test ! -s "$tmp_script"; then
+        /bin/rm -f -- "$tmp_script" "$final_script" 2>/dev/null || true
+        die agent_install_failed "$agent_id" 'invalid or empty installer script'
+      fi
+
+      if ! /bin/chmod 0600 "$tmp_script" 2>/dev/null || ! /bin/mv -f "$tmp_script" "$final_script" 2>/dev/null; then
+        /bin/rm -f -- "$tmp_script" "$final_script" 2>/dev/null || true
+        die agent_install_failed "$agent_id" 'failed to stage installer script'
+      fi
+
+      if test ! -f "$final_script" || test -L "$final_script" || test ! -s "$final_script"; then
+        /bin/rm -f -- "$tmp_script" "$final_script" 2>/dev/null || true
+        die agent_install_failed "$agent_id" 'staged installer script invalid'
+      fi
+
+      rc=0
+      if ( : < /dev/tty ) 2>/dev/null; then
+        run_agent_child "$agent_id" "$target_home" "$child_path" "$AGENT_SHELL" "$final_script" < /dev/tty || rc=$?
+      else
+        run_agent_child "$agent_id" "$target_home" "$child_path" "$AGENT_SHELL" "$final_script" < /dev/null || rc=$?
+      fi
+
+      /bin/rm -f -- "$final_script" 2>/dev/null || true
+      if test "$rc" -ne 0; then
+        die agent_install_failed "$agent_id" "exit status $rc"
+      fi
+    fi
+    test "$has_more" -eq 0 && break
+  done
+  return 0
+}
+
 print_feature_notes() {
   test -f "$SANDBOX/selected_features.txt" || return 0
   test -f "$SANDBOX/feature_notes.tsv" || return 0
@@ -5023,6 +5300,7 @@ main() {
   generate_install_inputs
   install_packages
   install_languages
+  install_agents
   print_feature_notes
   return 0
 }

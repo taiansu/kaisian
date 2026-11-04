@@ -1,7 +1,7 @@
 # kaisian
 
 A macOS setup entry point: choose dotfile groups, a terminal font, Homebrew tools,
-and programming languages at **https://kaisian.phx.tw**, then run one command.
+programming languages, and AI CLIs at **https://kaisian.phx.tw**, then run one command.
 
 ```sh
 curl -fsSL https://kaisian.phx.tw | bash -s -- --yes --prompt prompt-pure --font font-sauce-code-pro-nerd-font --brew ripgrep,fzf --langs python,node --lang en
@@ -11,8 +11,9 @@ Review `setup.sh` before running it. kaisian bootstraps Homebrew, git, and stow,
 clones the dotfiles repository, backs up conflicting files, and stows the selected
 groups into your home directory. It writes a Ghostty font override, then installs
 the selected Homebrew packages with `brew bundle` and the selected languages with
-mise. Homebrew, git, stow, and mise are always included,
-not selectable tools. Homebrew installation may require a sudo password.
+mise. Selected AI CLIs are installed afterward using their official installers.
+Homebrew, git, stow, and mise are always included, not selectable tools.
+Homebrew installation may require a sudo password.
 
 ## Options
 
@@ -26,8 +27,9 @@ not selectable tools. Homebrew installation may require a sudo password.
 | `--font CASK` | Select a cask from the manifest's `fonts` array. |
 | `--brew NAME[,NAME...]` | Select catalog entries or add official Homebrew formula/cask names. Extra names are verified and classified by Homebrew before dotfiles are applied. |
 | `--langs LANG[,LANG...]` | Select tools to install via mise (e.g. `python,node` or any tool in the mise registry); Elixir also installs Erlang. |
+| `--agents ID[,ID...]` | Run selected official AI CLI installers: `codex`, `claude`, `pi`, `omp`. |
 | `--features NAME[,NAME...]` | Select features from the manifest's `features` array. |
-| `--stow-only` | Bootstrap and stow, and write the font override, but do not install packages or languages. |
+| `--stow-only` | Bootstrap and stow, and write the font override, but do not install packages, languages, or AI CLIs. |
 | `--dry-run` | Preview changes, bootstrap requirements, and generated inputs without installing anything. |
 | `--lang en\|zh-TW` | Set the installer language. |
 | `--repo URL\|OWNER/REPO[/tree/REF]` | Use another dotfiles source; requires a ref via `/tree/REF` or `--ref`. |
@@ -37,8 +39,8 @@ not selectable tools. Homebrew installation may require a sudo password.
 | `-h`, `--help` | Show usage. |
 
 Selection flags (`--prompt`, `--groups`, `--profile`, `--interactive`, `--all`) are
-mutually exclusive. Optional font, brew, and language selections default to empty in
-the CLI. mise is installed even with empty selections.
+mutually exclusive. Optional font, brew, language, and AI CLI selections default
+to empty in the CLI. mise is installed even with empty selections.
 The web generator omits the selection flag when the chosen prompt is the default
 profile's prompt and emits `--prompt NAME` otherwise.
 
@@ -55,14 +57,67 @@ conflicts or applying dotfiles, the installer asks Homebrew to verify each
 additional name and classify it as a formula or cask, then writes the complete
 Brewfile and installs it with `brew bundle`. The mise configuration is copied
 to `~/.config/mise/conf.d/kaisian.toml` and applied with `mise install` after
-tool name is checked against the mise registry. Shell rc files are never edited;
-shell integration belongs to your dotfiles.
+each tool name is checked against the mise registry. Kaisian itself does not
+rewrite shell rc files; selected upstream AI installers may adjust shell profiles
+as part of their own PATH handling.
 
 For local testing, `KAISIAN_MISE_EXEC` selects a replacement mise executable,
 `KAISIAN_BREW_EXEC` selects a replacement brew executable,
 `KAISIAN_BREW_INSTALLER` replaces the Homebrew installer command,
 `KAISIAN_DEFAULTS_EXEC` replaces defaults, and
 `KAISIAN_ACTIVATE_SETTINGS_EXEC` replaces activateSettings.
+`KAISIAN_AGENT_DOWNLOADER` replaces AI installer downloads only when
+`KAISIAN_TESTING=1`; production always uses the fixed official URLs.
+
+## AI CLI installers
+
+All four AI CLI checkboxes are unchecked by default. The browser emits only
+selected IDs in `--agents`; unknown IDs and empty list entries are rejected.
+These installers are independent of the dotfiles manifest and use a fixed
+official-source allowlist in `setup.sh`, not arbitrary script URLs.
+
+| ID | Official name | Official macOS installer |
+| --- | --- | --- |
+| `codex` | [Codex CLI](https://learn.chatgpt.com/docs/codex/cli.md) | `curl -fsSL https://chatgpt.com/codex/install.sh \| sh` |
+| `claude` | [Claude Code](https://code.claude.com/docs/en/setup) | `curl -fsSL https://claude.ai/install.sh \| bash` |
+| `pi` | [Pi](https://pi.dev/docs/latest/quickstart) | `curl -fsSL https://pi.dev/install.sh \| sh` |
+| `omp` | [omp](https://omp.sh/) | `curl -fsSL https://omp.sh/install \| sh` |
+
+Kaisian downloads each selected script completely into its private sandbox
+before executing it with the official shell. Download or execution errors stop
+the installer; partial downloads are never executed. `--dry-run` shows the
+selected commands without downloading or executing them, and `--stow-only`
+skips this stage. Installation does not add login commands or API-key setup.
+
+The AI CLI section marks Codex CLI and Pi with matching footnotes:
+
+- **Codex CLI:** its official installer can modify a shell profile or PATH,
+  including a stowed profile, and can offer migration from another installation.
+- **Pi:** requires Node.js 22.19+ and npm. Its installer can prompt about missing
+  dependencies, reinstalling or migrating an existing installation, and starting Pi.
+
+Upstream prompts remain interactive; Kaisian does not automatically choose
+uninstallation or launch the installed agents.
+
+Agent subprocesses receive `~/.local/bin` and the installed Node/Bun runtimes
+selected by this run's mise configuration on PATH. Runtime paths come from
+`mise where`; unavailable selected runtimes fail rather than guessing a different
+version. For omp's Bun-based installation, the child defaults `BUN_INSTALL_BIN`
+to `~/.local/bin`, unless the caller explicitly supplied another nonempty value.
+
+The AI CLI rows use inline SVG brand marks at `1em` height, scaling with the
+label font size while preserving aspect ratio. Checkboxes, marks, and labels are
+vertically centered without changing multi-line tool choices elsewhere.
+Logo sources: [OpenAI Blossom](https://openai.com/brand/),
+[Claude](https://claude.com/icon.svg), [Pi](https://pi.dev/favicon.svg), and
+[omp](https://omp.sh/favicon.svg). The marks identify their respective tools
+and do not imply endorsement.
+
+The always-installed section spans both desktop columns. Its tools and
+descriptions form a responsive grid, stacking into one column on narrow screens.
+macOS tweak setup notes are separated from the bullet list and use bold,
+non-italic text.
+
 ## Dotfiles manifest
 
 Place `.kaisian.json` at the dotfiles repository root. A group name is the name

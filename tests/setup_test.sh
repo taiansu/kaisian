@@ -291,6 +291,8 @@ unknown_and_missing_values_case() {
     "--dir="
     "--lang"
     "--lang="
+    "--agents"
+    "--agents="
   )
   for opt in "${missing_val_pairs[@]}"; do
     out=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" $opt 2>&1)
@@ -654,6 +656,7 @@ message_key_parity_case() {
       "invalid_font"
       "invalid_brew"
       "invalid_lang"
+      "invalid_agent"
       "invalid_feature"
       "copy_failed"
       "hotkey_failed"
@@ -663,6 +666,7 @@ message_key_parity_case() {
       "brew_bundle_failed"
       "unknown_mise_tools"
       "mise_install_failed"
+      "agent_install_failed"
       "bootstrap_failed"
       "bootstrap_brew_installing"
       "bootstrap_tools_installing"
@@ -6884,6 +6888,208 @@ manifest_preview_shape_violations_case() {
   ) || return 1
   return 0
 }
+
+agents_selection_and_validation_case() {
+  test_home=$(make_home)
+  fake_bin=$(make_fake_bin)
+
+  # 1. CLI fails before mutation on invalid/uppercase/empty agent selections (en and zh-TW)
+  for bad_val in "cursor" "Codex" "CLAUDE" "Pi" "OMP" "codex," ",pi" "codex,,pi" "codex, ,pi" "   " "https://evil.example/install.sh"; do
+    out_en=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --lang en --agents "$bad_val" 2>&1)
+    test $? -ne 0 || return 1
+
+    out_zh=$(env -i HOME="$test_home" PATH="$fake_bin" /bin/bash "$SCRIPT" --lang zh-TW "--agents=$bad_val" 2>&1)
+    test $? -ne 0 || return 1
+  done
+
+  test ! -e "$test_home/.dotfiles" || return 1
+  test ! -e "$test_home/.local/state/kaisian" || return 1
+
+  # Each selected installer must execute once, even with whitespace/duplicates.
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+    HOME="$test_home"
+    PHYSICAL_HOME="$test_home"
+    acquire_lock || exit 1
+    trap 'cleanup' EXIT
+    downloader="$ROOT/agents_selected_downloader"
+    cat << 'EOF' > "$downloader"
+#!/bin/sh
+case "$1" in
+  https://chatgpt.com/codex/install.sh) selected=codex ;;
+  https://pi.dev/install.sh) selected=pi ;;
+  *) exit 67 ;;
+esac
+printf 'mkdir "$HOME/selected-%s"\n' "$selected" > "$2"
+EOF
+    chmod +x "$downloader"
+    export KAISIAN_AGENT_DOWNLOADER="$downloader"
+    for args_form in spaced equals; do
+      if test "$args_form" = spaced; then
+        parse_args --agents ' pi , codex , pi , codex '
+      else
+        parse_args --agents=codex,pi,codex
+      fi
+      install_agents || exit 1
+      test -d "$HOME/selected-codex" && test -d "$HOME/selected-pi" || exit 1
+      test ! -e "$HOME/selected-claude" && test ! -e "$HOME/selected-omp" || exit 1
+      rmdir "$HOME/selected-codex" "$HOME/selected-pi" || exit 1
+    done
+    cleanup
+    trap - EXIT
+    exit 0
+  ) || return 1
+  return 0
+}
+
+agents_dry_run_and_stow_only_case() {
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+    test_home=$(make_home)
+    HOME="$test_home"
+    PHYSICAL_HOME="$test_home"
+    acquire_lock || exit 1
+    trap 'cleanup' EXIT
+
+    dl_log="$ROOT/agents_dry_dl.log"
+    exec_log="$ROOT/agents_dry_exec.log"
+    : > "$dl_log"
+    : > "$exec_log"
+    downloader="$ROOT/fake_agent_dl_dry.sh"
+    cat << EOF > "$downloader"
+#!/bin/bash
+printf '%s\n' "\$1" >> "$dl_log"
+printf 'echo RAN >> "%s"\n' "$exec_log" > "\$2"
+EOF
+    chmod +x "$downloader"
+    export KAISIAN_AGENT_DOWNLOADER="$downloader"
+
+    # 1. --dry-run with all four agents prints official commands in order without downloading/executing
+    DRY_RUN=1
+    STOW_ONLY=0
+    SELECTED_AGENTS='codex, claude, pi, omp, codex'
+    out_dry=$(install_agents 2>&1) || exit 1
+    for official_source in \
+      https://chatgpt.com/codex/install.sh \
+      https://claude.ai/install.sh \
+      https://pi.dev/install.sh \
+      https://omp.sh/install; do
+      assert_contains "$out_dry" "$official_source" || exit 1
+    done
+    test ! -s "$dl_log" || exit 1
+    test ! -s "$exec_log" || exit 1
+    test ! -d "$SANDBOX/agents" || exit 1
+
+    # 2. --dry-run with no agents selected prints nothing
+    SELECTED_AGENTS=''
+    out_empty_dry=$(install_agents 2>&1) || exit 1
+    test -z "$out_empty_dry" || exit 1
+
+    # 3. --stow-only skips agent installation even when agents are selected
+    DRY_RUN=0
+    STOW_ONLY=1
+    SELECTED_AGENTS='codex,claude,pi,omp'
+    out_stow_only=$(install_agents 2>&1) || exit 1
+    test -z "$out_stow_only" || exit 1
+    test ! -s "$dl_log" || exit 1
+    test ! -s "$exec_log" || exit 1
+
+    cleanup
+    trap - EXIT
+    exit 0
+  ) || return 1
+  return 0
+}
+
+
+agents_failure_handling_and_partial_download_case() {
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+    test_home=$(make_home)
+    HOME="$test_home"
+    PHYSICAL_HOME="$test_home"
+    acquire_lock || exit 1
+    trap 'cleanup' EXIT
+
+    # 1. Downloader writes partial script and exits non-zero -> partial file never executed, subsequent agents skipped
+    partial_marker="$ROOT/partial_script_executed"
+    dl_log="$ROOT/agents_fail_dl.log"
+    : > "$dl_log"
+    partial_dl="$ROOT/fake_agent_dl_partial.sh"
+    cat << EOF > "$partial_dl"
+#!/bin/bash
+printf '%s\n' "\$1" >> "$dl_log"
+printf 'touch "%s"\n' "$partial_marker" > "\$2"
+exit 22
+EOF
+    chmod +x "$partial_dl"
+    export KAISIAN_AGENT_DOWNLOADER="$partial_dl"
+
+    SELECTED_AGENTS='codex,pi'
+    out_dl_fail=$(LANGUAGE=en install_agents 2>&1)
+    test $? -ne 0 || exit 1
+    assert_not_exists "$partial_marker" || exit 1
+    test "$(wc -l < "$dl_log" | tr -d ' ')" -eq 1 || exit 1
+
+    # 2. Downloader exits 0 but produces empty file -> fails without executing or continuing
+    : > "$dl_log"
+    empty_dl="$ROOT/fake_agent_dl_empty.sh"
+    cat << EOF > "$empty_dl"
+#!/bin/bash
+printf '%s\n' "\$1" >> "$dl_log"
+: > "\$2"
+exit 0
+EOF
+    chmod +x "$empty_dl"
+    export KAISIAN_AGENT_DOWNLOADER="$empty_dl"
+
+    SELECTED_AGENTS='codex,pi'
+    out_empty_fail=$(LANGUAGE=zh-TW install_agents 2>&1)
+    test $? -ne 0 || exit 1
+    test "$(wc -l < "$dl_log" | tr -d ' ')" -eq 1 || exit 1
+
+    # 3. Second agent installer exits non-zero -> first runs, second fails with status, third never downloads/runs
+    : > "$dl_log"
+    exec_order="$ROOT/agents_fail_order.log"
+    : > "$exec_order"
+    export KAISIAN_TEST_FAIL_DL_LOG="$dl_log"
+    export KAISIAN_TEST_EXEC_ORDER="$exec_order"
+    step_dl="$ROOT/fake_agent_dl_step.sh"
+    cat << 'EOF' > "$step_dl"
+#!/bin/bash
+set -u
+printf '%s\n' "$1" >> "$KAISIAN_TEST_FAIL_DL_LOG"
+case "$1" in
+  *claude.ai*)
+    printf 'printf "claude\\n" >> "%s"\nprintf "upstream-agent-failure\\n" >&2\nexit 42\n' "$KAISIAN_TEST_EXEC_ORDER" > "$2"
+    ;;
+  *)
+    printf 'printf "other\\n" >> "%s"\nexit 0\n' "$KAISIAN_TEST_EXEC_ORDER" > "$2"
+    ;;
+esac
+EOF
+    chmod +x "$step_dl"
+    export KAISIAN_AGENT_DOWNLOADER="$step_dl"
+
+    SELECTED_AGENTS='codex,claude,pi'
+    out_step_fail=$(LANGUAGE=en install_agents 2>&1)
+    test $? -ne 0 || exit 1
+    assert_contains "$out_step_fail" 'upstream-agent-failure' || exit 1
+    test "$(wc -l < "$dl_log" | tr -d ' ')" -eq 2 || exit 1
+    test "$(wc -l < "$exec_order" | tr -d ' ')" -eq 2 || exit 1
+    if assert_contains "$(cat "$dl_log")" "pi.dev"; then
+      exit 1
+    fi
+
+    cleanup
+    trap - EXIT
+    exit 0
+  ) || return 1
+  return 0
+}
 run_case 'Task 5 preflight target classification and exact conflict planning' task5_preflight_targets_classification_case
 run_case 'Task 5 preflight target rejection for symlink parents and special nodes' task5_preflight_targets_rejection_case
 run_case 'Task 5 preflight unselected package filtering' task5_preflight_selection_filtering_case
@@ -6913,5 +7119,8 @@ run_case 'feature notes printed in selected locale' feature_notes_locale_case
 run_case 'feature brewfile cask inclusion when feature selected' feature_brewfile_cask_inclusion_case
 run_case 'custom --langs validation, deduplication, and mise generation' custom_langs_and_validation_case
 run_case 'manifest preview shape violations fail' manifest_preview_shape_violations_case
+run_case 'cli --agents selection, trimming, deduplication, and validation' agents_selection_and_validation_case
+run_case '--agents --dry-run and --stow-only behavior' agents_dry_run_and_stow_only_case
+run_case '--agents downloader failure, partial download non-execution, and step abort' agents_failure_handling_and_partial_download_case
 printf '%s passed; %s failed\n' "$PASS" "$FAIL"
 test "$FAIL" -eq 0
