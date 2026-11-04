@@ -604,6 +604,10 @@
       color: var(--muted);
       margin: 0;
     }
+    #notice a {
+      color: var(--accent);
+      text-decoration: underline;
+    }
     #copy-status {
       font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
       font-size: 12px;
@@ -789,7 +793,7 @@
         none: "None",
         commandTitle: "CURL",
         commandLabel: "Run this command in Terminal:",
-        notice: "Review the installer before running it.",
+        notice: "Review the <a href=\"https://github.com/taiansu/kaisian/blob/main/setup.sh\" target=\"_blank\" rel=\"noopener\">[installer]</a> before running it.",
         selectGroupPrompt: "Select at least one dotfile group to generate an install command.",
         copy: "[ COPY ]",
         copied: "[ COPIED ]",
@@ -828,7 +832,7 @@
         none: "不選擇",
         commandTitle: "CURL",
         commandLabel: "在終端機執行這行指令：",
-        notice: "執行前請先檢閱安裝程式。",
+        notice: "執行前請先檢閱<a href=\"https://github.com/taiansu/kaisian/blob/main/setup.sh\" target=\"_blank\" rel=\"noopener\">[安裝程式]</a>。",
         selectGroupPrompt: "請至少選取一個設定檔群組以產生安裝指令。",
         copy: "[ 複製 ]",
         copied: "[ 已複製 ]",
@@ -1604,12 +1608,12 @@
         ["language-label", "language"],
         ["command-title", "commandTitle"],
         ["command-label", "commandLabel"],
-        ["notice", "notice"],
         ["copy", "copy"]
       ]) {
         const el = byId(id);
         if (el) el.textContent = text(key);
       }
+      byId("notice").innerHTML = text("notice");
       if (byId("headline")) byId("headline").innerHTML = text("headline");
       document.querySelectorAll(".lang-link").forEach(btn => {
         btn.classList.toggle("active", btn.dataset.lang === state.lang);

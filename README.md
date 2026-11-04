@@ -7,7 +7,7 @@ programming languages, and AI CLIs at **https://kaisian.phx.tw**, then run one c
 curl -fsSL https://kaisian.phx.tw | bash -s -- --yes --prompt prompt-pure --font font-sauce-code-pro-nerd-font --brew ripgrep,fzf --langs python,node --lang en
 ```
 
-Review `setup.sh` before running it. kaisian bootstraps Homebrew, git, and stow,
+Review [setup.sh](https://github.com/taiansu/kaisian/blob/main/setup.sh) before running it. kaisian bootstraps Homebrew, git, and stow,
 clones the dotfiles repository, backs up conflicting files, and stows the selected
 groups into your home directory. It writes a Ghostty font override, then installs
 the selected Homebrew packages with `brew bundle` and the selected languages with
