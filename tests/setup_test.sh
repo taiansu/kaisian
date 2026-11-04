@@ -6056,8 +6056,9 @@ generated_install_inputs_and_font_content_case() {
     bf_content=$(cat "$brewfile")
     assert_contains "$bf_content" 'cask "font-sauce-code-pro-nerd-font"' || exit 1
     assert_contains "$bf_content" 'brew "ripgrep"' || exit 1
-    # Check gitstatus was auto-included from prompt-pure dependency!
-    assert_contains "$bf_content" 'brew "gitstatus"' || exit 1
+    # The prompt dependency must install from its trusted third-party tap.
+    assert_contains "$bf_content" 'tap "romkatv/gitstatus", trusted: true' || exit 1
+    assert_contains "$bf_content" 'brew "romkatv/gitstatus/gitstatus"' || exit 1
 
     # Check mise.toml
     mise_file="$STATE_ROOT/$KAISIAN_TEST_TIME/mise.toml"
@@ -6073,6 +6074,77 @@ generated_install_inputs_and_font_content_case() {
     erlang_line=$(grep -n 'erlang = "latest"' "$mise_file" | cut -d: -f1)
     elixir_line=$(grep -n 'elixir = "latest"' "$mise_file" | cut -d: -f1)
     test "$erlang_line" -lt "$elixir_line" || exit 1
+
+    cleanup
+    trap - EXIT
+    exit 0
+  ) || return 1
+  return 0
+}
+
+# Tap dependencies and trust apply only to selected catalog entries.
+brew_tap_selection_and_validation_case() {
+  checkout="$ROOT/checkout_brew_taps"
+  mkdir -p "$checkout/home" "$checkout/prompt-default" "$checkout/prompt-pure" "$checkout/karabiner"
+  echo '{"profiles":[]}' > "$checkout/karabiner/default.json"
+  cp "$(dirname "$SCRIPT")/tests/fixtures/manifest-v2.json" "$checkout/.kaisian.json"
+
+  (
+    export KAISIAN_TESTING=1
+    . "$SCRIPT"
+    test_home=$(make_home)
+    HOME="$test_home"
+    PHYSICAL_HOME="$test_home"
+    STATE_ROOT="$test_home/state"
+    acquire_lock || exit 1
+    trap 'cleanup' EXIT
+    SELECTION_MODE='groups'
+    SELECTION_VALUE='home,prompt-default'
+    SELECTED_BREW='ripgrep'
+
+    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+    resolve_selection || exit 1
+    RUN_TIMESTAMP='tap-unselected'
+    generate_install_inputs || exit 1
+    content=$(cat "$STATE_ROOT/$RUN_TIMESTAMP/Brewfile")
+    if assert_contains "$content" 'romkatv/gitstatus'; then exit 1; fi
+
+    # A selected untrusted entry must not inherit trust from an unselected one.
+    /usr/bin/plutil -insert brew.0.tap -json '{"name":"romkatv/gitstatus","trusted":false}' "$checkout/.kaisian.json" || exit 1
+    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+    RUN_TIMESTAMP='tap-untrusted'
+    generate_install_inputs || exit 1
+    content=$(cat "$STATE_ROOT/$RUN_TIMESTAMP/Brewfile")
+    assert_contains "$content" 'tap "romkatv/gitstatus"' || exit 1
+    if assert_contains "$content" 'trusted: true'; then exit 1; fi
+    assert_contains "$content" 'brew "romkatv/gitstatus/ripgrep"' || exit 1
+
+    SELECTED_BREW='ripgrep,gitstatus'
+    RUN_TIMESTAMP='tap-shared'
+    generate_install_inputs || exit 1
+    content=$(cat "$STATE_ROOT/$RUN_TIMESTAMP/Brewfile")
+    test "$(printf '%s\n' "$content" | /usr/bin/grep -c '^tap ')" -eq 1 || exit 1
+    assert_contains "$content" 'tap "romkatv/gitstatus", trusted: true' || exit 1
+    assert_contains "$content" 'brew "romkatv/gitstatus/gitstatus"' || exit 1
+
+    # Trust defaults to false when the declaration omits it.
+    /usr/bin/plutil -remove brew.2.tap.trusted "$checkout/.kaisian.json" || exit 1
+    SELECTED_BREW='gitstatus'
+    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+    RUN_TIMESTAMP='tap-default-trust'
+    generate_install_inputs || exit 1
+    content=$(cat "$STATE_ROOT/$RUN_TIMESTAMP/Brewfile")
+    if assert_contains "$content" 'trusted: true'; then exit 1; fi
+
+    for bad_tap in \
+      '"romkatv/gitstatus"' \
+      '{"name":"../gitstatus"}' \
+      '{"name":"romkatv/gitstatus/extra"}' \
+      '{"name":"romkatv/gitstatus","trusted":"yes"}' \
+      '{"name":"romkatv/gitstatus","extra":true}'; do
+      /usr/bin/plutil -replace brew.2.tap -json "$bad_tap" "$checkout/.kaisian.json" || exit 1
+      if (parse_manifest "$checkout/.kaisian.json" "$checkout") >/dev/null 2>&1; then exit 1; fi
+    done
 
     cleanup
     trap - EXIT
@@ -6829,6 +6901,7 @@ run_case 'two prompt groups selected triggers prompt_conflict' prompt_conflict_c
 run_case 'cli malformed --font, --brew, and --langs values fail' cli_invalid_options_case
 run_case 'custom Homebrew formulae and casks resolve before Brewfile generation' custom_brew_resolution_case
 run_case 'generated Brewfile, mise.toml, and font file content' generated_install_inputs_and_font_content_case
+run_case 'selected Homebrew taps, scoped trust, deduplication, and invalid declarations' brew_tap_selection_and_validation_case
 run_case 'brew bundle and mise install execution, --stow-only, and --dry-run' install_execution_and_flags_case
 run_case 'bootstrap fake brew records install git stow only for missing ones' bootstrap_fake_brew_records_missing_case
 run_case 'schema 2 features manifest parsing and validation failures' features_manifest_parsing_and_validation_failures_case

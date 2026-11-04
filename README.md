@@ -82,7 +82,7 @@ of its top-level stow package directory.
   ],
   "brew": [
     {"name": "ripgrep", "description": {"en": "Fast search", "zh-TW": "快速搜尋"}},
-    {"name": "gitstatus", "description": {"en": "Async git status daemon", "zh-TW": "非同步 git 狀態 daemon"}},
+    {"name": "gitstatus", "tap": {"name": "romkatv/gitstatus", "trusted": true}, "description": {"en": "Async git status daemon", "zh-TW": "非同步 git 狀態 daemon"}},
     {"name": "ghostty", "cask": true, "description": {"en": "Terminal", "zh-TW": "終端機"}}
   ],
   "features": [
@@ -106,8 +106,20 @@ Names must match ASCII `[A-Za-z0-9._@+-]+` (no `/`). Groups may declare an optio
 `brew` array of tool names required by that group (each matching an entry in the
 top-level `brew` array); selecting the group automatically includes those tools in
 the installation. `kind` is optional; its only valid value is `prompt`. `fonts` and
-`brew` are optional arrays. A brew entry's `cask` defaults to `false`. `features` is
-an optional array of opt-in macOS tweaks and configuration file copies. Each feature
+`brew` are optional arrays. A brew entry's `cask` defaults to `false`.
+
+A catalog brew entry may declare `tap: {"name": "owner/repo", "trusted": true}`.
+Tap names use two lowercase ASCII name segments separated by one `/`; URLs,
+whitespace, leading punctuation, and `..` are rejected. `trusted` is optional and
+defaults to `false`. Only selected catalog entries add taps; an explicit
+`trusted: true` grants Homebrew trust to that tap, not to unrelated taps.
+The generated Brewfile declares each selected tap once before its packages and
+uses fully qualified names, for example `romkatv/gitstatus/gitstatus`.
+If selected entries share a tap, any selected entry's explicit trust applies to
+that tap; unselected entries never grant trust. No global trust-disable switch is
+used, and `--dry-run` does not grant trust.
+
+`features` is an optional array of opt-in macOS tweaks and configuration file copies. Each feature
 has a `name`, required `description`, and optional `macos` (boolean), `brew` (inline
 tool objects with optional `cask`), `copy` (array of `{from, to}` relative file paths
 where `from` is relative to the repository checkout and `to` is relative to `$HOME`),
@@ -115,6 +127,10 @@ where `from` is relative to the repository checkout and `to` is relative to `$HO
 entries), and `notes` (localized post-install guidance). Schema 1 manifests without
 `kind`, `fonts`, `brew`, or `features` remain supported. Do not list Homebrew, git,
 stow, or mise as optional tools.
+
+Publish installer support for new manifest fields before publishing a dotfiles
+manifest that uses them. The default installer reads the dotfiles `kaisian`
+branch; editing only dotfiles `main` does not change the released manifest.
 
 ## Web page and deployment
 

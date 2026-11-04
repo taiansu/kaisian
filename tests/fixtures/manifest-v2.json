@@ -84,6 +84,10 @@
     },
     {
       "name": "gitstatus",
+      "tap": {
+        "name": "romkatv/gitstatus",
+        "trusted": true
+      },
       "description": {
         "en": "Async git status daemon",
         "zh-TW": "非同步 git 狀態 daemon"

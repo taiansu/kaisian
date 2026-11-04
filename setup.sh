@@ -1160,6 +1160,7 @@ message_en() {
         brew_invalid_name) printf "Invalid manifest: invalid brew name '%s'." "${2-}" ;;
         brew_duplicate_name) printf "Invalid manifest: duplicate brew name '%s'." "${2-}" ;;
         brew_invalid_cask) printf "Invalid manifest: brew item %s 'cask' must be a boolean." "${2-}" ;;
+        brew_invalid_tap) printf "Invalid manifest: brew item %s has an invalid tap declaration." "${2-}" ;;
         brew_missing_description) printf "Invalid manifest: brew item %s missing 'description'." "${2-}" ;;
         brew_unknown_key) printf 'Invalid manifest: unknown key in brew item %s.' "${2-}" ;;
         group_invalid_brew) printf "Invalid manifest: group %s invalid 'brew' dependencies." "${2-}" ;;
@@ -1337,6 +1338,7 @@ message_zh_tw() {
         brew_invalid_name) printf '無效的 manifest：無效的 brew 名稱「%s」。' "${2-}" ;;
         brew_duplicate_name) printf '無效的 manifest：重複的 brew 名稱「%s」。' "${2-}" ;;
         brew_invalid_cask) printf '無效的 manifest：brew 項目 %s 的「cask」必須是布林值。' "${2-}" ;;
+        brew_invalid_tap) printf '無效的 manifest：brew 項目 %s 的 tap 宣告不合法。' "${2-}" ;;
         brew_missing_description) printf '無效的 manifest：brew 項目 %s 缺少「description」。' "${2-}" ;;
         brew_unknown_key) printf '無效的 manifest：brew 項目 %s 包含未知鍵值。' "${2-}" ;;
         group_invalid_brew) printf '無效的 manifest：群組 %s 的「brew」相依項目無效。' "${2-}" ;;
@@ -3141,6 +3143,17 @@ is_valid_name() {
   esac
 }
 
+is_valid_brew_tap() {
+  case "$1" in
+    ''|*[!abcdefghijklmnopqrstuvwxyz0123456789._/-]*|*..*|/*|*/|*/*/*) return 1 ;;
+    */*) ;;
+    *) return 1 ;;
+  esac
+  case "${1%%/*}" in [!abcdefghijklmnopqrstuvwxyz0123456789]*) return 1 ;; esac
+  case "${1#*/}" in [!abcdefghijklmnopqrstuvwxyz0123456789]*) return 1 ;; esac
+  return 0
+}
+
 is_valid_brew_name() {
   token=$1
   test -n "$token" || return 1
@@ -3284,6 +3297,8 @@ parse_manifest() {
   : > "$fonts_tsv"
   brew_tsv="$SANDBOX/brew.tsv"
   : > "$brew_tsv"
+  brew_taps_tsv="$SANDBOX/brew_taps.tsv"
+  : > "$brew_taps_tsv"
   group_brew_deps_tsv="$SANDBOX/group_brew_deps.tsv"
 : > "$group_brew_deps_tsv"
   features_tsv="$SANDBOX/features.tsv"
@@ -3677,6 +3692,34 @@ parse_manifest() {
         fi
       fi
 
+      btap_type=$("$plutil_bin" -type "brew.$m.tap" "$manifest" 2>/dev/null || true)
+      if test -n "$btap_type"; then
+        test "$btap_type" = 'dictionary' || die invalid_manifest brew_invalid_tap "$m"
+        btap_name_type=$("$plutil_bin" -type "brew.$m.tap.name" "$manifest" 2>/dev/null || true)
+        test "$btap_name_type" = 'string' || die invalid_manifest brew_invalid_tap "$m"
+        btap_name=$("$plutil_bin" -extract "brew.$m.tap.name" raw "$manifest" 2>/dev/null || true)
+        is_valid_brew_tap "$btap_name" || die invalid_manifest brew_invalid_tap "$m"
+        btap_trusted=0
+        btap_trusted_type=$("$plutil_bin" -type "brew.$m.tap.trusted" "$manifest" 2>/dev/null || true)
+        if test -n "$btap_trusted_type"; then
+          test "$btap_trusted_type" = 'bool' || test "$btap_trusted_type" = 'boolean' || die invalid_manifest brew_invalid_tap "$m"
+          btap_raw_trusted=$("$plutil_bin" -extract "brew.$m.tap.trusted" raw "$manifest" 2>/dev/null || true)
+          if test "$btap_raw_trusted" = 'true' || test "$btap_raw_trusted" = '1'; then
+            btap_trusted=1
+          fi
+        fi
+        btap_check_xml="$SANDBOX/brew_tap_check.xml"
+        /bin/cp "$manifest_xml" "$btap_check_xml"
+        "$plutil_bin" -remove "brew.$m.tap.name" "$btap_check_xml" 2>/dev/null || true
+        if test -n "$btap_trusted_type"; then
+          "$plutil_bin" -remove "brew.$m.tap.trusted" "$btap_check_xml" 2>/dev/null || true
+        fi
+        btap_residual=$("$plutil_bin" -extract "brew.$m.tap" json -o - "$btap_check_xml" 2>/dev/null || true)
+        test "$btap_residual" = '{}' || die invalid_manifest brew_invalid_tap "$m"
+        /bin/rm -f "$btap_check_xml" 2>/dev/null || true
+        printf '%s\t%s\t%s\n' "$bname" "$btap_name" "$btap_trusted" >> "$brew_taps_tsv"
+      fi
+
       bdesc_type=$("$plutil_bin" -type "brew.$m.description" "$manifest" 2>/dev/null || true)
       test -n "$bdesc_type" || die invalid_manifest brew_missing_description "$m"
       test "$bdesc_type" = 'dictionary' || die invalid_manifest description_not_object "$m"
@@ -3691,6 +3734,9 @@ parse_manifest() {
       "$plutil_bin" -remove "brew.$m.name" "$brew_check_xml" 2>/dev/null || true
       if test -n "$bcask_type"; then
         "$plutil_bin" -remove "brew.$m.cask" "$brew_check_xml" 2>/dev/null || true
+      fi
+      if test -n "$btap_type"; then
+        "$plutil_bin" -remove "brew.$m.tap" "$brew_check_xml" 2>/dev/null || true
       fi
       "$plutil_bin" -remove "brew.$m.description.en" "$brew_check_xml" 2>/dev/null || true
       "$plutil_bin" -remove "brew.$m.description.zh-TW" "$brew_check_xml" 2>/dev/null || true
@@ -4712,6 +4758,27 @@ generate_install_inputs() {
     done < "$SANDBOX/selected.txt"
   fi
 
+  # Only selected catalog entries may add taps or grant tap trust.
+  seen_emitted_taps=''
+  if test -f "$SANDBOX/brew_taps.tsv"; then
+    while IFS='	' read -r tap_package tap_name tap_trusted || test -n "$tap_package"; do
+      case " $all_brew_items " in *" $tap_package "*) ;; *) continue ;; esac
+      case " $seen_emitted_taps " in *" $tap_name "*) continue ;; esac
+      seen_emitted_taps="$seen_emitted_taps $tap_name"
+      # A selected entry's explicit trust applies to its whole tap.
+      selected_tap_trusted=0
+      while IFS='	' read -r other_package other_tap other_trusted || test -n "$other_package"; do
+        test "$other_tap" = "$tap_name" && test "$other_trusted" = '1' || continue
+        case " $all_brew_items " in *" $other_package "*) selected_tap_trusted=1 ;; esac
+      done < "$SANDBOX/brew_taps.tsv"
+      if test "$selected_tap_trusted" -eq 1; then
+        printf 'tap "%s", trusted: true\n' "$tap_name" >> "$brewfile_path"
+      else
+        printf 'tap "%s"\n' "$tap_name" >> "$brewfile_path"
+      fi
+    done < "$SANDBOX/brew_taps.tsv"
+  fi
+
   # Emit brew / cask lines
   for item in $all_brew_items; do
     case " $seen_emitted_brew " in
@@ -4739,10 +4806,19 @@ generate_install_inputs() {
           done < "$SANDBOX/custom_brew.tsv"
         fi
         test "$found_brew_type" -eq 1 || die brew_not_found "$item"
+        install_name="$item"
+        if test -f "$SANDBOX/brew_taps.tsv"; then
+          while IFS='	' read -r tap_package tap_name tap_trusted || test -n "$tap_package"; do
+            if test "$tap_package" = "$item"; then
+              install_name="$tap_name/$item"
+              break
+            fi
+          done < "$SANDBOX/brew_taps.tsv"
+        fi
         if test "$is_cask" = '1'; then
-          printf 'cask "%s"\n' "$item" >> "$brewfile_path"
+          printf 'cask "%s"\n' "$install_name" >> "$brewfile_path"
         else
-          printf 'brew "%s"\n' "$item" >> "$brewfile_path"
+          printf 'brew "%s"\n' "$install_name" >> "$brewfile_path"
         fi
         ;;
     esac
