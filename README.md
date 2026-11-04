@@ -95,7 +95,7 @@ as zsh does for an overlapping right prompt. Disabling time does not remove
 Default's SSH indicator. Switching Tokyo Night to a single line moves its native
 inline timestamp to the right, without leaving a colored time segment behind.
 
-Default, Bracketed, and Nerd Font use the same Smyck-inspired foreground colors
+Default, Pure, Bracketed, and Nerd Font use the same Smyck-inspired foreground colors
 in their real zsh layouts and manifest previews; the other themes retain their
 existing palettes. `--dry-run` reports preference writes without changing the
 configuration; `--stow-only` applies selected preferences without installing tools.
