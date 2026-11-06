@@ -1,7 +1,12 @@
 # kaisian
 
-A macOS setup entry point: choose dotfile groups, a terminal font, Homebrew tools,
-programming languages, and AI CLIs at **https://kaisian.phx.tw**, then run one command.
+A macOS setup entry point for dotfiles, terminal fonts, Homebrew tools,
+programming languages, and AI CLIs.
+
+## Get your setup
+
+Visit [kaisian.phx.tw](https://kaisian.phx.tw) to choose what to install and
+copy a ready-to-run setup command. For example:
 
 ```sh
 curl -fsSL https://kaisian.phx.tw | bash -s -- --yes --prompt prompt-pure --font font-sauce-code-pro-nerd-font --brew ripgrep,fzf --langs python,node --lang en
