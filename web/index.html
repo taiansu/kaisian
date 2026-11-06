@@ -1,6 +1,14 @@
 <!doctype html>
 <html lang="en">
 <head>
+  <!-- Google tag (gtag.js) -->
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-B6SP0HZDEN"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+    gtag('config', 'G-B6SP0HZDEN');
+  </script>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
@@ -1643,6 +1651,7 @@
     });
     byId("choices").addEventListener("submit", event => event.preventDefault());
     byId("copy").addEventListener("click", async () => {
+      gtag('event', 'copy_command_click');
       let copied = false;
       try {
         await navigator.clipboard.writeText(byId("command").value);
@@ -1683,5 +1692,8 @@
 
     loadManifest();
   </script>
+  <!-- Cloudflare Web Analytics -->
+  <script type="module" src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon='{"token": "ea01d1cf040c439da62073994c17c85f"}'></script>
+  <!-- End Cloudflare Web Analytics -->
 </body>
 </html>

@@ -265,6 +265,13 @@ bun x wrangler deploy
 `wrangler.jsonc` imports HTML and SVG as text and declares `kaisian.phx.tw` as a Workers
 Custom Domain. `wrangler deploy` deploys the Worker and binds that domain; the
 logged-in Cloudflare account must own the `phx.tw` zone.
+The page loads the GA4 Google tag with measurement ID `G-B6SP0HZDEN` from its
+HTML `<head>`. It does not install a Google Tag Manager container.
+Clicking the command's Copy button emits the GA4 custom event
+`copy_command_click` once per click, regardless of clipboard success; no command
+text is sent with the event.
+Cloudflare Web Analytics uses the manually installed beacon before `</body>`;
+keep automatic snippet injection disabled for this site to avoid duplicate page views.
 `/favicon.svg` and `/favicon.ico` both return the site's SVG mark with
 `image/svg+xml`, regardless of the `Accept` header. These image routes are handled
 before content negotiation so browser icon requests never redirect to the installer.
