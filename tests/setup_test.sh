@@ -5,6 +5,7 @@ ROOT=$(mktemp -d "${TMPDIR:-/tmp}/kaisian-test.XXXXXX") || exit 1
 ROOT=$(cd -P "$ROOT" && pwd -P)
 trap 'rm -rf -- "$ROOT"' EXIT HUP INT TERM
 SCRIPT=$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd -P)/setup.sh
+/bin/bash "${SCRIPT%/*}/scripts/assemble-setup.sh" --check || exit 1
 TRACE_LOG="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd -P)/tmp/last-command-trace.log"
 /bin/mkdir -p "$(dirname "$TRACE_LOG")" 2>/dev/null || true
 : > "$TRACE_LOG"
@@ -1008,11 +1009,7 @@ EOF
 #!/bin/bash
 exit 0
 EOF
-    cat << 'EOF' > "$mock_bin/plutil"
-#!/bin/bash
-exit 0
-EOF
-    chmod +x "$mock_bin/git" "$mock_bin/fzf" "$mock_bin/plutil"
+    chmod +x "$mock_bin/git" "$mock_bin/fzf"
 
     KAISIAN_GIT_EXEC="$mock_bin/git" \
     KAISIAN_STOW_EXEC="$mock_bin/stow" \
@@ -1242,11 +1239,7 @@ EOF
 #!/bin/bash
 exit 0
 EOF
-    cat << 'EOF' > "$mock_bin/plutil"
-#!/bin/bash
-exit 0
-EOF
-    chmod +x "$mock_bin/git" "$mock_bin/fzf" "$mock_bin/plutil"
+    chmod +x "$mock_bin/git" "$mock_bin/fzf"
 
     out=$(KAISIAN_GIT_EXEC="$mock_bin/git" KAISIAN_STOW_EXEC="$mock_bin/stow" PATH="$mock_bin:/usr/bin:/bin" require_prerequisites 2>&1)
     status=$?
@@ -1434,11 +1427,7 @@ EOF
 #!/bin/bash
 exit 0
 EOF
-    cat << 'EOF' > "$mock_bin/plutil"
-#!/bin/bash
-exit 0
-EOF
-    chmod +x "$mock_bin/git" "$mock_bin/fzf" "$mock_bin/plutil"
+    chmod +x "$mock_bin/git" "$mock_bin/fzf"
 
     # Make .stow-global-ignore non-empty to prove probe fails
     echo "custom_pattern" > "$SANDBOX/stow-home/.stow-global-ignore"
@@ -1454,7 +1443,14 @@ EOF
   return 0
 }
 
-# 22. Valid manifest parsing produces exact groups.tsv and profiles.tsv inside sandbox
+# Keep mutated test inputs in JSON, independent of plutil’s output format.
+edit_json_fixture() {
+  local file=$1
+  shift
+  /usr/bin/plutil "$@" -- "$file" && /usr/bin/plutil -convert json -- "$file"
+}
+
+# 22. Both planner invocation forms expose group metadata and default selection
 manifest_valid_and_tsv_output_case() {
   checkout="$ROOT/checkout_valid"
   mkdir -p "$checkout/shell" "$checkout/git" "$checkout/mise" "$checkout/terminal"
@@ -1468,25 +1464,21 @@ manifest_valid_and_tsv_output_case() {
     acquire_lock || exit 1
     trap 'cleanup' EXIT
 
-    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+    plan_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
 
-    test -f "$SANDBOX/groups.tsv" || exit 1
-    test -f "$SANDBOX/profiles.tsv" || exit 1
+    test "$(cat "$SANDBOX/selected.txt")" = "$(printf 'shell\ngit\nmise')" || exit 1
 
     # Test one-argument interface where checkout directory is inferred as '.'
     (
       cd "$checkout" || exit 1
-      parse_manifest .kaisian.json || exit 1
-      test -f "$SANDBOX/groups.tsv" || exit 1
+      SELECTION_MODE=profile SELECTION_VALUE=minimal plan_manifest .kaisian.json || exit 1
+      test "$(cat "$SANDBOX/selected.txt")" = "$(printf 'shell\ngit')" || exit 1
     ) || exit 1
 
     expected_groups=$(printf 'shell\tShell configuration\tShell 設定\ngit\tGit configuration\tGit 設定\nmise\tRuntime and tool version management\t執行環境與工具版本管理\nterminal\tTerminal emulator configuration\t終端機模擬器設定\n')
     actual_groups=$(cat "$SANDBOX/groups.tsv")
     test "$actual_groups" = "$expected_groups" || exit 1
 
-    actual_profiles=$(cat "$SANDBOX/profiles.tsv")
-    assert_contains "$actual_profiles" "$(printf 'minimal\tshell git')" || exit 1
-    assert_contains "$actual_profiles" "$(printf 'default\tshell git mise')" || exit 1
     cleanup
     trap - EXIT
     exit 0
@@ -1511,7 +1503,7 @@ manifest_invalid_syntax_and_types_case() {
       json_content=$1
       label=$2
       printf '%s\n' "$json_content" > "$SANDBOX/test_manifest.json"
-      out=$(parse_manifest "$SANDBOX/test_manifest.json" "$checkout" 2>&1)
+      out=$(plan_manifest "$SANDBOX/test_manifest.json" "$checkout" 2>&1)
       status=$?
       if test "$status" -eq 0; then
         printf 'Expected manifest to fail for %s but it passed\n' "$label" >&2
@@ -1641,21 +1633,21 @@ manifest_invalid_syntax_and_types_case() {
 
     # 38. Localized zh-TW failure reason contains no hardcoded English reason
     printf '{"schema": 1, "groups": {}}\n' > "$SANDBOX/test_manifest_zh.json"
-    out_zh=$(LANGUAGE='zh-TW' parse_manifest "$SANDBOX/test_manifest_zh.json" "$checkout" 2>&1)
+    out_zh=$(LANGUAGE='zh-TW' plan_manifest "$SANDBOX/test_manifest_zh.json" "$checkout" 2>&1)
     assert_contains "$out_zh" "無效的 manifest：「groups」必須是陣列。" || exit 1
     ! assert_contains "$out_zh" "array" || exit 1
     ! assert_contains "$out_zh" "Invalid" || exit 1
 
     # 39. Path required error in en and zh-TW
-    out_path_en=$(LANGUAGE='en' parse_manifest "" "$checkout" 2>&1)
+    out_path_en=$(LANGUAGE='en' plan_manifest "" "$checkout" 2>&1)
     assert_contains "$out_path_en" "manifest path is required" || exit 1
-    out_path_zh=$(LANGUAGE='zh-TW' parse_manifest "" "$checkout" 2>&1)
+    out_path_zh=$(LANGUAGE='zh-TW' plan_manifest "" "$checkout" 2>&1)
     assert_contains "$out_path_zh" "必須提供 manifest 路徑" || exit 1
     ! assert_contains "$out_path_zh" "required" || exit 1
 
     # 40. Checkout directory not found error in en and zh-TW
     echo '{"schema": 1, "groups": []}' > "$checkout/.kaisian.json"
-    out_dir_zh=$(LANGUAGE='zh-TW' parse_manifest "$checkout/.kaisian.json" "/nonexistent_dir_999" 2>&1)
+    out_dir_zh=$(LANGUAGE='zh-TW' plan_manifest "$checkout/.kaisian.json" "/nonexistent_dir_999" 2>&1)
     assert_contains "$out_dir_zh" "找不到檢出目錄「/nonexistent_dir_999」。" || exit 1
     ! assert_contains "$out_dir_zh" "checkout directory" || exit 1
     rm -f "$checkout/.kaisian.json"
@@ -1696,16 +1688,16 @@ EOF
     trap 'cleanup' EXIT
 
     # 1. Matching directories pass
-    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+    plan_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
 
     # 2. Regular non-hidden files like README.md and hidden dirs like .git pass
     echo 'hello' > "$checkout/README.md"
     mkdir -p "$checkout/.git"
-    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+    plan_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
 
     # 3. Missing package directory fails
     rmdir "$checkout/git"
-    out=$(parse_manifest "$checkout/.kaisian.json" "$checkout" 2>&1)
+    out=$(plan_manifest "$checkout/.kaisian.json" "$checkout" 2>&1)
     status=$?
     test "$status" -ne 0 || exit 1
     assert_contains "$out" "Invalid manifest" || exit 1
@@ -1713,13 +1705,13 @@ EOF
 
     # 4. Undeclared non-hidden directories (docs, tests, submodules) are ignored
     mkdir -p "$checkout/docs" "$checkout/fzf-git"
-    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+    plan_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
     rmdir "$checkout/docs" "$checkout/fzf-git"
 
-    # 5. Symlinked package directory fails
+    # 5. A symlinked package directory fails even when the package is unselected
     rmdir "$checkout/git"
     ln -s "$checkout/shell" "$checkout/git"
-    out=$(parse_manifest "$checkout/.kaisian.json" "$checkout" 2>&1)
+    out=$(SELECTION_MODE=groups SELECTION_VALUE=shell plan_manifest "$checkout/.kaisian.json" "$checkout" 2>&1)
     status=$?
     test "$status" -ne 0 || exit 1
     assert_contains "$out" "Invalid manifest" || exit 1
@@ -1731,15 +1723,15 @@ EOF
   return 0
 }
 
-# 25. Documented plutil last-duplicate-key behavior
-manifest_plutil_duplicate_key_behavior_case() {
+# 25. Documented JSON last-duplicate-key behavior
+manifest_duplicate_key_behavior_case() {
   checkout="$ROOT/checkout_dup_key_test"
   mkdir -p "$checkout/shell"
 
-  # Duplicate schema key: plutil collapses to last value
+  # Duplicate schema key: last value wins
   cat << 'EOF' > "$checkout/.kaisian.json"
 {
-  "schema": 2,
+  "schema": 99,
   "schema": 1,
   "groups": [
     {
@@ -1762,7 +1754,7 @@ EOF
     acquire_lock || exit 1
     trap 'cleanup' EXIT
 
-    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+    plan_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
 
     # Description should be the last collapsed value "New description"
     expected_groups=$(printf 'shell\tNew description\tShell 設定\n')
@@ -1790,25 +1782,24 @@ selection_default_and_all_case() {
     acquire_lock || exit 1
     trap 'cleanup' EXIT
 
-    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
-
     # 1. No flag (SELECTION_MODE='none') => default profile
-    SELECTION_MODE='none' SELECTION_VALUE='' resolve_selection || exit 1
+    SELECTION_MODE='none' SELECTION_VALUE='' plan_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
     expected_selected=$(printf 'shell\ngit\nmise\n')
     actual_selected=$(cat "$SANDBOX/selected.txt")
     test "$actual_selected" = "$expected_selected" || exit 1
     test "$(cat "$SANDBOX/unselected.txt")" = 'terminal' || exit 1
 
     # 1b. No flag without a default profile => every group
-    /bin/rm -f "$SANDBOX/profiles.tsv"
-    SELECTION_MODE='none' SELECTION_VALUE='' resolve_selection || exit 1
+    cp "$checkout/.kaisian.json" "$SANDBOX/no-default.json" || exit 1
+    edit_json_fixture "$SANDBOX/no-default.json" -remove profiles.default || exit 1
+    SELECTION_MODE=none plan_manifest "$SANDBOX/no-default.json" "$checkout" || exit 1
     expected_selected=$(printf 'shell\ngit\nmise\nterminal\n')
     actual_selected=$(cat "$SANDBOX/selected.txt")
     test "$actual_selected" = "$expected_selected" || exit 1
     test ! -s "$SANDBOX/unselected.txt" || exit 1
 
     # 2. --all (SELECTION_MODE='all')
-    SELECTION_MODE='all' SELECTION_VALUE='' resolve_selection || exit 1
+    SELECTION_MODE='all' SELECTION_VALUE='' plan_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
     actual_selected=$(cat "$SANDBOX/selected.txt")
     test "$actual_selected" = "$expected_selected" || exit 1
     test ! -s "$SANDBOX/unselected.txt" || exit 1
@@ -1834,21 +1825,19 @@ selection_prompt_case() {
     acquire_lock || exit 1
     trap 'cleanup' EXIT
 
-    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
-
     # 1. --prompt prompt-pure => default profile with its prompt swapped
-    SELECTION_MODE='prompt' SELECTION_VALUE='prompt-pure' resolve_selection || exit 1
+    SELECTION_MODE='prompt' SELECTION_VALUE='prompt-pure' plan_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
     test "$(cat "$SANDBOX/selected.txt")" = "$(printf 'home\nprompt-pure\n')" || exit 1
     test "$(cat "$SANDBOX/unselected.txt")" = 'prompt-default' || exit 1
 
     # 2. Non-prompt group is rejected
-    out=$(LANGUAGE='en' SELECTION_MODE='prompt' SELECTION_VALUE='home' resolve_selection 2>&1)
+    out=$(LANGUAGE='en' SELECTION_MODE='prompt' SELECTION_VALUE='home' plan_manifest "$checkout/.kaisian.json" "$checkout" 2>&1)
     test $? -ne 0 || exit 1
     assert_contains "$out" "Unknown prompt group 'home'." || exit 1
 
     # 3. Missing default profile is rejected
-    /bin/rm -f "$SANDBOX/profiles.tsv"
-    out=$(LANGUAGE='zh-TW' SELECTION_MODE='prompt' SELECTION_VALUE='prompt-pure' resolve_selection 2>&1)
+    edit_json_fixture "$checkout/.kaisian.json" -remove profiles.default || exit 1
+    out=$(LANGUAGE='zh-TW' SELECTION_MODE='prompt' SELECTION_VALUE='prompt-pure' plan_manifest "$checkout/.kaisian.json" "$checkout" 2>&1)
     test $? -ne 0 || exit 1
     assert_contains "$out" "manifest 未定義 default 設定檔，無法使用 --prompt。" || exit 1
 
@@ -1873,24 +1862,22 @@ selection_profile_case() {
     acquire_lock || exit 1
     trap 'cleanup' EXIT
 
-    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
-
     # 1. --profile minimal => shell git
-    SELECTION_MODE='profile' SELECTION_VALUE='minimal' resolve_selection || exit 1
+    SELECTION_MODE='profile' SELECTION_VALUE='minimal' plan_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
     expected_selected=$(printf 'shell\ngit\n')
     expected_unselected=$(printf 'mise\nterminal\n')
     test "$(cat "$SANDBOX/selected.txt")" = "$expected_selected" || exit 1
     test "$(cat "$SANDBOX/unselected.txt")" = "$expected_unselected" || exit 1
 
     # 2. --profile default => shell git mise
-    SELECTION_MODE='profile' SELECTION_VALUE='default' resolve_selection || exit 1
+    SELECTION_MODE='profile' SELECTION_VALUE='default' plan_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
     expected_selected=$(printf 'shell\ngit\nmise\n')
     expected_unselected=$(printf 'terminal\n')
     test "$(cat "$SANDBOX/selected.txt")" = "$expected_selected" || exit 1
     test "$(cat "$SANDBOX/unselected.txt")" = "$expected_unselected" || exit 1
 
     # 3. Unknown profile fails with diagnostic
-    out=$(SELECTION_MODE='profile' SELECTION_VALUE='nonexistent' resolve_selection 2>&1)
+    out=$(SELECTION_MODE='profile' SELECTION_VALUE='nonexistent' plan_manifest "$checkout/.kaisian.json" "$checkout" 2>&1)
     status=$?
     test "$status" -ne 0 || exit 1
     assert_contains "$out" "Unknown profile" || exit 1
@@ -1916,39 +1903,37 @@ selection_groups_case() {
     acquire_lock || exit 1
     trap 'cleanup' EXIT
 
-    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
-
     # 1. 'terminal, shell,terminal' => shell terminal (manifest order)
-    SELECTION_MODE='groups' SELECTION_VALUE='terminal, shell,terminal' resolve_selection || exit 1
+    SELECTION_MODE='groups' SELECTION_VALUE='terminal, shell,terminal' plan_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
     expected_selected=$(printf 'shell\nterminal\n')
     expected_unselected=$(printf 'git\nmise\n')
     test "$(cat "$SANDBOX/selected.txt")" = "$expected_selected" || exit 1
     test "$(cat "$SANDBOX/unselected.txt")" = "$expected_unselected" || exit 1
 
     # 2. 'git, mise' => git mise
-    SELECTION_MODE='groups' SELECTION_VALUE='git, mise' resolve_selection || exit 1
+    SELECTION_MODE='groups' SELECTION_VALUE='git, mise' plan_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
     expected_selected=$(printf 'git\nmise\n')
     expected_unselected=$(printf 'shell\nterminal\n')
     test "$(cat "$SANDBOX/selected.txt")" = "$expected_selected" || exit 1
     test "$(cat "$SANDBOX/unselected.txt")" = "$expected_unselected" || exit 1
 
     # 3. Trailing comma fails
-    out=$(SELECTION_MODE='groups' SELECTION_VALUE='terminal,' resolve_selection 2>&1)
+    out=$(SELECTION_MODE='groups' SELECTION_VALUE='terminal,' plan_manifest "$checkout/.kaisian.json" "$checkout" 2>&1)
     test $? -ne 0 || exit 1
     assert_contains "$out" "Group selection cannot be empty" || exit 1
 
     # 4. Leading comma fails
-    out=$(SELECTION_MODE='groups' SELECTION_VALUE=',shell' resolve_selection 2>&1)
+    out=$(SELECTION_MODE='groups' SELECTION_VALUE=',shell' plan_manifest "$checkout/.kaisian.json" "$checkout" 2>&1)
     test $? -ne 0 || exit 1
     assert_contains "$out" "Group selection cannot be empty" || exit 1
 
     # 5. Empty / whitespace fails
-    out=$(SELECTION_MODE='groups' SELECTION_VALUE='   ' resolve_selection 2>&1)
+    out=$(SELECTION_MODE='groups' SELECTION_VALUE='   ' plan_manifest "$checkout/.kaisian.json" "$checkout" 2>&1)
     test $? -ne 0 || exit 1
     assert_contains "$out" "Group selection cannot be empty" || exit 1
 
     # 6. Unknown group fails
-    out=$(SELECTION_MODE='groups' SELECTION_VALUE='shell, nonexistent' resolve_selection 2>&1)
+    out=$(SELECTION_MODE='groups' SELECTION_VALUE='shell, nonexistent' plan_manifest "$checkout/.kaisian.json" "$checkout" 2>&1)
     test $? -ne 0 || exit 1
     assert_contains "$out" "Unknown group" || exit 1
 
@@ -1976,20 +1961,18 @@ selection_interactive_fzf_case() {
     acquire_lock || exit 1
     trap 'cleanup' EXIT
 
-    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
-
-    # 1. Normal fzf output 'git\nterminal' => git terminal (in manifest order)
+    # Reversed fzf output is normalized to manifest order.
     cat << 'EOF' > "$fzf_mock_dir/fzf_normal"
 #!/bin/bash
 test "$1" = '--multi' || exit 1
 test "$2" = '--with-nth=1,2' || exit 1
 cat > /dev/null
-printf 'git\tGit configuration\nterminal\tTerminal emulator configuration\n'
+printf 'terminal\tTerminal emulator configuration\ngit\tGit configuration\n'
 exit 0
 EOF
     chmod +x "$fzf_mock_dir/fzf_normal"
 
-    SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_normal" resolve_selection || exit 1
+    SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_normal" plan_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
     expected_selected=$(printf 'git\nterminal\n')
     expected_unselected=$(printf 'shell\nmise\n')
     test "$(cat "$SANDBOX/selected.txt")" = "$expected_selected" || exit 1
@@ -2004,7 +1987,7 @@ exit 0
 EOF
     chmod +x "$fzf_mock_dir/fzf_capture"
 
-    LANGUAGE='zh-TW' SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_capture" resolve_selection || exit 1
+    LANGUAGE='zh-TW' SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_capture" plan_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
     captured=$(cat "$SANDBOX/captured_candidates.txt")
     assert_contains "$captured" "Shell 設定" || exit 1
     assert_contains "$captured" "Git 設定" || exit 1
@@ -2022,7 +2005,6 @@ EOF
     test_home=$(make_home)
     HOME="$test_home"
     acquire_lock || exit 1
-    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
 
     # Preseed sentinels outside sandbox in test root / home
     echo 'sentinel_selected' > "$test_home/sentinel_selected.txt"
@@ -2037,7 +2019,8 @@ EOF
 
     # Invoke in nested subshell
     (
-      SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_130" resolve_selection
+      SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_130" plan_manifest "$checkout/.kaisian.json" "$checkout"
+      exit 99  # Cancellation must stop the caller, not return to the mutation phase.
     )
     cancellation_status=$?
 
@@ -2063,8 +2046,6 @@ EOF
     acquire_lock || exit 1
     trap 'cleanup' EXIT
 
-    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
-
     # 4. Confirmed empty selection => nonzero
     cat << 'EOF' > "$fzf_mock_dir/fzf_empty"
 #!/bin/bash
@@ -2072,7 +2053,7 @@ exit 0
 EOF
     chmod +x "$fzf_mock_dir/fzf_empty"
 
-    out=$(SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_empty" resolve_selection 2>&1)
+    out=$(SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_empty" plan_manifest "$checkout/.kaisian.json" "$checkout" 2>&1)
     status=$?
     test "$status" -ne 0 || exit 1
     assert_contains "$out" "No packages selected" || exit 1
@@ -2084,7 +2065,7 @@ exit 2
 EOF
     chmod +x "$fzf_mock_dir/fzf_err"
 
-    out=$(SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_err" resolve_selection 2>&1)
+    out=$(SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_err" plan_manifest "$checkout/.kaisian.json" "$checkout" 2>&1)
     status=$?
     test "$status" -ne 0 || exit 1
     assert_contains "$out" "fzf interactive selection failed" || exit 1
@@ -2097,7 +2078,7 @@ exit 0
 EOF
     chmod +x "$fzf_mock_dir/fzf_unknown"
 
-    out=$(SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_unknown" resolve_selection 2>&1)
+    out=$(SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_unknown" plan_manifest "$checkout/.kaisian.json" "$checkout" 2>&1)
     status=$?
     test "$status" -ne 0 || exit 1
     assert_contains "$out" "fzf interactive selection failed" || exit 1
@@ -2109,7 +2090,7 @@ exit 0
 EOF
     chmod +x "$fzf_mock_dir/fzf_mixed"
 
-    out=$(SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_mixed" resolve_selection 2>&1)
+    out=$(SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_mixed" plan_manifest "$checkout/.kaisian.json" "$checkout" 2>&1)
     status=$?
     test "$status" -ne 0 || exit 1
     assert_contains "$out" "fzf interactive selection failed" || exit 1
@@ -2121,7 +2102,7 @@ exit 0
 EOF
     chmod +x "$fzf_mock_dir/fzf_space_separated"
 
-    out=$(SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_space_separated" resolve_selection 2>&1)
+    out=$(SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_space_separated" plan_manifest "$checkout/.kaisian.json" "$checkout" 2>&1)
     status=$?
     test "$status" -ne 0 || exit 1
     assert_contains "$out" "fzf interactive selection failed" || exit 1
@@ -2134,7 +2115,7 @@ exit 0
 EOF
     chmod +x "$fzf_mock_dir/fzf_padded"
 
-    out=$(SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_padded" resolve_selection 2>&1)
+    out=$(SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_padded" plan_manifest "$checkout/.kaisian.json" "$checkout" 2>&1)
     status=$?
     test "$status" -ne 0 || exit 1
     assert_contains "$out" "fzf interactive selection failed" || exit 1
@@ -2147,7 +2128,7 @@ exit 0
 EOF
     chmod +x "$fzf_mock_dir/fzf_tab_malformed"
 
-    out=$(SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_tab_malformed" resolve_selection 2>&1)
+    out=$(SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_tab_malformed" plan_manifest "$checkout/.kaisian.json" "$checkout" 2>&1)
     status=$?
     test "$status" -ne 0 || exit 1
     assert_contains "$out" "fzf interactive selection failed" || exit 1
@@ -2160,7 +2141,7 @@ exit 0
 EOF
     chmod +x "$fzf_mock_dir/fzf_wrong_desc"
 
-    out=$(SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_wrong_desc" resolve_selection 2>&1)
+    out=$(SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_wrong_desc" plan_manifest "$checkout/.kaisian.json" "$checkout" 2>&1)
     status=$?
     test "$status" -ne 0 || exit 1
     assert_contains "$out" "fzf interactive selection failed" || exit 1
@@ -2173,7 +2154,7 @@ exit 0
 EOF
     chmod +x "$fzf_mock_dir/fzf_empty_suffix"
 
-    out=$(SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_empty_suffix" resolve_selection 2>&1)
+    out=$(SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_empty_suffix" plan_manifest "$checkout/.kaisian.json" "$checkout" 2>&1)
     status=$?
     test "$status" -ne 0 || exit 1
     assert_contains "$out" "fzf interactive selection failed" || exit 1
@@ -2186,23 +2167,23 @@ exit 0
 EOF
     chmod +x "$fzf_mock_dir/fzf_extra_tab"
 
-    out=$(SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_extra_tab" resolve_selection 2>&1)
+    out=$(SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_extra_tab" plan_manifest "$checkout/.kaisian.json" "$checkout" 2>&1)
     status=$?
     test "$status" -ne 0 || exit 1
     assert_contains "$out" "fzf interactive selection failed" || exit 1
 
     # 14. Localized zh-TW fzf unknown record diagnostic without English words
-    out_fzf_zh=$(LANGUAGE='zh-TW' SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_unknown" resolve_selection 2>&1)
+    out_fzf_zh=$(LANGUAGE='zh-TW' SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=1 KAISIAN_FZF_EXEC="$fzf_mock_dir/fzf_unknown" plan_manifest "$checkout/.kaisian.json" "$checkout" 2>&1)
     test $? -ne 0 || exit 1
     assert_contains "$out_fzf_zh" "fzf 互動選取失敗：輸出包含未知的紀錄「nonexistent_package」。" || exit 1
     ! assert_contains "$out_fzf_zh" "failed" || exit 1
     ! assert_contains "$out_fzf_zh" "unknown record" || exit 1
     # 12. Non-TTY interactive => localized nonzero
-    out=$(LANGUAGE='en' SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=0 resolve_selection 2>&1)
+    out=$(LANGUAGE='en' SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=0 plan_manifest "$checkout/.kaisian.json" "$checkout" 2>&1)
     test $? -ne 0 || exit 1
     assert_contains "$out" "A controlling terminal is required" || exit 1
 
-    out_zh=$(LANGUAGE='zh-TW' SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=0 resolve_selection 2>&1)
+    out_zh=$(LANGUAGE='zh-TW' SELECTION_MODE='interactive' KAISIAN_TESTING_TTY=0 plan_manifest "$checkout/.kaisian.json" "$checkout" 2>&1)
     test $? -ne 0 || exit 1
     assert_contains "$out_zh" "此操作需要可控制的終端機" || exit 1
     cleanup
@@ -3715,7 +3696,7 @@ EOF
 
     poison_marker="$ROOT/poison_triggered"
     poison_bin=$(mktemp -d "$ROOT/poison.XXXXXX")
-    for tool in stat uname id find readlink awk tr cp rm dirname basename which plutil git stow fzf; do
+    for tool in stat uname id find readlink awk tr cp rm dirname basename which plutil osascript git stow fzf; do
       cat << EOF > "$poison_bin/$tool"
 #!/bin/sh
 : > "$ROOT/poison_triggered_$tool"
@@ -3728,7 +3709,7 @@ EOF
       exit 1
     fi
     test -e "$ROOT/poison_triggered_stat" || exit 1
-    for tool in stat uname id find readlink awk tr cp rm dirname basename which plutil git stow fzf; do
+    for tool in stat uname id find readlink awk tr cp rm dirname basename which plutil osascript git stow fzf; do
       /bin/rm -f "$ROOT/poison_triggered_$tool"
     done
 
@@ -3747,7 +3728,7 @@ EOF
     ) || exit 1
 
     # Assert no poison sentinels were created
-    for tool in stat uname id find readlink awk tr cp rm dirname basename which plutil git stow fzf; do
+    for tool in stat uname id find readlink awk tr cp rm dirname basename which plutil osascript git stow fzf; do
       test ! -e "$ROOT/poison_triggered_$tool" || exit 1
     done
 
@@ -4177,10 +4158,10 @@ run_case 'config lock failure suppresses raw stderr and emits localized error' c
 run_case 'poisoned PATH ambient utility immunity' path_poison_ambient_utility_case
 run_case 'production main wiring through acquisition and manifest selection' production_main_integration_case
 run_case 'executed command trace contains no forbidden destructive operations' command_trace_forbidden_operations_case
-run_case 'valid manifest parsing produces exact groups.tsv and profiles.tsv' manifest_valid_and_tsv_output_case
+run_case 'manifest planning exposes group metadata and selects the default profile' manifest_valid_and_tsv_output_case
 run_case 'invalid manifest syntax, types, schema, and unknown keys fail' manifest_invalid_syntax_and_types_case
 run_case 'declared groups need real package directories; extra directories are ignored' manifest_package_directory_alignment_case
-run_case 'documented plutil last-duplicate-key behavior' manifest_plutil_duplicate_key_behavior_case
+run_case 'duplicate JSON keys use the last value' manifest_duplicate_key_behavior_case
 run_case 'default (no flag) uses the default profile, else all packages; --all resolves all' selection_default_and_all_case
 run_case '--prompt swaps the default profile prompt group' selection_prompt_case
 run_case '--profile selects profile packages in manifest order' selection_profile_case
@@ -5857,18 +5838,12 @@ schema_2_manifest_parsing_case() {
     acquire_lock || exit 1
     trap 'cleanup' EXIT
 
-    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+    plan_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
 
     test -f "$SANDBOX/groups.tsv" || exit 1
-    test -f "$SANDBOX/prompt_groups.txt" || exit 1
     test -f "$SANDBOX/fonts.tsv" || exit 1
     test -f "$SANDBOX/brew.tsv" || exit 1
     test -f "$SANDBOX/group_brew_deps.tsv" || exit 1
-
-    # Verify prompt_groups.txt
-    prompt_txt=$(cat "$SANDBOX/prompt_groups.txt")
-    assert_contains "$prompt_txt" "prompt-default" || exit 1
-    assert_contains "$prompt_txt" "prompt-pure" || exit 1
 
     # Verify fonts.tsv
     fonts_content=$(cat "$SANDBOX/fonts.tsv")
@@ -5906,12 +5881,10 @@ prompt_conflict_case() {
     acquire_lock || exit 1
     trap 'cleanup' EXIT
 
-    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
-
     # Select both prompt-default and prompt-pure
     SELECTION_MODE='groups'
     SELECTION_VALUE='prompt-default,prompt-pure'
-    out=$(resolve_selection 2>&1)
+    out=$(plan_manifest "$checkout/.kaisian.json" "$checkout" 2>&1)
     status=$?
     test "$status" -ne 0 || exit 1
     assert_contains "$out" "prompt group" || exit 1
@@ -5938,7 +5911,7 @@ cli_invalid_options_case() {
     acquire_lock || exit 1
     trap 'cleanup' EXIT
 
-    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+    plan_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
 
     # 1. Invalid lang
     out_lang=$(SELECTED_LANGS='-x' validate_langs 2>&1)
@@ -6014,10 +5987,9 @@ custom_brew_resolution_case() {
     acquire_lock || exit 1
     trap 'cleanup' EXIT
 
-    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
     SELECTION_MODE='profile'
     SELECTION_VALUE='default'
-    resolve_selection || exit 1
+    plan_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
 
     : > "$brew_log"
     SELECTED_BREW='ripgrep,jq,visual-studio-code,jq'
@@ -6074,10 +6046,9 @@ generated_install_inputs_and_font_content_case() {
     acquire_lock || exit 1
     trap 'cleanup' EXIT
 
-    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
     SELECTION_MODE='groups'
     SELECTION_VALUE='home,prompt-pure'
-    resolve_selection || exit 1
+    plan_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
 
     SELECTED_FONT='font-sauce-code-pro-nerd-font'
     SELECTED_BREW='ripgrep'
@@ -6145,16 +6116,15 @@ brew_tap_selection_and_validation_case() {
     SELECTION_VALUE='home,prompt-default'
     SELECTED_BREW='ripgrep'
 
-    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
-    resolve_selection || exit 1
+    plan_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
     RUN_TIMESTAMP='tap-unselected'
     generate_install_inputs || exit 1
     content=$(cat "$STATE_ROOT/$RUN_TIMESTAMP/Brewfile")
     if assert_contains "$content" 'romkatv/gitstatus'; then exit 1; fi
 
     # A selected untrusted entry must not inherit trust from an unselected one.
-    /usr/bin/plutil -insert brew.0.tap -json '{"name":"romkatv/gitstatus","trusted":false}' "$checkout/.kaisian.json" || exit 1
-    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+    edit_json_fixture "$checkout/.kaisian.json" -insert brew.0.tap -json '{"name":"romkatv/gitstatus","trusted":false}' || exit 1
+    plan_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
     RUN_TIMESTAMP='tap-untrusted'
     generate_install_inputs || exit 1
     content=$(cat "$STATE_ROOT/$RUN_TIMESTAMP/Brewfile")
@@ -6171,9 +6141,9 @@ brew_tap_selection_and_validation_case() {
     assert_contains "$content" 'brew "romkatv/gitstatus/gitstatus"' || exit 1
 
     # Trust defaults to false when the declaration omits it.
-    /usr/bin/plutil -remove brew.2.tap.trusted "$checkout/.kaisian.json" || exit 1
+    edit_json_fixture "$checkout/.kaisian.json" -remove brew.2.tap.trusted || exit 1
     SELECTED_BREW='gitstatus'
-    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+    plan_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
     RUN_TIMESTAMP='tap-default-trust'
     generate_install_inputs || exit 1
     content=$(cat "$STATE_ROOT/$RUN_TIMESTAMP/Brewfile")
@@ -6185,8 +6155,8 @@ brew_tap_selection_and_validation_case() {
       '{"name":"romkatv/gitstatus/extra"}' \
       '{"name":"romkatv/gitstatus","trusted":"yes"}' \
       '{"name":"romkatv/gitstatus","extra":true}'; do
-      /usr/bin/plutil -replace brew.2.tap -json "$bad_tap" "$checkout/.kaisian.json" || exit 1
-      if (parse_manifest "$checkout/.kaisian.json" "$checkout") >/dev/null 2>&1; then exit 1; fi
+      edit_json_fixture "$checkout/.kaisian.json" -replace brew.2.tap -json "$bad_tap" || exit 1
+      if (plan_manifest "$checkout/.kaisian.json" "$checkout") >/dev/null 2>&1; then exit 1; fi
     done
 
     cleanup
@@ -6222,10 +6192,9 @@ install_execution_and_flags_case() {
     acquire_lock || exit 1
     trap 'cleanup' EXIT
 
-    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
     SELECTION_MODE='profile'
     SELECTION_VALUE='default'
-    resolve_selection || exit 1
+    plan_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
     SELECTED_LANGS='python,elixir'
     SELECTED_BREW='ripgrep'
 
@@ -6375,7 +6344,7 @@ features_manifest_parsing_and_validation_failures_case() {
     acquire_lock || exit 1
     trap 'cleanup' EXIT
 
-    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+    plan_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
 
     test -f "$SANDBOX/features.tsv" || exit 1
     test -f "$SANDBOX/feature_brew.tsv" || exit 1
@@ -6416,7 +6385,7 @@ features_manifest_parsing_and_validation_failures_case() {
       local expected_err="$2"
       printf '%s\n' "$json_content" > "$fail_checkout/.kaisian.json"
       local out
-      out=$(parse_manifest "$fail_checkout/.kaisian.json" "$fail_checkout" 2>&1)
+      out=$(plan_manifest "$fail_checkout/.kaisian.json" "$fail_checkout" 2>&1)
       local st=$?
       test "$st" -ne 0 || return 1
       assert_contains "$out" "$expected_err" || return 1
@@ -6502,7 +6471,7 @@ cli_unknown_features_case() {
     acquire_lock || exit 1
     trap 'cleanup' EXIT
 
-    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+    plan_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
 
     # Unknown feature name
     SELECTED_FEATURES='unknown-feature-name'
@@ -6560,13 +6529,12 @@ feature_copy_conflict_backup_and_mode_case() {
     echo '{"old_version":true}' > "$karabiner_target_dir/karabiner.json"
     chmod 644 "$karabiner_target_dir/karabiner.json"
 
-    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
     SELECTION_MODE='groups'
     SELECTION_VALUE='home'
     SELECTED_FEATURES='karabiner-ime'
     ASSUME_YES=1
 
-    resolve_selection || exit 1
+    plan_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
     validate_custom_selections || exit 1
     build_package_map || exit 1
     validate_typed_tree || exit 1
@@ -6632,7 +6600,7 @@ feature_hotkeys_and_activate_settings_case() {
     acquire_lock || exit 1
     trap 'cleanup' EXIT
 
-    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+    plan_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
     SELECTED_FEATURES='karabiner-ime'
     validate_custom_selections || exit 1
 
@@ -6697,7 +6665,7 @@ feature_dry_run_performs_no_writes_case() {
     acquire_lock || exit 1
     trap 'cleanup' EXIT
 
-    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+    plan_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
     SELECTED_FEATURES='karabiner-ime'
     validate_custom_selections || exit 1
 
@@ -6741,7 +6709,7 @@ feature_notes_locale_case() {
     acquire_lock || exit 1
     trap 'cleanup' EXIT
 
-    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
+    plan_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
     SELECTED_FEATURES='karabiner-ime'
     validate_custom_selections || exit 1
 
@@ -6780,10 +6748,9 @@ feature_brewfile_cask_inclusion_case() {
     acquire_lock || exit 1
     trap 'cleanup' EXIT
 
-    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
     SELECTION_MODE='profile'
     SELECTION_VALUE='default'
-    resolve_selection || exit 1
+    plan_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
 
     # 1. With karabiner-ime selected
     SELECTED_FEATURES='karabiner-ime'
@@ -6832,10 +6799,9 @@ custom_langs_and_validation_case() {
     acquire_lock || exit 1
     trap 'cleanup' EXIT
 
-    parse_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
     SELECTION_MODE='groups'
     SELECTION_VALUE='home,prompt-default'
-    resolve_selection || exit 1
+    plan_manifest "$checkout/.kaisian.json" "$checkout" || exit 1
 
     # 1. Valid custom langs: zig,deno accepted and appears in mise.toml
     SELECTED_LANGS='zig,deno'
@@ -6899,7 +6865,7 @@ manifest_preview_shape_violations_case() {
       json_content=$1
       label=$2
       printf '%s\n' "$json_content" > "$SANDBOX/test_manifest.json"
-      out=$(parse_manifest "$SANDBOX/test_manifest.json" "$checkout" 2>&1)
+      out=$(plan_manifest "$SANDBOX/test_manifest.json" "$checkout" 2>&1)
       status=$?
       if test "$status" -eq 0; then
         printf 'Expected manifest to fail for %s but it passed\n' "$label" >&2

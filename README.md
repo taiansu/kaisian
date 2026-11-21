@@ -228,6 +228,19 @@ Publish installer support for new manifest fields before publishing a dotfiles
 manifest that uses them. The default installer reads the dotfiles `kaisian`
 branch; editing only dotfiles `main` does not change the released manifest.
 
+### Editing the installer
+
+Edit manifest validation in `installer/manifest.js` and group selection in
+`installer/selection.js`. Both use the same in-memory manifest. `installer/run.js`
+connects them to the macOS filesystem and fzf using `/usr/bin/osascript`; users
+do not need Node or Bun. Bash still consumes the plan's `selected.txt`,
+`unselected.txt`, and package tables.
+
+After changing these sources, run `bash scripts/assemble-setup.sh` and commit the
+updated `setup.sh` alongside them. Only the marked JavaScript block is generated;
+edit the surrounding Bash directly. `bash tests/setup_test.sh` checks that the
+embedded version is current before exercising the single-file installer.
+
 ## Web page and deployment
 
 The single-file page uses no framework or build step. In production it fetches
