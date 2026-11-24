@@ -2332,6 +2332,7 @@ run_stow() {
 }
 
 get_tool_exec() {
+  local formula_prefix candidate
   tool_name=$1
   case "$tool_name" in
     git)
@@ -2397,6 +2398,17 @@ get_tool_exec() {
         return 0
       fi
       ;;
+    git|stow|mise)
+      # An existing Homebrew can be found by absolute path even before shellenv
+      # is loaded. Its formula prefix also works when the tool is not linked.
+      test -n "$BREW_EXEC" || return 1
+      formula_prefix=$("$BREW_EXEC" --prefix "$tool_name" 2>/dev/null) || return 1
+      case "$formula_prefix" in /*) ;; *) return 1 ;; esac
+      candidate="$formula_prefix/bin/$tool_name"
+      test -f "$candidate" && test -x "$candidate" || return 1
+      printf '%s\n' "$candidate"
+      return 0
+      ;;
   esac
   return 1
 }
@@ -2450,10 +2462,10 @@ bootstrap_prerequisites() {
       test -n "$BREW_EXEC" || die bootstrap_failed "Homebrew is required to install: $missing_pkgs"
       "$BREW_EXEC" install $missing_pkgs || die bootstrap_failed "brew install $missing_pkgs failed"
       if test "${KAISIAN_GIT_EXEC+x}" = 'x' && test -z "$KAISIAN_GIT_EXEC"; then
-        KAISIAN_GIT_EXEC="$BREW_EXEC"
+        unset KAISIAN_GIT_EXEC
       fi
       if test "${KAISIAN_STOW_EXEC+x}" = 'x' && test -z "$KAISIAN_STOW_EXEC"; then
-        KAISIAN_STOW_EXEC="$BREW_EXEC"
+        unset KAISIAN_STOW_EXEC
       fi
       GIT_EXEC=$(get_tool_exec git) || die bootstrap_failed 'git executable not found after installation'
       STOW_EXEC=$(get_tool_exec stow) || die bootstrap_failed 'stow executable not found after installation'

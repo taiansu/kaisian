@@ -19,6 +19,8 @@ the selected Homebrew packages with `brew bundle` and the selected languages wit
 mise. Selected AI CLIs are installed afterward using their official installers.
 Homebrew, git, stow, and mise are always included, not selectable tools.
 Homebrew installation may require a sudo password.
+If Git, Stow, or mise is not on `PATH`, the installer also checks the selected
+Homebrew's formula prefix; you do not need to load `brew shellenv` first.
 
 ## Options
 

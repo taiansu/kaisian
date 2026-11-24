@@ -6286,6 +6286,8 @@ bootstrap_fake_brew_records_missing_case() {
     HOME="$test_home"
     acquire_lock || exit 1
     trap 'cleanup' EXIT
+    export KAISIAN_BREW_BIN_DIR="$ROOT/bootstrap-tools/bin"
+    PATH="$KAISIAN_BREW_BIN_DIR:/usr/bin:/bin"
 
     # 1. Both git and stow missing -> fake-brew records "install git stow"
     : > "$brew_log"
@@ -6322,6 +6324,15 @@ bootstrap_fake_brew_records_missing_case() {
     KAISIAN_STOW_EXEC="$mock_stow"
     bootstrap_prerequisites || exit 1
     test ! -s "$brew_log" || exit 1
+
+    # Existing Homebrew, no Homebrew directory on PATH. Install and reuse its actual Stow.
+    unset KAISIAN_STOW_EXEC
+    PATH='/usr/bin:/bin'
+    export KAISIAN_BREW_BIN_DIR="$ROOT/separate brew prefix/bin"
+    bootstrap_prerequisites || exit 1
+    test "$STOW_EXEC" = "$KAISIAN_BREW_BIN_DIR/stow" && test -x "$STOW_EXEC" || exit 1
+    bootstrap_prerequisites || exit 1
+    test "$(grep '^install ' "$brew_log")" = 'install stow' || exit 1
 
     cleanup
     trap - EXIT
