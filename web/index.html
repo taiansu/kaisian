@@ -776,6 +776,8 @@
         language: "Language",
         groups: "1. Prompt style",
         fonts: "2. Font",
+        systemFont: "Menlo (macOS default)",
+        systemFontDetail: "Built into macOS. A fresh Ghostty setup uses 15 pt; no font download is needed.",
         multiline: "Two-line prompt",
         showTime: "Show time",
         previewTime: "Example prompt timestamp",
@@ -815,6 +817,8 @@
         language: "語言",
         groups: "1. 提示字元樣式",
         fonts: "2. 字型",
+        systemFont: "Menlo（macOS 內建）",
+        systemFontDetail: "全新安裝的 Ghostty 使用 15 pt，不需另外下載字型。",
         multiline: "雙行顯示",
         showTime: "顯示時間",
         previewTime: "提示字元時間範例",
@@ -1106,7 +1110,7 @@
       container.replaceChildren();
       const promptGroup = state.manifest?.groups?.find(g => g.name === state.prompt);
       const font = state.manifest?.fonts?.find(f => f.cask === state.font || f.preview === state.font);
-      const fontPreviewFamily = font?.preview || font?.family || "monospace";
+      const fontPreviewFamily = font?.preview || font?.family || "Menlo";
       const fontStack = `"${fontPreviewFamily}", ui-monospace, "SF Mono", Menlo, Consolas, monospace`;
       byId("preview-panel").style.fontFamily = fontStack;
       container.style.fontFamily = fontStack;
@@ -1226,6 +1230,7 @@
       selectEl.className = "styled-select";
       selectEl.setAttribute("aria-label", text("fonts"));
       selectEl.setAttribute("aria-describedby", "font-detail");
+      selectEl.append(new Option(text("systemFont"), ""));
 
       for (const font of state.manifest.fonts) {
         const opt = document.createElement("option");
@@ -1251,7 +1256,7 @@
       detail.setAttribute("aria-live", "polite");
       function updateDetail() {
         const selected = state.manifest.fonts.find(font => font.cask === state.font);
-        detail.textContent = selected ? description(selected) : "";
+        detail.textContent = selected ? description(selected) : text("systemFontDetail");
       }
 
       selectEl.addEventListener("change", event => {
@@ -1677,7 +1682,6 @@
         const prompts = (state.manifest.groups ?? []).filter(g => g.kind === "prompt");
         const defaultPrompt = (state.manifest.profiles?.default ?? []).find(name => prompts.some(p => p.name === name)) || prompts[0]?.name || "";
         state.prompt = defaultPrompt;
-        state.font = state.manifest.fonts?.[0]?.cask || "";
         const forcedBrew = getForcedBrew();
         state.brew = new Set(
           (state.manifest.brew ?? [])

@@ -53,6 +53,10 @@ to empty in the CLI. mise is installed even with empty selections.
 The web generator omits the selection flag when the chosen prompt is the default
 profile's prompt and emits `--prompt NAME` otherwise.
 
+On a fresh install, Ghostty uses macOS's built-in Menlo at 15 pt. The website
+omits `--font` by default, so no font cask is installed and any existing
+`kaisian.conf` font override is left untouched.
+
 The selected font writes `~/.config/ghostty/kaisian.conf` with `font-family = ""`
 followed by `font-family = "<family>"`: Ghostty loads `config-file` includes after
 the main file and treats repeated `font-family` as fallbacks, so the reset makes the
@@ -266,7 +270,7 @@ Open `http://localhost:8765/`. On localhost the page loads
 the canonical `.kaisian.json` in the dotfiles repository. `?manifest=<url>` can
 point to another manifest (cross-origin URLs need CORS). English / Traditional
 Chinese selection is remembered locally. The page defaults to the default
-profile, the first font, every optional Homebrew tool, Python, and Node. Custom
+profile, Menlo, every optional Homebrew tool, Python, and Node. Custom
 Homebrew and mise names are validated against the installer's format rules;
 invalid input disables command copying. Homebrew performs authoritative
 existence and formula/cask classification during installer preflight. Empty
